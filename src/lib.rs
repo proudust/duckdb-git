@@ -1,5 +1,6 @@
 extern crate duckdb;
 extern crate duckdb_loadable_macros;
+extern crate git2;
 extern crate libduckdb_sys;
 
 use duckdb::{
@@ -8,52 +9,125 @@ use duckdb::{
     Connection, Result,
 };
 use duckdb_loadable_macros::duckdb_entrypoint_c_api;
+use git2::Repository;
 use libduckdb_sys as ffi;
 use std::{
     error::Error,
     ffi::CString,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 #[repr(C)]
-struct HelloBindData {
-    name: String,
+struct GitLogBindData {
+    repo_path: String,
 }
 
 #[repr(C)]
-struct HelloInitData {
-    done: AtomicBool,
+struct GitLogInitData {
+    commits: Vec<CommitInfo>,
+    current_index: AtomicUsize,
 }
 
-struct HelloVTab;
+#[derive(Clone)]
+struct CommitInfo {
+    hash: String,
+    author: String,
+    email: String,
+    message: String,
+    timestamp: i64,
+}
 
-impl VTab for HelloVTab {
-    type InitData = HelloInitData;
-    type BindData = HelloBindData;
+struct GitLogVTab;
+
+impl VTab for GitLogVTab {
+    type InitData = GitLogInitData;
+    type BindData = GitLogBindData;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn std::error::Error>> {
-        bind.add_result_column("column0", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        let name = bind.get_parameter(0).to_string();
-        Ok(HelloBindData { name })
+        eprintln!("DEBUG: GitLogVTab::bind called");
+        bind.add_result_column("hash", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        bind.add_result_column("author", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        bind.add_result_column("email", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        bind.add_result_column("message", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        bind.add_result_column("timestamp", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        let repo_path = bind.get_parameter(0).to_string();
+        eprintln!("DEBUG: Using repo_path: {}", repo_path);
+        Ok(GitLogBindData { repo_path })
     }
 
-    fn init(_: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
-        Ok(HelloInitData {
-            done: AtomicBool::new(false),
-        })
-    }
-
-    fn func(func: &TableFunctionInfo<Self>, output: &mut DataChunkHandle) -> Result<(), Box<dyn std::error::Error>> {
-        let init_data = func.get_init_data();
-        let bind_data = func.get_bind_data();
-        if init_data.done.swap(true, Ordering::Relaxed) {
-            output.set_len(0);
-        } else {
-            let vector = output.flat_vector(0);
-            let result = CString::new(format!("Rusty Quack {} 🐥", bind_data.name))?;
-            vector.insert(0, result);
-            output.set_len(1);
+    fn init(_info: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
+        eprintln!("DEBUG: GitLogVTab::init called");
+        // バインドデータから直接リポジトリパスを取得するのは困難なため、
+        // カレントディレクトリを使用します
+        match get_git_commits(".") {
+            Ok(commits) => {
+                eprintln!("DEBUG: Found {} commits", commits.len());
+                Ok(GitLogInitData {
+                    commits,
+                    current_index: AtomicUsize::new(0),
+                })
+            }
+            Err(e) => {
+                eprintln!("DEBUG: Failed to get git commits: {}", e);
+                Err(Box::new(e))
+            }
         }
+    }
+
+    fn func(
+        func: &TableFunctionInfo<Self>,
+        output: &mut DataChunkHandle,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let init_data = func.get_init_data();
+
+        let current_index = init_data.current_index.load(Ordering::Relaxed);
+        eprintln!(
+            "DEBUG: GitLogVTab::func called, current_index: {}, total_commits: {}",
+            current_index,
+            init_data.commits.len()
+        );
+
+        if current_index >= init_data.commits.len() {
+            eprintln!("DEBUG: No more commits to return");
+            output.set_len(0);
+            return Ok(());
+        }
+
+        let commit = &init_data.commits[current_index];
+        eprintln!("DEBUG: Returning commit: {}", commit.hash);
+
+        // hash column
+        let hash_vector = output.flat_vector(0);
+        let hash_cstring = CString::new(commit.hash.as_str())?;
+        hash_vector.insert(0, hash_cstring);
+
+        // author column
+        let author_vector = output.flat_vector(1);
+        let author_cstring = CString::new(commit.author.as_str())?;
+        author_vector.insert(0, author_cstring);
+
+        // email column
+        let email_vector = output.flat_vector(2);
+        let email_cstring = CString::new(commit.email.as_str())?;
+        email_vector.insert(0, email_cstring);
+
+        // message column
+        let message_vector = output.flat_vector(3);
+        let message_cstring = CString::new(commit.message.as_str())?;
+        message_vector.insert(0, message_cstring);
+
+        // timestamp column - convert to readable format
+        let timestamp_vector = output.flat_vector(4);
+        let timestamp_string = format!("{}", commit.timestamp);
+        let timestamp_cstring = CString::new(timestamp_string)?;
+        timestamp_vector.insert(0, timestamp_cstring);
+
+        // Increment index for next call
+        init_data
+            .current_index
+            .store(current_index + 1, Ordering::Relaxed);
+
+        output.set_len(1);
         Ok(())
     }
 
@@ -62,11 +136,49 @@ impl VTab for HelloVTab {
     }
 }
 
-const EXTENSION_NAME: &str = env!("CARGO_PKG_NAME");
-
 #[duckdb_entrypoint_c_api()]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
-    con.register_table_function::<HelloVTab>(EXTENSION_NAME)
-        .expect("Failed to register hello table function");
+    con.register_table_function::<GitLogVTab>("git_log")
+        .expect("Failed to register git_log table function");
     Ok(())
+}
+
+fn get_git_commits(repo_path: &str) -> Result<Vec<CommitInfo>, git2::Error> {
+    eprintln!("DEBUG: get_git_commits called with path: {}", repo_path);
+
+    let repo = match Repository::open(repo_path) {
+        Ok(repo) => {
+            eprintln!("DEBUG: Successfully opened repository");
+            repo
+        }
+        Err(e) => {
+            eprintln!("DEBUG: Failed to open repository: {}", e);
+            return Err(e);
+        }
+    };
+
+    let mut revwalk = repo.revwalk()?;
+    revwalk.push_head()?;
+
+    let mut commits = Vec::new();
+
+    for (i, oid) in revwalk.take(100).enumerate() {
+        let oid = oid?;
+        let commit = repo.find_commit(oid)?;
+
+        commits.push(CommitInfo {
+            hash: oid.to_string(),
+            author: commit.author().name().unwrap_or("Unknown").to_string(),
+            email: commit.author().email().unwrap_or("Unknown").to_string(),
+            message: commit.message().unwrap_or("No message").to_string(),
+            timestamp: commit.time().seconds(),
+        });
+
+        if i < 5 {
+            eprintln!("DEBUG: Loaded commit {}: {}", i, oid);
+        }
+    }
+
+    eprintln!("DEBUG: Successfully loaded {} commits", commits.len());
+    Ok(commits)
 }

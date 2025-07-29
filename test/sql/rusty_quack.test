@@ -1,20 +1,22 @@
 # name: test/sql/rusty_quack.test
-# description: test rusty_quack extension
-# group: [quack]
+# description: test git_log extension
+# group: [git]
 
 # Before we load the extension, this will fail
 statement error
-SELECT rusty_quack('Sam');
+SELECT * FROM git_log('.');
 ----
-Catalog Error: Scalar Function with name rusty_quack does not exist!
+Catalog Error: Table Function with name git_log does not exist!
 
 # Require statement will ensure the extension is loaded from now on
 require rusty_quack
 
-require icu
-
-# Confirm the extension works
+# Confirm the extension works - test basic git_log functionality
 query I
-SELECT * from rusty_quack('Sam');
+SELECT COUNT(*) FROM git_log('.');
 ----
-Rusty Quack Sam 🐥
+(more than 0 rows expected)
+
+# Test that we can access specific columns
+query I
+SELECT hash, author FROM git_log('.') LIMIT 1;

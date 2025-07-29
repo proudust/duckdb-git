@@ -1,5 +1,5 @@
-# name: test/sql/rusty_quack.test
-# description: test git_log extension
+# name: test/sql/git_log.test
+# description: test git_log function
 # group: [git]
 
 # Before we load the extension, this will fail
@@ -9,19 +9,19 @@ SELECT * FROM git_log('.');
 Catalog Error: Table Function with name git_log does not exist!
 
 # Require statement will ensure the extension is loaded from now on
-require rusty_quack
+require duckdb_git
 
 # Confirm the extension works - test basic git_log functionality
 query I
 SELECT COUNT(*) FROM git_log('.');
 ----
-2
+3
 
 # Test that we can access specific columns
 query II
 SELECT hash, author FROM git_log('.') ORDER BY timestamp DESC LIMIT 1;
 ----
-2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5	Proudust
+78ae3ce3e7cb6ee193569710b3213352ed1c857f	Proudust
 
 # Test that all columns are accessible
 statement ok

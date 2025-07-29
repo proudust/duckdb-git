@@ -1,5 +1,6 @@
 {
     "words": [
+        "archs",
         "cdylib",
         "cstring",
         "duckdb",
@@ -8,6 +9,7 @@
         "overriden",
         "repr",
         "staticlib",
+        "venv",
         "vtab"
     ]
 }

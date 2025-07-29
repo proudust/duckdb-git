@@ -1,5 +1,5 @@
 [package]
-name = "duckdb-git"
+name = "duckdb_git"
 version = "0.1.0"
 edition = "2021"
 

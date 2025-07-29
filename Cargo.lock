@@ -483,16 +483,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "duckdb-git"
-version = "0.1.0"
-dependencies = [
- "duckdb",
- "duckdb-loadable-macros",
- "git2",
- "libduckdb-sys",
-]
-
-[[package]]
 name = "duckdb-loadable-macros"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -502,6 +492,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.79",
+]
+
+[[package]]
+name = "duckdb_git"
+version = "0.1.0"
+dependencies = [
+ "duckdb",
+ "duckdb-loadable-macros",
+ "git2",
+ "libduckdb-sys",
 ]
 
 [[package]]

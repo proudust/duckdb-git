@@ -20,6 +20,7 @@ use std::{
 #[repr(C)]
 struct GitLogBindData {
     repo_path: String,
+    revision: Option<String>,
 }
 
 #[repr(C)]
@@ -49,14 +50,25 @@ impl VTab for GitLogVTab {
         bind.add_result_column("email", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("message", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("timestamp", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+
         let repo_path = bind.get_parameter(0).to_string();
-        Ok(GitLogBindData { repo_path })
+
+        // 名前付きパラメータ "revision" を取得
+        let revision = bind
+            .get_named_parameter("revision")
+            .map(|value| value.to_string());
+
+        Ok(GitLogBindData {
+            repo_path,
+            revision,
+        })
     }
 
-    fn init(_info: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
-        // バインドデータから直接リポジトリパスを取得するのは困難なため、
-        // カレントディレクトリを使用します
-        let commits = get_git_commits(".")?;
+    fn init(info: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
+        let bind_data = info.get_bind_data::<GitLogBindData>();
+        let bind_data = unsafe { &*bind_data };
+
+        let commits = get_git_commits(&bind_data.repo_path, bind_data.revision.as_deref())?;
         Ok(GitLogInitData {
             commits,
             current_index: AtomicUsize::new(0),
@@ -112,7 +124,16 @@ impl VTab for GitLogVTab {
     }
 
     fn parameters() -> Option<Vec<LogicalTypeHandle>> {
-        Some(vec![LogicalTypeHandle::from(LogicalTypeId::Varchar)])
+        Some(vec![
+            LogicalTypeHandle::from(LogicalTypeId::Varchar), // repo_path
+        ])
+    }
+
+    fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
+        Some(vec![(
+            "revision".to_string(),
+            LogicalTypeHandle::from(LogicalTypeId::Varchar),
+        )])
     }
 }
 
@@ -123,10 +144,24 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-fn get_git_commits(repo_path: &str) -> Result<Vec<CommitInfo>, git2::Error> {
+fn get_git_commits(
+    repo_path: &str,
+    revision: Option<&str>,
+) -> Result<Vec<CommitInfo>, git2::Error> {
     let repo = Repository::open(repo_path)?;
     let mut revwalk = repo.revwalk()?;
-    revwalk.push_head()?;
+
+    // リビジョンが指定されている場合はそれを使用、そうでなければHEADを使用
+    match revision {
+        Some(rev) => {
+            // ブランチ名やコミットハッシュを解決
+            let obj = repo.revparse_single(rev)?;
+            revwalk.push(obj.id())?;
+        }
+        None => {
+            revwalk.push_head()?;
+        }
+    }
 
     let mut commits = Vec::new();
 

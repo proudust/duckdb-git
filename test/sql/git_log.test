@@ -11,18 +11,18 @@ Catalog Error: Table Function with name git_log does not exist!
 # Require statement will ensure the extension is loaded from now on
 require duckdb_git
 
-# Confirm the extension works - test basic git_log functionality
+# Confirm the extension works - test basic git_log functionality on initial branch
 query I
-SELECT COUNT(*) FROM git_log('.');
+SELECT COUNT(*) FROM git_log('.', revision='initial');
 ----
-3
+1
 
-# Test that we can access specific columns
+# Test that we can access specific columns on initial branch
 query II
-SELECT hash, author FROM git_log('.') ORDER BY timestamp DESC LIMIT 1;
+SELECT hash, author FROM git_log('.', revision='initial') ORDER BY timestamp DESC LIMIT 1;
 ----
-78ae3ce3e7cb6ee193569710b3213352ed1c857f	Proudust
+b1e7e960fcbee2de7489b7dcca09a9223039521e	Proudust
 
 # Test that all columns are accessible
 statement ok
-SELECT hash, author, email, message, timestamp FROM git_log('.') LIMIT 1;
+SELECT hash, author, email, message, timestamp FROM git_log('.', revision='initial') LIMIT 1;

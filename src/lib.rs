@@ -44,34 +44,23 @@ impl VTab for GitLogVTab {
     type BindData = GitLogBindData;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn std::error::Error>> {
-        eprintln!("DEBUG: GitLogVTab::bind called");
         bind.add_result_column("hash", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("author", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("email", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("message", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("timestamp", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         let repo_path = bind.get_parameter(0).to_string();
-        eprintln!("DEBUG: Using repo_path: {}", repo_path);
         Ok(GitLogBindData { repo_path })
     }
 
     fn init(_info: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
-        eprintln!("DEBUG: GitLogVTab::init called");
         // バインドデータから直接リポジトリパスを取得するのは困難なため、
         // カレントディレクトリを使用します
-        match get_git_commits(".") {
-            Ok(commits) => {
-                eprintln!("DEBUG: Found {} commits", commits.len());
-                Ok(GitLogInitData {
-                    commits,
-                    current_index: AtomicUsize::new(0),
-                })
-            }
-            Err(e) => {
-                eprintln!("DEBUG: Failed to get git commits: {}", e);
-                Err(Box::new(e))
-            }
-        }
+        let commits = get_git_commits(".")?;
+        Ok(GitLogInitData {
+            commits,
+            current_index: AtomicUsize::new(0),
+        })
     }
 
     fn func(
@@ -81,22 +70,13 @@ impl VTab for GitLogVTab {
         let init_data = func.get_init_data();
 
         let current_index = init_data.current_index.load(Ordering::Relaxed);
-        eprintln!(
-            "DEBUG: GitLogVTab::func called, current_index: {}, total_commits: {}",
-            current_index,
-            init_data.commits.len()
-        );
 
         if current_index >= init_data.commits.len() {
-            eprintln!("DEBUG: No more commits to return");
             output.set_len(0);
             return Ok(());
         }
 
-        let commit = &init_data.commits[current_index];
-        eprintln!("DEBUG: Returning commit: {}", commit.hash);
-
-        // hash column
+        let commit = &init_data.commits[current_index]; // hash column
         let hash_vector = output.flat_vector(0);
         let hash_cstring = CString::new(commit.hash.as_str())?;
         hash_vector.insert(0, hash_cstring);
@@ -144,25 +124,14 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
 }
 
 fn get_git_commits(repo_path: &str) -> Result<Vec<CommitInfo>, git2::Error> {
-    eprintln!("DEBUG: get_git_commits called with path: {}", repo_path);
-
-    let repo = match Repository::open(repo_path) {
-        Ok(repo) => {
-            eprintln!("DEBUG: Successfully opened repository");
-            repo
-        }
-        Err(e) => {
-            eprintln!("DEBUG: Failed to open repository: {}", e);
-            return Err(e);
-        }
-    };
-
+    let repo = Repository::open(repo_path)?;
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
 
     let mut commits = Vec::new();
 
-    for (i, oid) in revwalk.take(100).enumerate() {
+    for oid in revwalk.take(100) {
+        // 最新100件のコミットを取得
         let oid = oid?;
         let commit = repo.find_commit(oid)?;
 
@@ -173,12 +142,7 @@ fn get_git_commits(repo_path: &str) -> Result<Vec<CommitInfo>, git2::Error> {
             message: commit.message().unwrap_or("No message").to_string(),
             timestamp: commit.time().seconds(),
         });
-
-        if i < 5 {
-            eprintln!("DEBUG: Loaded commit {}: {}", i, oid);
-        }
     }
 
-    eprintln!("DEBUG: Successfully loaded {} commits", commits.len());
     Ok(commits)
 }

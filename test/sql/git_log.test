@@ -13,29 +13,29 @@ require duckdb_git
 
 # Confirm the extension works - test basic git_log functionality on initial branch
 query I
-SELECT COUNT(*) FROM git_log('.', revision='initial');
+SELECT COUNT(*) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e');
 ----
 1
 
 # Test that we can access specific columns on initial branch
 query II
-SELECT hash, author FROM git_log('.', revision='initial') ORDER BY timestamp DESC LIMIT 1;
+SELECT hash, author FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') ORDER BY timestamp DESC LIMIT 1;
 ----
 b1e7e960fcbee2de7489b7dcca09a9223039521e	Proudust
 
 # Test that all columns are accessible including file changes
 statement ok
-SELECT hash, author, email, message, timestamp, file_changes FROM git_log('.', revision='initial') LIMIT 1;
+SELECT hash, author, email, message, timestamp, file_changes FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;
 
 # Test that file changes struct array works correctly
 query I
-SELECT len(file_changes) FROM git_log('.', revision='initial') LIMIT 1;
+SELECT len(file_changes) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;
 ----
 18
 
 # Test that file changes can be unnested and accessed
 statement ok
-SELECT hash, unnest(file_changes) as change FROM git_log('.', revision='initial') LIMIT 3;
+SELECT hash, unnest(file_changes) as change FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 3;
 
 # Test accessing struct fields directly
 statement ok
@@ -43,7 +43,7 @@ WITH expanded AS (
   SELECT
     hash[1:8] as short_hash,
     unnest(file_changes) as change
-  FROM git_log('.', revision='initial')
+  FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e')
 )
 SELECT
   short_hash,
@@ -54,5 +54,5 @@ LIMIT 3;
 
 # Test filtering by file status
 statement ok
-SELECT hash FROM git_log('.', revision='initial')
+SELECT hash FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e')
 WHERE list_filter(file_changes, x -> x.status = 'A') != [];

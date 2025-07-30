@@ -36,6 +36,13 @@ struct CommitInfo {
     email: String,
     message: String,
     timestamp: i64,
+    file_changes: Vec<FileChange>,
+}
+
+#[derive(Clone)]
+struct FileChange {
+    path: String,
+    status: String,
 }
 
 struct GitLogVTab;
@@ -50,6 +57,14 @@ impl VTab for GitLogVTab {
         bind.add_result_column("email", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("message", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("timestamp", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+
+        // file_changes: STRUCT(path VARCHAR, status VARCHAR)[]
+        let file_change_struct = LogicalTypeHandle::struct_type(&[
+            ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+            ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+        ]);
+        let file_changes_array_type = LogicalTypeHandle::list(&file_change_struct);
+        bind.add_result_column("file_changes", file_changes_array_type);
 
         let repo_path = bind.get_parameter(0).to_string();
 
@@ -114,6 +129,25 @@ impl VTab for GitLogVTab {
         let timestamp_cstring = CString::new(timestamp_string)?;
         timestamp_vector.insert(0, timestamp_cstring);
 
+        // file_changes column (struct array)
+        let mut file_changes_vector = output.list_vector(5);
+        let file_changes_struct_child = file_changes_vector.struct_child(commit.file_changes.len());
+
+        // pathフィールド (struct内の0番目のフィールド)
+        let path_child = file_changes_struct_child.child(0, commit.file_changes.len());
+        for (i, file_change) in commit.file_changes.iter().enumerate() {
+            path_child.insert(i, file_change.path.as_str());
+        }
+
+        // statusフィールド (struct内の1番目のフィールド)
+        let status_child = file_changes_struct_child.child(1, commit.file_changes.len());
+        for (i, file_change) in commit.file_changes.iter().enumerate() {
+            status_child.insert(i, file_change.status.as_str());
+        }
+
+        file_changes_vector.set_entry(0, 0, commit.file_changes.len());
+        file_changes_vector.set_len(commit.file_changes.len());
+
         // Increment index for next call
         init_data
             .current_index
@@ -170,12 +204,74 @@ fn get_git_commits(
         let oid = oid?;
         let commit = repo.find_commit(oid)?;
 
+        let mut file_changes = Vec::new();
+
+        // 各コミットについて変更されたファイルを取得
+        let parent_count = commit.parent_count();
+
+        if parent_count == 0 {
+            // 初回コミットの場合、全てのファイルを新規追加として扱う
+            let tree = commit.tree()?;
+            tree.walk(git2::TreeWalkMode::PreOrder, |_root, entry| {
+                if let Some(name) = entry.name() {
+                    file_changes.push(FileChange {
+                        path: name.to_string(),
+                        status: "A".to_string(), // Added
+                    });
+                }
+                git2::TreeWalkResult::Ok
+            })?;
+        } else {
+            // 親コミットとの差分を取得
+            let parent = commit.parent(0)?;
+            let parent_tree = parent.tree()?;
+            let current_tree = commit.tree()?;
+
+            let diff = repo.diff_tree_to_tree(Some(&parent_tree), Some(&current_tree), None)?;
+
+            diff.foreach(
+                &mut |delta, _progress| {
+                    let status = match delta.status() {
+                        git2::Delta::Added => "A",
+                        git2::Delta::Deleted => "D",
+                        git2::Delta::Modified => "M",
+                        git2::Delta::Renamed => "R",
+                        git2::Delta::Copied => "C",
+                        git2::Delta::Ignored => "I",
+                        git2::Delta::Untracked => "?",
+                        git2::Delta::Typechange => "T",
+                        _ => "U", // Unknown/Unmodified
+                    };
+
+                    let file_path = if let Some(new_file) = delta.new_file().path() {
+                        new_file.to_string_lossy().to_string()
+                    } else if let Some(old_file) = delta.old_file().path() {
+                        old_file.to_string_lossy().to_string()
+                    } else {
+                        "unknown".to_string()
+                    };
+
+                    file_changes.push(FileChange {
+                        path: file_path,
+                        status: status.to_string(),
+                    });
+
+                    true
+                },
+                None,
+                None,
+                None,
+            )?;
+        }
+
+        // 1つのコミットにつき1つのCommitInfoを作成
         commits.push(CommitInfo {
             hash: oid.to_string(),
             author: commit.author().name().unwrap_or("Unknown").to_string(),
             email: commit.author().email().unwrap_or("Unknown").to_string(),
             message: commit.message().unwrap_or("No message").to_string(),
             timestamp: commit.time().seconds(),
+            file_changes,
         });
     }
 

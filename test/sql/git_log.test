@@ -23,6 +23,36 @@ SELECT hash, author FROM git_log('.', revision='initial') ORDER BY timestamp DES
 ----
 b1e7e960fcbee2de7489b7dcca09a9223039521e	Proudust
 
-# Test that all columns are accessible
+# Test that all columns are accessible including file changes
 statement ok
-SELECT hash, author, email, message, timestamp FROM git_log('.', revision='initial') LIMIT 1;
+SELECT hash, author, email, message, timestamp, file_changes FROM git_log('.', revision='initial') LIMIT 1;
+
+# Test that file changes struct array works correctly
+query I
+SELECT len(file_changes) FROM git_log('.', revision='initial') LIMIT 1;
+----
+18
+
+# Test that file changes can be unnested and accessed
+statement ok
+SELECT hash, unnest(file_changes) as change FROM git_log('.', revision='initial') LIMIT 3;
+
+# Test accessing struct fields directly
+statement ok
+WITH expanded AS (
+  SELECT
+    hash[1:8] as short_hash,
+    unnest(file_changes) as change
+  FROM git_log('.', revision='initial')
+)
+SELECT
+  short_hash,
+  change.path,
+  change.status
+FROM expanded
+LIMIT 3;
+
+# Test filtering by file status
+statement ok
+SELECT hash FROM git_log('.', revision='initial')
+WHERE list_filter(file_changes, x -> x.status = 'A') != [];

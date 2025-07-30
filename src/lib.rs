@@ -43,6 +43,8 @@ struct CommitInfo {
 struct FileChange {
     path: String,
     status: String,
+    blob_id: String,
+    file_size: i64,
 }
 
 struct GitLogVTab;
@@ -61,10 +63,12 @@ impl VTab for GitLogVTab {
             LogicalTypeHandle::from(LogicalTypeId::TimestampTZ),
         );
 
-        // file_changes: STRUCT(path VARCHAR, status VARCHAR)[]
+        // file_changes: STRUCT(path VARCHAR, status VARCHAR, blob_id VARCHAR, file_size BIGINT)[]
         let file_change_struct = LogicalTypeHandle::struct_type(&[
             ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
             ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+            ("blob_id", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+            ("file_size", LogicalTypeHandle::from(LogicalTypeId::Bigint)),
         ]);
         let file_changes_array_type = LogicalTypeHandle::list(&file_change_struct);
         bind.add_result_column("file_changes", file_changes_array_type);
@@ -147,6 +151,18 @@ impl VTab for GitLogVTab {
             status_child.insert(i, file_change.status.as_str());
         }
 
+        // blob_idフィールド (struct内の2番目のフィールド)
+        let blob_id_child = file_changes_struct_child.child(2, commit.file_changes.len());
+        for (i, file_change) in commit.file_changes.iter().enumerate() {
+            blob_id_child.insert(i, file_change.blob_id.as_str());
+        }
+
+        // file_sizeフィールド (struct内の3番目のフィールド)
+        let mut file_size_child = file_changes_struct_child.child(3, commit.file_changes.len());
+        for (i, file_change) in commit.file_changes.iter().enumerate() {
+            file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size;
+        }
+
         file_changes_vector.set_entry(0, 0, commit.file_changes.len());
         file_changes_vector.set_len(commit.file_changes.len());
 
@@ -216,9 +232,18 @@ fn get_git_commits(
             let tree = commit.tree()?;
             tree.walk(git2::TreeWalkMode::PreOrder, |_root, entry| {
                 if let Some(name) = entry.name() {
+                    let oid = entry.id();
+                    let file_size = if let Ok(blob) = repo.find_blob(oid) {
+                        blob.size() as i64
+                    } else {
+                        0 // ディレクトリや取得できない場合は0
+                    };
+
                     file_changes.push(FileChange {
                         path: name.to_string(),
                         status: "A".to_string(), // Added
+                        blob_id: oid.to_string(),
+                        file_size,
                     });
                 }
                 git2::TreeWalkResult::Ok
@@ -253,9 +278,32 @@ fn get_git_commits(
                         "unknown".to_string()
                     };
 
+                    // blob_idとファイルサイズの取得
+                    let (blob_id, file_size) = if delta.new_file().path().is_some() {
+                        let new_oid = delta.new_file().id();
+                        let size = if let Ok(blob) = repo.find_blob(new_oid) {
+                            blob.size() as i64
+                        } else {
+                            0 // ディレクトリや削除されたファイルは0
+                        };
+                        (new_oid.to_string(), size)
+                    } else if delta.old_file().path().is_some() {
+                        let old_oid = delta.old_file().id();
+                        let size = if let Ok(blob) = repo.find_blob(old_oid) {
+                            blob.size() as i64
+                        } else {
+                            0
+                        };
+                        (old_oid.to_string(), size)
+                    } else {
+                        ("unknown".to_string(), 0)
+                    };
+
                     file_changes.push(FileChange {
                         path: file_path,
                         status: status.to_string(),
+                        blob_id,
+                        file_size,
                     });
 
                     true

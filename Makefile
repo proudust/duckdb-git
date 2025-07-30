@@ -18,6 +18,7 @@ include extension-ci-tools/makefiles/c_api_extensions/base.Makefile
 include extension-ci-tools/makefiles/c_api_extensions/rust.Makefile
 
 configure: venv platform extension_version
+	$(PYTHON_VENV_BIN) -m pip install pytz
 
 debug: build_extension_library_debug build_extension_with_metadata_debug
 release: build_extension_library_release build_extension_with_metadata_release

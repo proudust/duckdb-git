@@ -7,6 +7,7 @@
         "emcc",
         "libduckdb",
         "overriden",
+        "pytz",
         "repr",
         "staticlib",
         "venv",

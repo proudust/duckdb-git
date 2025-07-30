@@ -56,7 +56,10 @@ impl VTab for GitLogVTab {
         bind.add_result_column("author", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("email", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("message", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("timestamp", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        bind.add_result_column(
+            "timestamp",
+            LogicalTypeHandle::from(LogicalTypeId::TimestampTZ),
+        );
 
         // file_changes: STRUCT(path VARCHAR, status VARCHAR)[]
         let file_change_struct = LogicalTypeHandle::struct_type(&[
@@ -123,11 +126,10 @@ impl VTab for GitLogVTab {
         let message_cstring = CString::new(commit.message.as_str())?;
         message_vector.insert(0, message_cstring);
 
-        // timestamp column - convert to readable format
-        let timestamp_vector = output.flat_vector(4);
-        let timestamp_string = format!("{}", commit.timestamp);
-        let timestamp_cstring = CString::new(timestamp_string)?;
-        timestamp_vector.insert(0, timestamp_cstring);
+        // timestamp column - convert to microseconds for DuckDB TIMESTAMP
+        let mut timestamp_vector = output.flat_vector(4);
+        let timestamp_micros = commit.timestamp * 1_000_000; // Convert seconds to microseconds
+        timestamp_vector.as_mut_slice::<i64>()[0] = timestamp_micros;
 
         // file_changes column (struct array)
         let mut file_changes_vector = output.list_vector(5);

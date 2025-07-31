@@ -19,13 +19,19 @@ SELECT COUNT(*) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039
 
 # Test that we can access specific columns on initial branch
 query II
-SELECT hash, author FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') ORDER BY author_timestamp DESC LIMIT 1;
+SELECT commit_id, author FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') ORDER BY author_timestamp DESC LIMIT 1;
 ----
 b1e7e960fcbee2de7489b7dcca09a9223039521e	Proudust
 
-# Test that all columns are accessible including file changes
+# Test that all columns are accessible including file changes and parents
 statement ok
-SELECT hash, author, author_email, message, author_timestamp, file_changes FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;
+SELECT commit_id, author, author_email, message, author_timestamp, parents, file_changes FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;
+
+# Test that parents array works correctly for initial commit (should be empty)
+query I
+SELECT len(parents) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;
+----
+0
 
 # Test that file changes struct array works correctly
 query I
@@ -35,18 +41,18 @@ SELECT len(file_changes) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca0
 
 # Test that file changes can be unnested and accessed
 statement ok
-SELECT hash, unnest(file_changes) as change FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 3;
+SELECT commit_id, unnest(file_changes) as change FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 3;
 
 # Test accessing struct fields directly
 statement ok
 WITH expanded AS (
   SELECT
-    hash[1:8] as short_hash,
+    commit_id[1:8] as short_id,
     unnest(file_changes) as change
   FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e')
 )
 SELECT
-  short_hash,
+  short_id,
   change.path,
   change.status
 FROM expanded
@@ -54,5 +60,15 @@ LIMIT 3;
 
 # Test filtering by file status
 statement ok
-SELECT hash FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e')
+SELECT commit_id FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e')
 WHERE list_filter(file_changes, x -> x.status = 'A') != [];
+
+# Test parents column access
+statement ok
+SELECT commit_id, parents FROM git_log('.') WHERE len(parents) >= 1 LIMIT 3;
+
+# Test that commits with one parent have correct parent count
+query I
+SELECT COUNT(*) FROM git_log('.') WHERE len(parents) = 1;
+----
+12

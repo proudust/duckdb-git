@@ -32,7 +32,7 @@ struct GitLogInitData {
 
 #[derive(Clone)]
 struct CommitInfo {
-    hash: String,
+    commit_id: String,
     author: String,
     author_email: String,
     committer: String,
@@ -40,6 +40,7 @@ struct CommitInfo {
     message: String,
     author_timestamp: i64,
     committer_timestamp: i64,
+    parents: Vec<String>,
     file_changes: Vec<FileChange>,
 }
 
@@ -58,7 +59,7 @@ impl VTab for GitLogVTab {
     type BindData = GitLogBindData;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn std::error::Error>> {
-        bind.add_result_column("hash", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        bind.add_result_column("commit_id", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("author", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column(
             "author_email",
@@ -78,6 +79,11 @@ impl VTab for GitLogVTab {
             LogicalTypeHandle::from(LogicalTypeId::TimestampTZ),
         );
         bind.add_result_column("message", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+
+        // parents: VARCHAR[]
+        let parents_array_type =
+            LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        bind.add_result_column("parents", parents_array_type);
 
         // file_changes: STRUCT(path VARCHAR, status VARCHAR, blob_id VARCHAR, file_size BIGINT)[]
         let file_change_struct = LogicalTypeHandle::struct_type(&[
@@ -136,10 +142,10 @@ impl VTab for GitLogVTab {
             return Ok(());
         }
 
-        let commit = &init_data.commits[current_index]; // hash column
-        let hash_vector = output.flat_vector(0);
-        let hash_cstring = CString::new(commit.hash.as_str())?;
-        hash_vector.insert(0, hash_cstring);
+        let commit = &init_data.commits[current_index]; // commit_id column
+        let commit_id_vector = output.flat_vector(0);
+        let commit_id_cstring = CString::new(commit.commit_id.as_str())?;
+        commit_id_vector.insert(0, commit_id_cstring);
 
         // author column
         let author_vector = output.flat_vector(1);
@@ -176,8 +182,17 @@ impl VTab for GitLogVTab {
         let message_cstring = CString::new(commit.message.as_str())?;
         message_vector.insert(0, message_cstring);
 
+        // parents column (string array)
+        let mut parents_vector = output.list_vector(8);
+        let parents_child = parents_vector.child(commit.parents.len());
+        for (i, parent) in commit.parents.iter().enumerate() {
+            parents_child.insert(i, parent.as_str());
+        }
+        parents_vector.set_entry(0, 0, commit.parents.len());
+        parents_vector.set_len(commit.parents.len());
+
         // file_changes column (struct array)
-        let mut file_changes_vector = output.list_vector(8);
+        let mut file_changes_vector = output.list_vector(9);
         let file_changes_struct_child = file_changes_vector.struct_child(commit.file_changes.len());
 
         // pathフィールド (struct内の0番目のフィールド)
@@ -367,9 +382,14 @@ fn get_git_commits(
             )?;
         }
 
+        // 親コミットIDを取得
+        let parents: Vec<String> = (0..commit.parent_count())
+            .map(|i| commit.parent_id(i).unwrap().to_string())
+            .collect();
+
         // 1つのコミットにつき1つのCommitInfoを作成
         commits.push(CommitInfo {
-            hash: oid.to_string(),
+            commit_id: oid.to_string(),
             author: commit.author().name().unwrap_or("Unknown").to_string(),
             author_email: commit.author().email().unwrap_or("Unknown").to_string(),
             committer: commit.committer().name().unwrap_or("Unknown").to_string(),
@@ -377,6 +397,7 @@ fn get_git_commits(
             message: commit.message().unwrap_or("No message").to_string(),
             author_timestamp: commit.time().seconds(),
             committer_timestamp: commit.committer().when().seconds(),
+            parents,
             file_changes,
         });
     }

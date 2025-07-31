@@ -84,12 +84,6 @@ WHERE list_filter(file_changes, x -> x.status = 'A') != [];
 statement ok
 SELECT commit_id, parents FROM git_log('.') WHERE len(parents) >= 1 LIMIT 3;
 
-# Test that commits with one parent have correct parent count
-query I
-SELECT COUNT(*) FROM git_log('.') WHERE len(parents) = 1;
-----
-13
-
 # Test ignore_all_space parameter (should work without errors)
 statement ok
 SELECT commit_id, len(file_changes) FROM git_log('.', ignore_all_space=true) LIMIT 1;

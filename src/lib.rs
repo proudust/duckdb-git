@@ -55,6 +55,11 @@ struct FileChange {
     del_lines: i32,
 }
 
+struct GitContext {
+    repo: Repository,
+    ignore_all_space: bool,
+}
+
 struct GitLogVTab;
 
 impl VTab for GitLogVTab {
@@ -287,6 +292,184 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+fn get_file_changes(
+    ctx: &GitContext,
+    commit: &git2::Commit,
+) -> Result<Vec<FileChange>, git2::Error> {
+    let mut file_changes = Vec::new();
+
+    // 各コミットについて変更されたファイルを取得
+    let parent_count = commit.parent_count();
+
+    if parent_count == 0 {
+        // 初回コミットの場合、全てのファイルを新規追加として扱う
+        let tree = commit.tree()?;
+        tree.walk(git2::TreeWalkMode::PreOrder, |_root, entry| {
+            if let Some(name) = entry.name() {
+                let oid = entry.id();
+                let (file_size, add_lines) = if let Ok(blob) = ctx.repo.find_blob(oid) {
+                    let content = std::str::from_utf8(blob.content());
+                    let lines = if let Ok(text) = content {
+                        text.lines().count() as i32
+                    } else {
+                        0 // バイナリファイルの場合は0行とする
+                    };
+                    (blob.size() as i64, lines)
+                } else {
+                    (0, 0) // ディレクトリや取得できない場合は0
+                };
+
+                file_changes.push(FileChange {
+                    path: name.to_string(),
+                    status: "A".to_string(), // Added
+                    blob_id: oid.to_string(),
+                    file_size,
+                    add_lines,
+                    del_lines: 0, // 初回コミットなので削除行は0
+                });
+            }
+            git2::TreeWalkResult::Ok
+        })?;
+    } else {
+        // 親コミットとの差分を取得
+        let parent = commit.parent(0)?;
+        let parent_tree = parent.tree()?;
+        let current_tree = commit.tree()?;
+
+        let mut diff_options = git2::DiffOptions::new();
+        if ctx.ignore_all_space {
+            diff_options.ignore_whitespace(true);
+        }
+
+        let diff = ctx.repo.diff_tree_to_tree(
+            Some(&parent_tree),
+            Some(&current_tree),
+            Some(&mut diff_options),
+        )?;
+
+        // 各ファイルの統計情報を格納するマップ
+        let mut file_stats = std::collections::HashMap::new();
+
+        // まず統計情報を収集
+        diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
+            let file_path = if let Some(new_file) = delta.new_file().path() {
+                new_file.to_string_lossy().to_string()
+            } else if let Some(old_file) = delta.old_file().path() {
+                old_file.to_string_lossy().to_string()
+            } else {
+                "unknown".to_string()
+            };
+
+            let entry = file_stats.entry(file_path).or_insert((0i32, 0i32));
+
+            match line.origin() {
+                '+' => entry.0 += 1, // add_lines
+                '-' => entry.1 += 1, // del_lines
+                _ => {}
+            }
+            true
+        })?;
+
+        diff.foreach(
+            &mut |delta, _progress| {
+                let status = match delta.status() {
+                    git2::Delta::Added => "A",
+                    git2::Delta::Deleted => "D",
+                    git2::Delta::Modified => "M",
+                    git2::Delta::Renamed => "R",
+                    git2::Delta::Copied => "C",
+                    git2::Delta::Ignored => "I",
+                    git2::Delta::Untracked => "?",
+                    git2::Delta::Typechange => "T",
+                    _ => "U", // Unknown/Unmodified
+                };
+
+                let file_path = if let Some(new_file) = delta.new_file().path() {
+                    new_file.to_string_lossy().to_string()
+                } else if let Some(old_file) = delta.old_file().path() {
+                    old_file.to_string_lossy().to_string()
+                } else {
+                    "unknown".to_string()
+                };
+
+                // blob_idとファイルサイズの取得
+                let (blob_id, file_size) = if delta.new_file().path().is_some() {
+                    let new_oid = delta.new_file().id();
+                    let size = if let Ok(blob) = ctx.repo.find_blob(new_oid) {
+                        blob.size() as i64
+                    } else {
+                        0 // ディレクトリや削除されたファイルは0
+                    };
+                    (new_oid.to_string(), size)
+                } else if delta.old_file().path().is_some() {
+                    let old_oid = delta.old_file().id();
+                    let size = if let Ok(blob) = ctx.repo.find_blob(old_oid) {
+                        blob.size() as i64
+                    } else {
+                        0
+                    };
+                    (old_oid.to_string(), size)
+                } else {
+                    ("unknown".to_string(), 0)
+                };
+
+                // 統計情報から行数を取得
+                let (add_lines, del_lines) = file_stats.get(&file_path).unwrap_or(&(0, 0));
+
+                file_changes.push(FileChange {
+                    path: file_path,
+                    status: status.to_string(),
+                    blob_id,
+                    file_size,
+                    add_lines: *add_lines,
+                    del_lines: *del_lines,
+                });
+
+                true
+            },
+            None,
+            None,
+            None,
+        )?;
+    }
+
+    Ok(file_changes)
+}
+
+fn create_commit_info(ctx: &GitContext, oid: git2::Oid) -> Result<CommitInfo, git2::Error> {
+    let commit = ctx.repo.find_commit(oid)?;
+
+    // ファイル変更を取得
+    let file_changes = get_file_changes(ctx, &commit)?;
+
+    // 親コミットIDを取得
+    let parents: Vec<String> = (0..commit.parent_count())
+        .map(|i| commit.parent_id(i).unwrap().to_string())
+        .collect();
+
+    // コミット情報を事前に取得
+    let author_name = commit.author().name().unwrap_or("Unknown").to_string();
+    let author_email = commit.author().email().unwrap_or("Unknown").to_string();
+    let committer_name = commit.committer().name().unwrap_or("Unknown").to_string();
+    let committer_email = commit.committer().email().unwrap_or("Unknown").to_string();
+    let message = commit.message().unwrap_or("No message").to_string();
+    let author_timestamp = commit.time().seconds();
+    let committer_timestamp = commit.committer().when().seconds();
+
+    Ok(CommitInfo {
+        commit_id: oid.to_string(),
+        author: author_name,
+        author_email,
+        committer: committer_name,
+        committer_email,
+        message,
+        author_timestamp,
+        committer_timestamp,
+        parents,
+        file_changes,
+    })
+}
+
 fn get_git_commits(
     repo_path: &str,
     revision: Option<&str>,
@@ -294,13 +477,17 @@ fn get_git_commits(
     ignore_all_space: bool,
 ) -> Result<Vec<CommitInfo>, git2::Error> {
     let repo = Repository::open(repo_path)?;
-    let mut revwalk = repo.revwalk()?;
+    let ctx = GitContext {
+        repo,
+        ignore_all_space,
+    };
+    let mut revwalk = ctx.repo.revwalk()?;
 
     // リビジョンが指定されている場合はそれを使用、そうでなければHEADを使用
     match revision {
         Some(rev) => {
             // ブランチ名やコミットハッシュを解決
-            let obj = repo.revparse_single(rev)?;
+            let obj = ctx.repo.revparse_single(rev)?;
             revwalk.push(obj.id())?;
         }
         None => {
@@ -318,163 +505,8 @@ fn get_git_commits(
 
     for oid in revwalk_iter {
         let oid = oid?;
-        let commit = repo.find_commit(oid)?;
-
-        let mut file_changes = Vec::new();
-
-        // 各コミットについて変更されたファイルを取得
-        let parent_count = commit.parent_count();
-
-        if parent_count == 0 {
-            // 初回コミットの場合、全てのファイルを新規追加として扱う
-            let tree = commit.tree()?;
-            tree.walk(git2::TreeWalkMode::PreOrder, |_root, entry| {
-                if let Some(name) = entry.name() {
-                    let oid = entry.id();
-                    let (file_size, add_lines) = if let Ok(blob) = repo.find_blob(oid) {
-                        let content = std::str::from_utf8(blob.content());
-                        let lines = if let Ok(text) = content {
-                            text.lines().count() as i32
-                        } else {
-                            0 // バイナリファイルの場合は0行とする
-                        };
-                        (blob.size() as i64, lines)
-                    } else {
-                        (0, 0) // ディレクトリや取得できない場合は0
-                    };
-
-                    file_changes.push(FileChange {
-                        path: name.to_string(),
-                        status: "A".to_string(), // Added
-                        blob_id: oid.to_string(),
-                        file_size,
-                        add_lines,
-                        del_lines: 0, // 初回コミットなので削除行は0
-                    });
-                }
-                git2::TreeWalkResult::Ok
-            })?;
-        } else {
-            // 親コミットとの差分を取得
-            let parent = commit.parent(0)?;
-            let parent_tree = parent.tree()?;
-            let current_tree = commit.tree()?;
-
-            let mut diff_options = git2::DiffOptions::new();
-            if ignore_all_space {
-                diff_options.ignore_whitespace(true);
-            }
-
-            let diff = repo.diff_tree_to_tree(
-                Some(&parent_tree),
-                Some(&current_tree),
-                Some(&mut diff_options),
-            )?;
-
-            // 各ファイルの統計情報を格納するマップ
-            let mut file_stats = std::collections::HashMap::new();
-
-            // まず統計情報を収集
-            diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
-                let file_path = if let Some(new_file) = delta.new_file().path() {
-                    new_file.to_string_lossy().to_string()
-                } else if let Some(old_file) = delta.old_file().path() {
-                    old_file.to_string_lossy().to_string()
-                } else {
-                    "unknown".to_string()
-                };
-
-                let entry = file_stats.entry(file_path).or_insert((0i32, 0i32));
-
-                match line.origin() {
-                    '+' => entry.0 += 1, // add_lines
-                    '-' => entry.1 += 1, // del_lines
-                    _ => {}
-                }
-                true
-            })?;
-
-            diff.foreach(
-                &mut |delta, _progress| {
-                    let status = match delta.status() {
-                        git2::Delta::Added => "A",
-                        git2::Delta::Deleted => "D",
-                        git2::Delta::Modified => "M",
-                        git2::Delta::Renamed => "R",
-                        git2::Delta::Copied => "C",
-                        git2::Delta::Ignored => "I",
-                        git2::Delta::Untracked => "?",
-                        git2::Delta::Typechange => "T",
-                        _ => "U", // Unknown/Unmodified
-                    };
-
-                    let file_path = if let Some(new_file) = delta.new_file().path() {
-                        new_file.to_string_lossy().to_string()
-                    } else if let Some(old_file) = delta.old_file().path() {
-                        old_file.to_string_lossy().to_string()
-                    } else {
-                        "unknown".to_string()
-                    };
-
-                    // blob_idとファイルサイズの取得
-                    let (blob_id, file_size) = if delta.new_file().path().is_some() {
-                        let new_oid = delta.new_file().id();
-                        let size = if let Ok(blob) = repo.find_blob(new_oid) {
-                            blob.size() as i64
-                        } else {
-                            0 // ディレクトリや削除されたファイルは0
-                        };
-                        (new_oid.to_string(), size)
-                    } else if delta.old_file().path().is_some() {
-                        let old_oid = delta.old_file().id();
-                        let size = if let Ok(blob) = repo.find_blob(old_oid) {
-                            blob.size() as i64
-                        } else {
-                            0
-                        };
-                        (old_oid.to_string(), size)
-                    } else {
-                        ("unknown".to_string(), 0)
-                    };
-
-                    // 統計情報から行数を取得
-                    let (add_lines, del_lines) = file_stats.get(&file_path).unwrap_or(&(0, 0));
-
-                    file_changes.push(FileChange {
-                        path: file_path,
-                        status: status.to_string(),
-                        blob_id,
-                        file_size,
-                        add_lines: *add_lines,
-                        del_lines: *del_lines,
-                    });
-
-                    true
-                },
-                None,
-                None,
-                None,
-            )?;
-        }
-
-        // 親コミットIDを取得
-        let parents: Vec<String> = (0..commit.parent_count())
-            .map(|i| commit.parent_id(i).unwrap().to_string())
-            .collect();
-
-        // 1つのコミットにつき1つのCommitInfoを作成
-        commits.push(CommitInfo {
-            commit_id: oid.to_string(),
-            author: commit.author().name().unwrap_or("Unknown").to_string(),
-            author_email: commit.author().email().unwrap_or("Unknown").to_string(),
-            committer: commit.committer().name().unwrap_or("Unknown").to_string(),
-            committer_email: commit.committer().email().unwrap_or("Unknown").to_string(),
-            message: commit.message().unwrap_or("No message").to_string(),
-            author_timestamp: commit.time().seconds(),
-            committer_timestamp: commit.committer().when().seconds(),
-            parents,
-            file_changes,
-        });
+        let commit_info = create_commit_info(&ctx, oid)?;
+        commits.push(commit_info);
     }
 
     Ok(commits)

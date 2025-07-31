@@ -27,7 +27,7 @@ struct GitLogBindData {
 
 #[repr(C)]
 struct GitLogInitData {
-    commits: Vec<CommitInfo>,
+    commit_ids: Vec<git2::Oid>,
     current_index: AtomicUsize,
 }
 
@@ -135,14 +135,36 @@ impl VTab for GitLogVTab {
         let bind_data = info.get_bind_data::<GitLogBindData>();
         let bind_data = unsafe { &*bind_data };
 
-        let commits = get_git_commits(
-            &bind_data.repo_path,
-            bind_data.revision.as_deref(),
-            bind_data.max_count,
-            bind_data.ignore_all_space,
-        )?;
+        // Gitリポジトリを開く
+        let repo = Repository::open(&bind_data.repo_path)?;
+        let mut revwalk = repo.revwalk()?;
+
+        // リビジョンが指定されている場合はそれを使用、そうでなければHEADを使用
+        match &bind_data.revision {
+            Some(rev) => {
+                // ブランチ名やコミットハッシュを解決
+                let obj = repo.revparse_single(rev)?;
+                revwalk.push(obj.id())?;
+            }
+            None => {
+                revwalk.push_head()?;
+            }
+        }
+
+        // max_countが指定されていればその値を使用、そうでなければデフォルトで全件を取得
+        let revwalk_iter: Box<dyn Iterator<Item = _>> = match bind_data.max_count {
+            Some(count) => Box::new(revwalk.take(count)),
+            None => Box::new(revwalk),
+        };
+
+        // 全てのコミットOIDを収集
+        let mut commit_oids = Vec::new();
+        for oid in revwalk_iter {
+            commit_oids.push(oid?);
+        }
+
         Ok(GitLogInitData {
-            commits,
+            commit_ids: commit_oids,
             current_index: AtomicUsize::new(0),
         })
     }
@@ -152,15 +174,27 @@ impl VTab for GitLogVTab {
         output: &mut DataChunkHandle,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let init_data = func.get_init_data();
+        let bind_data = func.get_bind_data();
 
         let current_index = init_data.current_index.load(Ordering::Relaxed);
 
-        if current_index >= init_data.commits.len() {
+        // コミットOIDリストから取得
+        if current_index >= init_data.commit_ids.len() {
             output.set_len(0);
             return Ok(());
         }
 
-        let commit = &init_data.commits[current_index]; // commit_id column
+        let oid = init_data.commit_ids[current_index];
+
+        // Gitリポジトリを開く（コミット情報取得のため）
+        let repo = Repository::open(&bind_data.repo_path)?;
+        let ctx = GitContext {
+            repo,
+            ignore_all_space: bind_data.ignore_all_space,
+        };
+        let commit = create_commit_info(&ctx, oid)?;
+
+        // commit_id column
         let commit_id_vector = output.flat_vector(0);
         let commit_id_cstring = CString::new(commit.commit_id.as_str())?;
         commit_id_vector.insert(0, commit_id_cstring);
@@ -468,46 +502,4 @@ fn create_commit_info(ctx: &GitContext, oid: git2::Oid) -> Result<CommitInfo, gi
         parents,
         file_changes,
     })
-}
-
-fn get_git_commits(
-    repo_path: &str,
-    revision: Option<&str>,
-    max_count: Option<usize>,
-    ignore_all_space: bool,
-) -> Result<Vec<CommitInfo>, git2::Error> {
-    let repo = Repository::open(repo_path)?;
-    let ctx = GitContext {
-        repo,
-        ignore_all_space,
-    };
-    let mut revwalk = ctx.repo.revwalk()?;
-
-    // リビジョンが指定されている場合はそれを使用、そうでなければHEADを使用
-    match revision {
-        Some(rev) => {
-            // ブランチ名やコミットハッシュを解決
-            let obj = ctx.repo.revparse_single(rev)?;
-            revwalk.push(obj.id())?;
-        }
-        None => {
-            revwalk.push_head()?;
-        }
-    }
-
-    let mut commits = Vec::new();
-
-    // max_countが指定されていればその値を使用、そうでなければデフォルトで全件を取得
-    let revwalk_iter: Box<dyn Iterator<Item = _>> = match max_count {
-        Some(count) => Box::new(revwalk.take(count)),
-        None => Box::new(revwalk),
-    };
-
-    for oid in revwalk_iter {
-        let oid = oid?;
-        let commit_info = create_commit_info(&ctx, oid)?;
-        commits.push(commit_info);
-    }
-
-    Ok(commits)
 }

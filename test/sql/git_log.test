@@ -19,13 +19,13 @@ SELECT COUNT(*) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039
 
 # Test that we can access specific columns on initial branch
 query II
-SELECT hash, author FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') ORDER BY timestamp DESC LIMIT 1;
+SELECT hash, author FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') ORDER BY author_timestamp DESC LIMIT 1;
 ----
 b1e7e960fcbee2de7489b7dcca09a9223039521e	Proudust
 
 # Test that all columns are accessible including file changes
 statement ok
-SELECT hash, author, email, message, timestamp, file_changes FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;
+SELECT hash, author, author_email, message, author_timestamp, file_changes FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;
 
 # Test that file changes struct array works correctly
 query I

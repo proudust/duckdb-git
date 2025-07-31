@@ -34,9 +34,12 @@ struct GitLogInitData {
 struct CommitInfo {
     hash: String,
     author: String,
-    email: String,
+    author_email: String,
+    committer: String,
+    committer_email: String,
     message: String,
-    timestamp: i64,
+    author_timestamp: i64,
+    committer_timestamp: i64,
     file_changes: Vec<FileChange>,
 }
 
@@ -57,12 +60,24 @@ impl VTab for GitLogVTab {
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn std::error::Error>> {
         bind.add_result_column("hash", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("author", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("email", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("message", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column(
-            "timestamp",
+            "author_email",
+            LogicalTypeHandle::from(LogicalTypeId::Varchar),
+        );
+        bind.add_result_column(
+            "author_timestamp",
             LogicalTypeHandle::from(LogicalTypeId::TimestampTZ),
         );
+        bind.add_result_column("committer", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        bind.add_result_column(
+            "committer_email",
+            LogicalTypeHandle::from(LogicalTypeId::Varchar),
+        );
+        bind.add_result_column(
+            "committer_timestamp",
+            LogicalTypeHandle::from(LogicalTypeId::TimestampTZ),
+        );
+        bind.add_result_column("message", LogicalTypeHandle::from(LogicalTypeId::Varchar));
 
         // file_changes: STRUCT(path VARCHAR, status VARCHAR, blob_id VARCHAR, file_size BIGINT)[]
         let file_change_struct = LogicalTypeHandle::struct_type(&[
@@ -131,23 +146,38 @@ impl VTab for GitLogVTab {
         let author_cstring = CString::new(commit.author.as_str())?;
         author_vector.insert(0, author_cstring);
 
-        // email column
+        // author_email column
         let email_vector = output.flat_vector(2);
-        let email_cstring = CString::new(commit.email.as_str())?;
+        let email_cstring = CString::new(commit.author_email.as_str())?;
         email_vector.insert(0, email_cstring);
 
+        // author_timestamp column - convert to microseconds for DuckDB TIMESTAMP
+        let mut author_timestamp_vector = output.flat_vector(3);
+        let author_timestamp_micros = commit.author_timestamp * 1_000_000; // Convert seconds to microseconds
+        author_timestamp_vector.as_mut_slice::<i64>()[0] = author_timestamp_micros;
+
+        // committer column
+        let committer_vector = output.flat_vector(4);
+        let committer_cstring = CString::new(commit.committer.as_str())?;
+        committer_vector.insert(0, committer_cstring);
+
+        // committer_email column
+        let committer_email_vector = output.flat_vector(5);
+        let committer_email_cstring = CString::new(commit.committer_email.as_str())?;
+        committer_email_vector.insert(0, committer_email_cstring);
+
+        // committer_timestamp column - convert to microseconds for DuckDB TIMESTAMP
+        let mut committer_timestamp_vector = output.flat_vector(6);
+        let committer_timestamp_micros = commit.committer_timestamp * 1_000_000; // Convert seconds to microseconds
+        committer_timestamp_vector.as_mut_slice::<i64>()[0] = committer_timestamp_micros;
+
         // message column
-        let message_vector = output.flat_vector(3);
+        let message_vector = output.flat_vector(7);
         let message_cstring = CString::new(commit.message.as_str())?;
         message_vector.insert(0, message_cstring);
 
-        // timestamp column - convert to microseconds for DuckDB TIMESTAMP
-        let mut timestamp_vector = output.flat_vector(4);
-        let timestamp_micros = commit.timestamp * 1_000_000; // Convert seconds to microseconds
-        timestamp_vector.as_mut_slice::<i64>()[0] = timestamp_micros;
-
         // file_changes column (struct array)
-        let mut file_changes_vector = output.list_vector(5);
+        let mut file_changes_vector = output.list_vector(8);
         let file_changes_struct_child = file_changes_vector.struct_child(commit.file_changes.len());
 
         // pathフィールド (struct内の0番目のフィールド)
@@ -341,9 +371,12 @@ fn get_git_commits(
         commits.push(CommitInfo {
             hash: oid.to_string(),
             author: commit.author().name().unwrap_or("Unknown").to_string(),
-            email: commit.author().email().unwrap_or("Unknown").to_string(),
+            author_email: commit.author().email().unwrap_or("Unknown").to_string(),
+            committer: commit.committer().name().unwrap_or("Unknown").to_string(),
+            committer_email: commit.committer().email().unwrap_or("Unknown").to_string(),
             message: commit.message().unwrap_or("No message").to_string(),
-            timestamp: commit.time().seconds(),
+            author_timestamp: commit.time().seconds(),
+            committer_timestamp: commit.committer().when().seconds(),
             file_changes,
         });
     }

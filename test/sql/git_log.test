@@ -88,4 +88,16 @@ SELECT commit_id, parents FROM git_log('.') WHERE len(parents) >= 1 LIMIT 3;
 query I
 SELECT COUNT(*) FROM git_log('.') WHERE len(parents) = 1;
 ----
-12
+13
+
+# Test ignore_all_space parameter (should work without errors)
+statement ok
+SELECT commit_id, len(file_changes) FROM git_log('.', ignore_all_space=true) LIMIT 1;
+
+# Test ignore_all_space parameter set to false
+statement ok
+SELECT commit_id, len(file_changes) FROM git_log('.', ignore_all_space=false) LIMIT 1;
+
+# Test that ignore_all_space parameter defaults to false
+statement ok
+SELECT commit_id FROM git_log('.') WHERE commit_id = (SELECT commit_id FROM git_log('.', ignore_all_space=false) LIMIT 1) LIMIT 1;

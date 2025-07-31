@@ -22,6 +22,7 @@ struct GitLogBindData {
     repo_path: String,
     revision: Option<String>,
     max_count: Option<usize>,
+    ignore_all_space: bool,
 }
 
 #[repr(C)]
@@ -111,10 +112,17 @@ impl VTab for GitLogVTab {
             .get_named_parameter("max_count")
             .and_then(|value| value.to_string().parse::<usize>().ok());
 
+        // 名前付きパラメータ "ignore_all_space" を取得
+        let ignore_all_space = bind
+            .get_named_parameter("ignore_all_space")
+            .map(|value| value.to_string().to_lowercase() == "true")
+            .unwrap_or(false);
+
         Ok(GitLogBindData {
             repo_path,
             revision,
             max_count,
+            ignore_all_space,
         })
     }
 
@@ -126,6 +134,7 @@ impl VTab for GitLogVTab {
             &bind_data.repo_path,
             bind_data.revision.as_deref(),
             bind_data.max_count,
+            bind_data.ignore_all_space,
         )?;
         Ok(GitLogInitData {
             commits,
@@ -263,6 +272,10 @@ impl VTab for GitLogVTab {
                 "max_count".to_string(),
                 LogicalTypeHandle::from(LogicalTypeId::Integer),
             ),
+            (
+                "ignore_all_space".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Boolean),
+            ),
         ])
     }
 }
@@ -278,6 +291,7 @@ fn get_git_commits(
     repo_path: &str,
     revision: Option<&str>,
     max_count: Option<usize>,
+    ignore_all_space: bool,
 ) -> Result<Vec<CommitInfo>, git2::Error> {
     let repo = Repository::open(repo_path)?;
     let mut revwalk = repo.revwalk()?;
@@ -346,7 +360,16 @@ fn get_git_commits(
             let parent_tree = parent.tree()?;
             let current_tree = commit.tree()?;
 
-            let diff = repo.diff_tree_to_tree(Some(&parent_tree), Some(&current_tree), None)?;
+            let mut diff_options = git2::DiffOptions::new();
+            if ignore_all_space {
+                diff_options.ignore_whitespace(true);
+            }
+
+            let diff = repo.diff_tree_to_tree(
+                Some(&parent_tree),
+                Some(&current_tree),
+                Some(&mut diff_options),
+            )?;
 
             // 各ファイルの統計情報を格納するマップ
             let mut file_stats = std::collections::HashMap::new();

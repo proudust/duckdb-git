@@ -21,6 +21,7 @@ use std::{
 struct GitLogBindData {
     repo_path: String,
     revision: Option<String>,
+    max_count: Option<usize>,
 }
 
 #[repr(C)]
@@ -80,9 +81,15 @@ impl VTab for GitLogVTab {
             .get_named_parameter("revision")
             .map(|value| value.to_string());
 
+        // 名前付きパラメータ "max_count" を取得
+        let max_count = bind
+            .get_named_parameter("max_count")
+            .and_then(|value| value.to_string().parse::<usize>().ok());
+
         Ok(GitLogBindData {
             repo_path,
             revision,
+            max_count,
         })
     }
 
@@ -90,7 +97,11 @@ impl VTab for GitLogVTab {
         let bind_data = info.get_bind_data::<GitLogBindData>();
         let bind_data = unsafe { &*bind_data };
 
-        let commits = get_git_commits(&bind_data.repo_path, bind_data.revision.as_deref())?;
+        let commits = get_git_commits(
+            &bind_data.repo_path,
+            bind_data.revision.as_deref(),
+            bind_data.max_count,
+        )?;
         Ok(GitLogInitData {
             commits,
             current_index: AtomicUsize::new(0),
@@ -182,10 +193,16 @@ impl VTab for GitLogVTab {
     }
 
     fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
-        Some(vec![(
-            "revision".to_string(),
-            LogicalTypeHandle::from(LogicalTypeId::Varchar),
-        )])
+        Some(vec![
+            (
+                "revision".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Varchar),
+            ),
+            (
+                "max_count".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Integer),
+            ),
+        ])
     }
 }
 
@@ -199,6 +216,7 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
 fn get_git_commits(
     repo_path: &str,
     revision: Option<&str>,
+    max_count: Option<usize>,
 ) -> Result<Vec<CommitInfo>, git2::Error> {
     let repo = Repository::open(repo_path)?;
     let mut revwalk = repo.revwalk()?;
@@ -217,8 +235,13 @@ fn get_git_commits(
 
     let mut commits = Vec::new();
 
-    for oid in revwalk.take(100) {
-        // 最新100件のコミットを取得
+    // max_countが指定されていればその値を使用、そうでなければデフォルトで全件を取得
+    let revwalk_iter: Box<dyn Iterator<Item = _>> = match max_count {
+        Some(count) => Box::new(revwalk.take(count)),
+        None => Box::new(revwalk),
+    };
+
+    for oid in revwalk_iter {
         let oid = oid?;
         let commit = repo.find_commit(oid)?;
 

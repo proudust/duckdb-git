@@ -43,6 +43,23 @@ SELECT len(file_changes) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca0
 statement ok
 SELECT commit_id, unnest(file_changes) as change FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 3;
 
+# Test that add_lines and del_lines fields are accessible
+statement ok
+WITH changes AS (
+  SELECT unnest(file_changes) as change
+  FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e')
+)
+SELECT change.path, change.add_lines, change.del_lines FROM changes LIMIT 3;
+
+# Test that initial commit has positive add_lines and zero del_lines
+query I
+SELECT COUNT(*) FROM (
+  SELECT unnest(file_changes) as change
+  FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e')
+) WHERE change.add_lines > 0 AND change.del_lines = 0;
+----
+11
+
 # Test accessing struct fields directly
 statement ok
 WITH expanded AS (

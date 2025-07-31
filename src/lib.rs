@@ -50,6 +50,8 @@ struct FileChange {
     status: String,
     blob_id: String,
     file_size: i64,
+    add_lines: i32,
+    del_lines: i32,
 }
 
 struct GitLogVTab;
@@ -85,12 +87,14 @@ impl VTab for GitLogVTab {
             LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("parents", parents_array_type);
 
-        // file_changes: STRUCT(path VARCHAR, status VARCHAR, blob_id VARCHAR, file_size BIGINT)[]
+        // file_changes: STRUCT(path VARCHAR, status VARCHAR, blob_id VARCHAR, file_size BIGINT, add_lines INTEGER, del_lines INTEGER)[]
         let file_change_struct = LogicalTypeHandle::struct_type(&[
             ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
             ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
             ("blob_id", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
             ("file_size", LogicalTypeHandle::from(LogicalTypeId::Bigint)),
+            ("add_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
+            ("del_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
         ]);
         let file_changes_array_type = LogicalTypeHandle::list(&file_change_struct);
         bind.add_result_column("file_changes", file_changes_array_type);
@@ -219,6 +223,18 @@ impl VTab for GitLogVTab {
             file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size;
         }
 
+        // add_linesフィールド (struct内の4番目のフィールド)
+        let mut add_lines_child = file_changes_struct_child.child(4, commit.file_changes.len());
+        for (i, file_change) in commit.file_changes.iter().enumerate() {
+            add_lines_child.as_mut_slice::<i32>()[i] = file_change.add_lines;
+        }
+
+        // del_linesフィールド (struct内の5番目のフィールド)
+        let mut del_lines_child = file_changes_struct_child.child(5, commit.file_changes.len());
+        for (i, file_change) in commit.file_changes.iter().enumerate() {
+            del_lines_child.as_mut_slice::<i32>()[i] = file_change.del_lines;
+        }
+
         file_changes_vector.set_entry(0, 0, commit.file_changes.len());
         file_changes_vector.set_len(commit.file_changes.len());
 
@@ -301,10 +317,16 @@ fn get_git_commits(
             tree.walk(git2::TreeWalkMode::PreOrder, |_root, entry| {
                 if let Some(name) = entry.name() {
                     let oid = entry.id();
-                    let file_size = if let Ok(blob) = repo.find_blob(oid) {
-                        blob.size() as i64
+                    let (file_size, add_lines) = if let Ok(blob) = repo.find_blob(oid) {
+                        let content = std::str::from_utf8(blob.content());
+                        let lines = if let Ok(text) = content {
+                            text.lines().count() as i32
+                        } else {
+                            0 // バイナリファイルの場合は0行とする
+                        };
+                        (blob.size() as i64, lines)
                     } else {
-                        0 // ディレクトリや取得できない場合は0
+                        (0, 0) // ディレクトリや取得できない場合は0
                     };
 
                     file_changes.push(FileChange {
@@ -312,6 +334,8 @@ fn get_git_commits(
                         status: "A".to_string(), // Added
                         blob_id: oid.to_string(),
                         file_size,
+                        add_lines,
+                        del_lines: 0, // 初回コミットなので削除行は0
                     });
                 }
                 git2::TreeWalkResult::Ok
@@ -323,6 +347,29 @@ fn get_git_commits(
             let current_tree = commit.tree()?;
 
             let diff = repo.diff_tree_to_tree(Some(&parent_tree), Some(&current_tree), None)?;
+
+            // 各ファイルの統計情報を格納するマップ
+            let mut file_stats = std::collections::HashMap::new();
+
+            // まず統計情報を収集
+            diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
+                let file_path = if let Some(new_file) = delta.new_file().path() {
+                    new_file.to_string_lossy().to_string()
+                } else if let Some(old_file) = delta.old_file().path() {
+                    old_file.to_string_lossy().to_string()
+                } else {
+                    "unknown".to_string()
+                };
+
+                let entry = file_stats.entry(file_path).or_insert((0i32, 0i32));
+
+                match line.origin() {
+                    '+' => entry.0 += 1, // add_lines
+                    '-' => entry.1 += 1, // del_lines
+                    _ => {}
+                }
+                true
+            })?;
 
             diff.foreach(
                 &mut |delta, _progress| {
@@ -367,11 +414,16 @@ fn get_git_commits(
                         ("unknown".to_string(), 0)
                     };
 
+                    // 統計情報から行数を取得
+                    let (add_lines, del_lines) = file_stats.get(&file_path).unwrap_or(&(0, 0));
+
                     file_changes.push(FileChange {
                         path: file_path,
                         status: status.to_string(),
                         blob_id,
                         file_size,
+                        add_lines: *add_lines,
+                        del_lines: *del_lines,
                     });
 
                     true

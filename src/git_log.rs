@@ -22,18 +22,69 @@ impl DiffMerges {
     }
 }
 
-#[derive(Clone)]
-pub struct Commit {
-    pub commit_id: String,
-    pub author: String,
-    pub author_email: String,
-    pub committer: String,
-    pub committer_email: String,
-    pub message: String,
-    pub author_timestamp: i64,
-    pub committer_timestamp: i64,
-    pub parents: Vec<String>,
-    pub file_changes: Vec<FileChange>,
+pub struct Commit<'a> {
+    ctx: &'a GitContext,
+    commit: git2::Commit<'a>,
+    author: git2::Signature<'a>,
+    committer: git2::Signature<'a>,
+}
+
+impl<'a> Commit<'a> {
+    pub fn new(ctx: &'a GitContext, oid: git2::Oid) -> Result<Self, git2::Error> {
+        let commit = ctx.repo.find_commit(oid)?;
+        let author = commit.author().to_owned();
+        let committer = commit.committer().to_owned();
+        Ok(Commit {
+            ctx,
+            commit,
+            author,
+            committer,
+        })
+    }
+
+    pub fn author_name(&self) -> &[u8] {
+        self.author.name_bytes()
+    }
+
+    pub fn author_email(&self) -> &[u8] {
+        self.author.email_bytes()
+    }
+
+    pub fn author_timestamp(&self) -> i64 {
+        self.commit.time().seconds()
+    }
+
+    pub fn committer_name(&self) -> &[u8] {
+        self.committer.name_bytes()
+    }
+
+    pub fn committer_email(&self) -> &[u8] {
+        self.committer.email_bytes()
+    }
+
+    pub fn committer_timestamp(&self) -> i64 {
+        self.committer.when().seconds()
+    }
+
+    pub fn message(&self) -> &[u8] {
+        self.commit.message_bytes()
+    }
+
+    pub fn parents(&self) -> Vec<String> {
+        (0..self.commit.parent_count())
+            .map(|i| self.commit.parent_id(i).unwrap().to_string())
+            .collect()
+    }
+
+    pub fn file_changes(&self) -> Result<Vec<FileChange>, git2::Error> {
+        if self.ctx.diff_merges.should_skip_file_changes() {
+            return Ok(Vec::new());
+        }
+
+        // コミットを直接参照
+        let commit = &self.commit;
+        self.ctx.get_file_changes(commit)
+    }
 }
 
 #[derive(Clone)]
@@ -101,41 +152,7 @@ impl GitContext {
     }
 
     pub fn get_commit(&self, oid: git2::Oid) -> Result<Commit, git2::Error> {
-        let commit = self.repo.find_commit(oid)?;
-
-        // diff_mergesの設定に基づいてファイル変更を取得するかどうか決定
-        let file_changes = if self.diff_merges.should_skip_file_changes() {
-            Vec::new() // ファイル変更解析をスキップ
-        } else {
-            self.get_file_changes(&commit)?
-        };
-
-        // 親コミットIDを取得
-        let parents: Vec<String> = (0..commit.parent_count())
-            .map(|i| commit.parent_id(i).unwrap().to_string())
-            .collect();
-
-        // コミット情報を事前に取得
-        let author_name = commit.author().name().unwrap_or("Unknown").to_string();
-        let author_email = commit.author().email().unwrap_or("Unknown").to_string();
-        let committer_name = commit.committer().name().unwrap_or("Unknown").to_string();
-        let committer_email = commit.committer().email().unwrap_or("Unknown").to_string();
-        let message = commit.message().unwrap_or("No message").to_string();
-        let author_timestamp = commit.time().seconds();
-        let committer_timestamp = commit.committer().when().seconds();
-
-        Ok(Commit {
-            commit_id: oid.to_string(),
-            author: author_name,
-            author_email,
-            committer: committer_name,
-            committer_email,
-            message,
-            author_timestamp,
-            committer_timestamp,
-            parents,
-            file_changes,
-        })
+        Commit::new(self, oid)
     }
 
     pub fn get_file_changes(&self, commit: &git2::Commit) -> Result<Vec<FileChange>, git2::Error> {

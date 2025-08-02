@@ -15,7 +15,6 @@ use git_log::{DiffMerges, GitContext};
 use libduckdb_sys as ffi;
 use std::{
     error::Error,
-    ffi::CString,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -168,98 +167,93 @@ impl VTab for GitLogVTab {
 
         // commit_id column
         let commit_id_vector = output.flat_vector(0);
-        let commit_id_cstring = CString::new(commit.commit_id.as_str())?;
-        commit_id_vector.insert(0, commit_id_cstring);
+        commit_id_vector.insert(0, &oid.to_string());
 
         // author column
         let author_vector = output.flat_vector(1);
-        let author_cstring = CString::new(commit.author.as_str())?;
-        author_vector.insert(0, author_cstring);
+        author_vector.insert(0, commit.author_name());
 
         // author_email column
         let email_vector = output.flat_vector(2);
-        let email_cstring = CString::new(commit.author_email.as_str())?;
-        email_vector.insert(0, email_cstring);
+        email_vector.insert(0, commit.author_email());
 
         // author_timestamp column - convert to microseconds for DuckDB TIMESTAMP
         let mut author_timestamp_vector = output.flat_vector(3);
-        let author_timestamp_micros = commit.author_timestamp * 1_000_000; // Convert seconds to microseconds
+        let author_timestamp_micros = commit.author_timestamp() * 1_000_000; // Convert seconds to microseconds
         author_timestamp_vector.as_mut_slice::<i64>()[0] = author_timestamp_micros;
 
         // committer column
         let committer_vector = output.flat_vector(4);
-        let committer_cstring = CString::new(commit.committer.as_str())?;
-        committer_vector.insert(0, committer_cstring);
+        committer_vector.insert(0, commit.committer_name());
 
         // committer_email column
         let committer_email_vector = output.flat_vector(5);
-        let committer_email_cstring = CString::new(commit.committer_email.as_str())?;
-        committer_email_vector.insert(0, committer_email_cstring);
+        committer_email_vector.insert(0, commit.committer_email());
 
         // committer_timestamp column - convert to microseconds for DuckDB TIMESTAMP
         let mut committer_timestamp_vector = output.flat_vector(6);
-        let committer_timestamp_micros = commit.committer_timestamp * 1_000_000; // Convert seconds to microseconds
+        let committer_timestamp_micros = commit.committer_timestamp() * 1_000_000; // Convert seconds to microseconds
         committer_timestamp_vector.as_mut_slice::<i64>()[0] = committer_timestamp_micros;
 
         // message column
         let message_vector = output.flat_vector(7);
-        let message_cstring = CString::new(commit.message.as_str())?;
-        message_vector.insert(0, message_cstring);
+        message_vector.insert(0, commit.message());
 
         // parents column (string array)
+        let parents = commit.parents();
         let mut parents_vector = output.list_vector(8);
-        let parents_child = parents_vector.child(commit.parents.len());
-        for (i, parent) in commit.parents.iter().enumerate() {
+        let parents_child = parents_vector.child(parents.len());
+        for (i, parent) in parents.iter().enumerate() {
             parents_child.insert(i, parent.as_str());
         }
-        parents_vector.set_entry(0, 0, commit.parents.len());
-        parents_vector.set_len(commit.parents.len());
+        parents_vector.set_entry(0, 0, parents.len());
+        parents_vector.set_len(parents.len());
 
         // file_changes列の処理（diff_merges=offの場合はスキップ）
         if !bind_data.diff_merges.should_skip_file_changes() {
+            let file_changes = commit.file_changes()?;
             // file_changes column (struct array) - インデックス9
             let mut file_changes_vector = output.list_vector(9);
-            let file_changes_struct_child =
-                file_changes_vector.struct_child(commit.file_changes.len());
+            let file_changes_struct_child = file_changes_vector.struct_child(file_changes.len());
 
             // pathフィールド (struct内の0番目のフィールド)
-            let path_child = file_changes_struct_child.child(0, commit.file_changes.len());
-            for (i, file_change) in commit.file_changes.iter().enumerate() {
+            let path_child = file_changes_struct_child.child(0, file_changes.len());
+            for (i, file_change) in file_changes.iter().enumerate() {
                 path_child.insert(i, file_change.path.as_str());
             }
 
             // statusフィールド (struct内の1番目のフィールド)
-            let status_child = file_changes_struct_child.child(1, commit.file_changes.len());
-            for (i, file_change) in commit.file_changes.iter().enumerate() {
+            let status_child = file_changes_struct_child.child(1, file_changes.len());
+            for (i, file_change) in file_changes.iter().enumerate() {
                 status_child.insert(i, file_change.status.as_str());
             }
 
             // blob_idフィールド (struct内の2番目のフィールド)
-            let blob_id_child = file_changes_struct_child.child(2, commit.file_changes.len());
-            for (i, file_change) in commit.file_changes.iter().enumerate() {
+            let blob_id_child = file_changes_struct_child.child(2, file_changes.len());
+            for (i, file_change) in file_changes.iter().enumerate() {
                 blob_id_child.insert(i, file_change.blob_id.as_str());
             }
 
             // file_sizeフィールド (struct内の3番目のフィールド)
-            let mut file_size_child = file_changes_struct_child.child(3, commit.file_changes.len());
-            for (i, file_change) in commit.file_changes.iter().enumerate() {
+            let mut file_size_child = file_changes_struct_child.child(3, file_changes.len());
+            for (i, file_change) in file_changes.iter().enumerate() {
                 file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size;
             }
 
             // add_linesフィールド (struct内の4番目のフィールド)
-            let mut add_lines_child = file_changes_struct_child.child(4, commit.file_changes.len());
-            for (i, file_change) in commit.file_changes.iter().enumerate() {
+            let mut add_lines_child = file_changes_struct_child.child(4, file_changes.len());
+            for (i, file_change) in file_changes.iter().enumerate() {
                 add_lines_child.as_mut_slice::<i32>()[i] = file_change.add_lines;
             }
 
             // del_linesフィールド (struct内の5番目のフィールド)
-            let mut del_lines_child = file_changes_struct_child.child(5, commit.file_changes.len());
-            for (i, file_change) in commit.file_changes.iter().enumerate() {
+            let mut del_lines_child = file_changes_struct_child.child(5, file_changes.len());
+            for (i, file_change) in file_changes.iter().enumerate() {
                 del_lines_child.as_mut_slice::<i32>()[i] = file_change.del_lines;
             }
 
-            file_changes_vector.set_entry(0, 0, commit.file_changes.len());
-            file_changes_vector.set_len(commit.file_changes.len());
+            file_changes_vector.set_entry(0, 0, file_changes.len());
+            file_changes_vector.set_len(file_changes.len());
         }
 
         // Increment index for next call

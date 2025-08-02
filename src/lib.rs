@@ -15,6 +15,7 @@ use std::{
     error::Error,
     ffi::CString,
     sync::atomic::{AtomicUsize, Ordering},
+    time::Instant,
 };
 
 #[repr(C)]
@@ -180,6 +181,9 @@ impl VTab for GitLogVTab {
         func: &TableFunctionInfo<Self>,
         output: &mut DataChunkHandle,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let func_start = Instant::now();
+        eprintln!("[DEBUG] func called for commit index");
+
         let init_data = func.get_init_data();
         let bind_data = func.get_bind_data();
 
@@ -193,12 +197,24 @@ impl VTab for GitLogVTab {
         let oid = init_data.commit_ids[current_index];
 
         // Gitリポジトリを開く（各スレッドで独立して開く必要があるため、ここでは一時的）
+        let repo_start = Instant::now();
         let repo = Repository::open(&bind_data.repo_path)?;
+        eprintln!("[DEBUG] Repository open took: {:?}", repo_start.elapsed());
+
         let ctx = GitContext {
             repo,
             ignore_all_space: bind_data.ignore_all_space,
         };
+
+        let commit_start = Instant::now();
         let commit = create_commit_info(&ctx, oid)?;
+        eprintln!(
+            "[DEBUG] create_commit_info took: {:?} for {} files",
+            commit_start.elapsed(),
+            commit.file_changes.len()
+        );
+
+        let insert_start = Instant::now();
 
         // commit_id column
         let commit_id_vector = output.flat_vector(0);
@@ -292,12 +308,21 @@ impl VTab for GitLogVTab {
         file_changes_vector.set_entry(0, 0, commit.file_changes.len());
         file_changes_vector.set_len(commit.file_changes.len());
 
+        eprintln!(
+            "[DEBUG] DuckDB data insertion took: {:?}",
+            insert_start.elapsed()
+        );
+
         // Increment index for next call
         init_data
             .current_index
             .store(current_index + 1, Ordering::Relaxed);
 
         output.set_len(1);
+        eprintln!(
+            "[DEBUG] func: total execution took: {:?}",
+            func_start.elapsed()
+        );
         Ok(())
     }
 
@@ -336,6 +361,7 @@ fn get_file_changes(
     ctx: &GitContext,
     commit: &git2::Commit,
 ) -> Result<Vec<FileChange>, git2::Error> {
+    let start_time = std::time::Instant::now();
     let mut file_changes = Vec::new();
 
     // 各コミットについて変更されたファイルを取得
@@ -473,19 +499,46 @@ fn get_file_changes(
         )?;
     }
 
+    eprintln!(
+        "[DEBUG] get_file_changes took: {:?} for {} files",
+        start_time.elapsed(),
+        file_changes.len()
+    );
+    eprintln!(
+        "[DEBUG] get_file_changes took: {:?} for {} files",
+        start_time.elapsed(),
+        file_changes.len()
+    );
     Ok(file_changes)
 }
 
 fn create_commit_info(ctx: &GitContext, oid: git2::Oid) -> Result<CommitInfo, git2::Error> {
+    let total_start = Instant::now();
+
+    let commit_lookup_start = Instant::now();
     let commit = ctx.repo.find_commit(oid)?;
+    eprintln!(
+        "[DEBUG]   commit lookup took: {:?}",
+        commit_lookup_start.elapsed()
+    );
 
     // ファイル変更を取得
+    let file_changes_start = Instant::now();
     let file_changes = get_file_changes(ctx, &commit)?;
+    eprintln!(
+        "[DEBUG]   file_changes analysis took: {:?}",
+        file_changes_start.elapsed()
+    );
 
     // 親コミットIDを取得
+    let parents_start = Instant::now();
     let parents: Vec<String> = (0..commit.parent_count())
         .map(|i| commit.parent_id(i).unwrap().to_string())
         .collect();
+    eprintln!(
+        "[DEBUG]   parents lookup took: {:?}",
+        parents_start.elapsed()
+    );
 
     // コミット情報を事前に取得
     let author_name = commit.author().name().unwrap_or("Unknown").to_string();
@@ -496,7 +549,7 @@ fn create_commit_info(ctx: &GitContext, oid: git2::Oid) -> Result<CommitInfo, gi
     let author_timestamp = commit.time().seconds();
     let committer_timestamp = commit.committer().when().seconds();
 
-    Ok(CommitInfo {
+    let result = CommitInfo {
         commit_id: oid.to_string(),
         author: author_name,
         author_email,
@@ -507,5 +560,11 @@ fn create_commit_info(ctx: &GitContext, oid: git2::Oid) -> Result<CommitInfo, gi
         committer_timestamp,
         parents,
         file_changes,
-    })
+    };
+
+    eprintln!(
+        "[DEBUG] create_commit_info total took: {:?}",
+        total_start.elapsed()
+    );
+    Ok(result)
 }

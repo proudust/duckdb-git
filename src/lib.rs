@@ -281,7 +281,7 @@ impl VTab for GitLogVTab {
                     // statusフィールド (struct内の1番目のフィールド)
                     let status_child = file_changes_struct_child.child(1, file_changes.len());
                     for (i, file_change) in file_changes.iter().enumerate() {
-                        status_child.insert(i, file_change.status.as_str());
+                        status_child.insert(i, file_change.status.as_bytes());
                     }
                 }
 

@@ -69,11 +69,57 @@ impl<'a> Commit<'a> {
 #[derive(Clone)]
 pub struct FileChange {
     pub path: String,
-    pub status: String,
+    pub status: FileStatus,
     pub blob_id: String,
     pub file_size: i64,
     pub add_lines: i32,
     pub del_lines: i32,
+}
+
+#[derive(Clone, Debug)]
+pub enum FileStatus {
+    Added,
+    Deleted,
+    Modified,
+    Renamed,
+    Copied,
+    Ignored,
+    Untracked,
+    Typechange,
+    Unmodified,
+    Unknown,
+}
+
+impl FileStatus {
+    pub fn as_bytes(&self) -> &'static [u8] {
+        match self {
+            FileStatus::Added => b"A",
+            FileStatus::Deleted => b"D",
+            FileStatus::Modified => b"M",
+            FileStatus::Renamed => b"R",
+            FileStatus::Copied => b"C",
+            FileStatus::Ignored => b"I",
+            FileStatus::Untracked => b"?",
+            FileStatus::Typechange => b"T",
+            FileStatus::Unmodified => b" ",
+            FileStatus::Unknown => b"U",
+        }
+    }
+
+    pub fn from_delta(delta: git2::Delta) -> Self {
+        match delta {
+            git2::Delta::Added => FileStatus::Added,
+            git2::Delta::Deleted => FileStatus::Deleted,
+            git2::Delta::Modified => FileStatus::Modified,
+            git2::Delta::Renamed => FileStatus::Renamed,
+            git2::Delta::Copied => FileStatus::Copied,
+            git2::Delta::Ignored => FileStatus::Ignored,
+            git2::Delta::Untracked => FileStatus::Untracked,
+            git2::Delta::Typechange => FileStatus::Typechange,
+            git2::Delta::Unmodified => FileStatus::Unmodified,
+            _ => FileStatus::Unknown,
+        }
+    }
 }
 
 pub struct GitContext {
@@ -156,7 +202,7 @@ impl GitContext {
 
                     file_changes.push(FileChange {
                         path: name.to_string(),
-                        status: "A".to_string(), // Added
+                        status: FileStatus::Added,
                         blob_id: oid.to_string(),
                         file_size,
                         add_lines,
@@ -207,17 +253,7 @@ impl GitContext {
 
             diff.foreach(
                 &mut |delta, _progress| {
-                    let status = match delta.status() {
-                        git2::Delta::Added => "A",
-                        git2::Delta::Deleted => "D",
-                        git2::Delta::Modified => "M",
-                        git2::Delta::Renamed => "R",
-                        git2::Delta::Copied => "C",
-                        git2::Delta::Ignored => "I",
-                        git2::Delta::Untracked => "?",
-                        git2::Delta::Typechange => "T",
-                        _ => "U", // Unknown/Unmodified
-                    };
+                    let status = FileStatus::from_delta(delta.status());
 
                     let file_path = if let Some(new_file) = delta.new_file().path() {
                         new_file.to_string_lossy().to_string()
@@ -253,7 +289,7 @@ impl GitContext {
 
                     file_changes.push(FileChange {
                         path: file_path,
-                        status: status.to_string(),
+                        status,
                         blob_id,
                         file_size,
                         add_lines: *add_lines,

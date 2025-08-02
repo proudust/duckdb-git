@@ -12,6 +12,7 @@
         "revparse",
         "revwalk",
         "staticlib",
+        "typechange",
         "venv",
         "vtab"
     ]

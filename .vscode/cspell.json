@@ -9,6 +9,8 @@
         "overriden",
         "pytz",
         "repr",
+        "revparse",
+        "revwalk",
         "staticlib",
         "venv",
         "vtab"

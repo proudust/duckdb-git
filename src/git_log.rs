@@ -1,27 +1,6 @@
 use git2::Repository;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum DiffMerges {
-    Off,
-    FirstParent,
-}
-
-impl DiffMerges {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "off" => DiffMerges::Off,
-            "none" => DiffMerges::Off,
-            "first-parent" => DiffMerges::FirstParent,
-            _ => DiffMerges::FirstParent, // デフォルト
-        }
-    }
-
-    pub fn should_skip_file_changes(&self) -> bool {
-        matches!(self, DiffMerges::Off)
-    }
-}
-
 pub struct Commit<'a> {
     ctx: &'a GitContext,
     commit: git2::Commit<'a>,
@@ -77,7 +56,7 @@ impl<'a> Commit<'a> {
     }
 
     pub fn file_changes(&self) -> Result<Vec<FileChange>, git2::Error> {
-        if self.ctx.diff_merges.should_skip_file_changes() {
+        if !self.ctx.status {
             return Ok(Vec::new());
         }
 
@@ -100,20 +79,16 @@ pub struct FileChange {
 pub struct GitContext {
     pub repo: Repository,
     pub ignore_all_space: bool,
-    pub diff_merges: DiffMerges,
+    pub status: bool,
 }
 
 impl GitContext {
-    pub fn new(
-        repo_path: &str,
-        ignore_all_space: bool,
-        diff_merges: DiffMerges,
-    ) -> Result<Self, git2::Error> {
+    pub fn new(repo_path: &str, ignore_all_space: bool, status: bool) -> Result<Self, git2::Error> {
         let repo = Repository::open(repo_path)?;
         Ok(GitContext {
             repo,
             ignore_all_space,
-            diff_merges,
+            status,
         })
     }
 

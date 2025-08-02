@@ -11,7 +11,7 @@ use duckdb::{
     Connection, Result,
 };
 use duckdb_loadable_macros::duckdb_entrypoint_c_api;
-use git_log::{DiffMerges, GitContext};
+use git_log::GitContext;
 use libduckdb_sys as ffi;
 use std::{
     error::Error,
@@ -24,7 +24,9 @@ struct GitLogBindData {
     revision: Option<String>,
     max_count: Option<usize>,
     ignore_all_space: bool,
-    diff_merges: DiffMerges,
+    status: bool,
+    name_only: bool,
+    name_status: bool,
 }
 
 #[repr(C)]
@@ -67,23 +69,48 @@ impl VTab for GitLogVTab {
             LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("parents", parents_array_type);
 
-        // 名前付きパラメータ "diff_merges" を取得（列定義前に必要）
-        let diff_merges = bind
-            .get_named_parameter("diff_merges")
-            .map(|value| DiffMerges::from_str(value.to_string().as_str()))
-            .unwrap_or_else(|| DiffMerges::Off);
+        // 名前付きパラメータ "status" を取得（列定義前に必要）
+        let status = bind
+            .get_named_parameter("status")
+            .map(|value| value.to_string().to_lowercase() == "true")
+            .unwrap_or(false);
 
-        // file_changes列はdiff_merges=offの場合は省略
-        if !diff_merges.should_skip_file_changes() {
-            // file_changes: STRUCT(path VARCHAR, status VARCHAR, blob_id VARCHAR, file_size BIGINT, add_lines INTEGER, del_lines INTEGER)[]
-            let file_change_struct = LogicalTypeHandle::struct_type(&[
-                ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-                ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-                ("blob_id", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-                ("file_size", LogicalTypeHandle::from(LogicalTypeId::Bigint)),
-                ("add_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
-                ("del_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
-            ]);
+        // 名前付きパラメータ "name_only" を取得（列定義前に必要）
+        let name_only = bind
+            .get_named_parameter("name_only")
+            .map(|value| value.to_string().to_lowercase() == "true")
+            .unwrap_or(false);
+
+        // 名前付きパラメータ "name_status" を取得（列定義前に必要）
+        let name_status = bind
+            .get_named_parameter("name_status")
+            .map(|value| value.to_string().to_lowercase() == "true")
+            .unwrap_or(false);
+
+        // file_changes列はstatus=falseの場合は省略
+        if status || name_only || name_status {
+            let file_change_fields = if name_only {
+                // name_only=true: pathのみ
+                vec![("path", LogicalTypeHandle::from(LogicalTypeId::Varchar))]
+            } else if name_status {
+                // name_status=true: pathとstatusのみ
+                vec![
+                    ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+                    ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+                ]
+            } else {
+                // status=true: 全フィールド
+                vec![
+                    ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+                    ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+                    ("blob_id", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+                    ("file_size", LogicalTypeHandle::from(LogicalTypeId::Bigint)),
+                    ("add_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
+                    ("del_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
+                ]
+            };
+
+            let file_change_struct = LogicalTypeHandle::struct_type(&file_change_fields);
             let file_changes_array_type = LogicalTypeHandle::list(&file_change_struct);
             bind.add_result_column("file_changes", file_changes_array_type);
         }
@@ -111,7 +138,9 @@ impl VTab for GitLogVTab {
             revision,
             max_count,
             ignore_all_space,
-            diff_merges,
+            status,
+            name_only,
+            name_status,
         })
     }
 
@@ -123,7 +152,7 @@ impl VTab for GitLogVTab {
         let ctx = GitContext::new(
             &bind_data.repo_path,
             bind_data.ignore_all_space,
-            bind_data.diff_merges.clone(),
+            bind_data.status || bind_data.name_only || bind_data.name_status,
         )?;
 
         // 全てのコミットOIDを収集
@@ -172,7 +201,7 @@ impl VTab for GitLogVTab {
         let ctx = GitContext::new(
             &bind_data.repo_path,
             bind_data.ignore_all_space,
-            bind_data.diff_merges.clone(),
+            bind_data.status || bind_data.name_only || bind_data.name_status,
         )?;
 
         // 各列のベクターを取得
@@ -187,11 +216,12 @@ impl VTab for GitLogVTab {
         let mut parents_vector = output.list_vector(8);
 
         // file_changes列のベクターを条件付きで取得
-        let mut file_changes_vector = if !bind_data.diff_merges.should_skip_file_changes() {
-            Some(output.list_vector(9))
-        } else {
-            None
-        };
+        let mut file_changes_vector =
+            if bind_data.status || bind_data.name_only || bind_data.name_status {
+                Some(output.list_vector(9))
+            } else {
+                None
+            };
 
         // バッチ内の各コミットを処理
         let oids = &init_data.commit_ids[start_index..end_index];
@@ -233,8 +263,8 @@ impl VTab for GitLogVTab {
             }
             parents_vector.set_entry(batch_idx, 0, parents.len());
 
-            // file_changes列の処理（diff_merges=offの場合はスキップ）
-            if !bind_data.diff_merges.should_skip_file_changes() {
+            // file_changes列の処理（status=falseの場合はスキップ）
+            if bind_data.status || bind_data.name_only || bind_data.name_status {
                 let file_changes = commit.file_changes()?;
                 let file_changes_struct_child = file_changes_vector
                     .as_mut()
@@ -247,34 +277,41 @@ impl VTab for GitLogVTab {
                     path_child.insert(i, file_change.path.as_str());
                 }
 
-                // statusフィールド (struct内の1番目のフィールド)
-                let status_child = file_changes_struct_child.child(1, file_changes.len());
-                for (i, file_change) in file_changes.iter().enumerate() {
-                    status_child.insert(i, file_change.status.as_str());
+                if bind_data.name_status || bind_data.status {
+                    // statusフィールド (struct内の1番目のフィールド)
+                    let status_child = file_changes_struct_child.child(1, file_changes.len());
+                    for (i, file_change) in file_changes.iter().enumerate() {
+                        status_child.insert(i, file_change.status.as_str());
+                    }
                 }
 
-                // blob_idフィールド (struct内の2番目のフィールド)
-                let blob_id_child = file_changes_struct_child.child(2, file_changes.len());
-                for (i, file_change) in file_changes.iter().enumerate() {
-                    blob_id_child.insert(i, file_change.blob_id.as_str());
-                }
+                if bind_data.status {
+                    // blob_idフィールド (struct内の2番目のフィールド)
+                    let blob_id_child = file_changes_struct_child.child(2, file_changes.len());
+                    for (i, file_change) in file_changes.iter().enumerate() {
+                        blob_id_child.insert(i, file_change.blob_id.as_str());
+                    }
 
-                // file_sizeフィールド (struct内の3番目のフィールド)
-                let mut file_size_child = file_changes_struct_child.child(3, file_changes.len());
-                for (i, file_change) in file_changes.iter().enumerate() {
-                    file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size;
-                }
+                    // file_sizeフィールド (struct内の3番目のフィールド)
+                    let mut file_size_child =
+                        file_changes_struct_child.child(3, file_changes.len());
+                    for (i, file_change) in file_changes.iter().enumerate() {
+                        file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size;
+                    }
 
-                // add_linesフィールド (struct内の4番目のフィールド)
-                let mut add_lines_child = file_changes_struct_child.child(4, file_changes.len());
-                for (i, file_change) in file_changes.iter().enumerate() {
-                    add_lines_child.as_mut_slice::<i32>()[i] = file_change.add_lines;
-                }
+                    // add_linesフィールド (struct内の4番目のフィールド)
+                    let mut add_lines_child =
+                        file_changes_struct_child.child(4, file_changes.len());
+                    for (i, file_change) in file_changes.iter().enumerate() {
+                        add_lines_child.as_mut_slice::<i32>()[i] = file_change.add_lines;
+                    }
 
-                // del_linesフィールド (struct内の5番目のフィールド)
-                let mut del_lines_child = file_changes_struct_child.child(5, file_changes.len());
-                for (i, file_change) in file_changes.iter().enumerate() {
-                    del_lines_child.as_mut_slice::<i32>()[i] = file_change.del_lines;
+                    // del_linesフィールド (struct内の5番目のフィールド)
+                    let mut del_lines_child =
+                        file_changes_struct_child.child(5, file_changes.len());
+                    for (i, file_change) in file_changes.iter().enumerate() {
+                        del_lines_child.as_mut_slice::<i32>()[i] = file_change.del_lines;
+                    }
                 }
 
                 file_changes_vector
@@ -315,8 +352,16 @@ impl VTab for GitLogVTab {
                 LogicalTypeHandle::from(LogicalTypeId::Boolean),
             ),
             (
-                "diff_merges".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Varchar),
+                "status".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Boolean),
+            ),
+            (
+                "name_only".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Boolean),
+            ),
+            (
+                "name_status".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Boolean),
             ),
         ])
     }

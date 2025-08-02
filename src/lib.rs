@@ -17,12 +17,34 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+#[derive(Debug, Clone, PartialEq)]
+enum DiffMerges {
+    Off,
+    FirstParent,
+}
+
+impl DiffMerges {
+    fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "off" => DiffMerges::Off,
+            "none" => DiffMerges::Off,
+            "first-parent" => DiffMerges::FirstParent,
+            _ => DiffMerges::FirstParent, // デフォルト
+        }
+    }
+
+    fn should_skip_file_changes(&self) -> bool {
+        matches!(self, DiffMerges::Off)
+    }
+}
+
 #[repr(C)]
 struct GitLogBindData {
     repo_path: String,
     revision: Option<String>,
     max_count: Option<usize>,
     ignore_all_space: bool,
+    diff_merges: DiffMerges,
 }
 
 #[repr(C)]
@@ -58,6 +80,7 @@ struct FileChange {
 struct GitContext {
     repo: Repository,
     ignore_all_space: bool,
+    diff_merges: DiffMerges,
 }
 
 struct GitLogVTab;
@@ -93,17 +116,26 @@ impl VTab for GitLogVTab {
             LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("parents", parents_array_type);
 
-        // file_changes: STRUCT(path VARCHAR, status VARCHAR, blob_id VARCHAR, file_size BIGINT, add_lines INTEGER, del_lines INTEGER)[]
-        let file_change_struct = LogicalTypeHandle::struct_type(&[
-            ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-            ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-            ("blob_id", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-            ("file_size", LogicalTypeHandle::from(LogicalTypeId::Bigint)),
-            ("add_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
-            ("del_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
-        ]);
-        let file_changes_array_type = LogicalTypeHandle::list(&file_change_struct);
-        bind.add_result_column("file_changes", file_changes_array_type);
+        // 名前付きパラメータ "diff_merges" を取得（列定義前に必要）
+        let diff_merges = bind
+            .get_named_parameter("diff_merges")
+            .map(|value| DiffMerges::from_str(value.to_string().as_str()))
+            .unwrap_or_else(|| DiffMerges::Off);
+
+        // file_changes列はdiff_merges=offの場合は省略
+        if !diff_merges.should_skip_file_changes() {
+            // file_changes: STRUCT(path VARCHAR, status VARCHAR, blob_id VARCHAR, file_size BIGINT, add_lines INTEGER, del_lines INTEGER)[]
+            let file_change_struct = LogicalTypeHandle::struct_type(&[
+                ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+                ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+                ("blob_id", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+                ("file_size", LogicalTypeHandle::from(LogicalTypeId::Bigint)),
+                ("add_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
+                ("del_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
+            ]);
+            let file_changes_array_type = LogicalTypeHandle::list(&file_change_struct);
+            bind.add_result_column("file_changes", file_changes_array_type);
+        }
 
         let repo_path = bind.get_parameter(0).to_string();
 
@@ -128,6 +160,7 @@ impl VTab for GitLogVTab {
             revision,
             max_count,
             ignore_all_space,
+            diff_merges,
         })
     }
 
@@ -197,6 +230,7 @@ impl VTab for GitLogVTab {
         let ctx = GitContext {
             repo,
             ignore_all_space: bind_data.ignore_all_space,
+            diff_merges: bind_data.diff_merges.clone(),
         };
         let commit = create_commit_info(&ctx, oid)?;
 
@@ -249,48 +283,52 @@ impl VTab for GitLogVTab {
         parents_vector.set_entry(0, 0, commit.parents.len());
         parents_vector.set_len(commit.parents.len());
 
-        // file_changes column (struct array)
-        let mut file_changes_vector = output.list_vector(9);
-        let file_changes_struct_child = file_changes_vector.struct_child(commit.file_changes.len());
+        // file_changes列の処理（diff_merges=offの場合はスキップ）
+        if !bind_data.diff_merges.should_skip_file_changes() {
+            // file_changes column (struct array) - インデックス9
+            let mut file_changes_vector = output.list_vector(9);
+            let file_changes_struct_child =
+                file_changes_vector.struct_child(commit.file_changes.len());
 
-        // pathフィールド (struct内の0番目のフィールド)
-        let path_child = file_changes_struct_child.child(0, commit.file_changes.len());
-        for (i, file_change) in commit.file_changes.iter().enumerate() {
-            path_child.insert(i, file_change.path.as_str());
+            // pathフィールド (struct内の0番目のフィールド)
+            let path_child = file_changes_struct_child.child(0, commit.file_changes.len());
+            for (i, file_change) in commit.file_changes.iter().enumerate() {
+                path_child.insert(i, file_change.path.as_str());
+            }
+
+            // statusフィールド (struct内の1番目のフィールド)
+            let status_child = file_changes_struct_child.child(1, commit.file_changes.len());
+            for (i, file_change) in commit.file_changes.iter().enumerate() {
+                status_child.insert(i, file_change.status.as_str());
+            }
+
+            // blob_idフィールド (struct内の2番目のフィールド)
+            let blob_id_child = file_changes_struct_child.child(2, commit.file_changes.len());
+            for (i, file_change) in commit.file_changes.iter().enumerate() {
+                blob_id_child.insert(i, file_change.blob_id.as_str());
+            }
+
+            // file_sizeフィールド (struct内の3番目のフィールド)
+            let mut file_size_child = file_changes_struct_child.child(3, commit.file_changes.len());
+            for (i, file_change) in commit.file_changes.iter().enumerate() {
+                file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size;
+            }
+
+            // add_linesフィールド (struct内の4番目のフィールド)
+            let mut add_lines_child = file_changes_struct_child.child(4, commit.file_changes.len());
+            for (i, file_change) in commit.file_changes.iter().enumerate() {
+                add_lines_child.as_mut_slice::<i32>()[i] = file_change.add_lines;
+            }
+
+            // del_linesフィールド (struct内の5番目のフィールド)
+            let mut del_lines_child = file_changes_struct_child.child(5, commit.file_changes.len());
+            for (i, file_change) in commit.file_changes.iter().enumerate() {
+                del_lines_child.as_mut_slice::<i32>()[i] = file_change.del_lines;
+            }
+
+            file_changes_vector.set_entry(0, 0, commit.file_changes.len());
+            file_changes_vector.set_len(commit.file_changes.len());
         }
-
-        // statusフィールド (struct内の1番目のフィールド)
-        let status_child = file_changes_struct_child.child(1, commit.file_changes.len());
-        for (i, file_change) in commit.file_changes.iter().enumerate() {
-            status_child.insert(i, file_change.status.as_str());
-        }
-
-        // blob_idフィールド (struct内の2番目のフィールド)
-        let blob_id_child = file_changes_struct_child.child(2, commit.file_changes.len());
-        for (i, file_change) in commit.file_changes.iter().enumerate() {
-            blob_id_child.insert(i, file_change.blob_id.as_str());
-        }
-
-        // file_sizeフィールド (struct内の3番目のフィールド)
-        let mut file_size_child = file_changes_struct_child.child(3, commit.file_changes.len());
-        for (i, file_change) in commit.file_changes.iter().enumerate() {
-            file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size;
-        }
-
-        // add_linesフィールド (struct内の4番目のフィールド)
-        let mut add_lines_child = file_changes_struct_child.child(4, commit.file_changes.len());
-        for (i, file_change) in commit.file_changes.iter().enumerate() {
-            add_lines_child.as_mut_slice::<i32>()[i] = file_change.add_lines;
-        }
-
-        // del_linesフィールド (struct内の5番目のフィールド)
-        let mut del_lines_child = file_changes_struct_child.child(5, commit.file_changes.len());
-        for (i, file_change) in commit.file_changes.iter().enumerate() {
-            del_lines_child.as_mut_slice::<i32>()[i] = file_change.del_lines;
-        }
-
-        file_changes_vector.set_entry(0, 0, commit.file_changes.len());
-        file_changes_vector.set_len(commit.file_changes.len());
 
         // Increment index for next call
         init_data
@@ -320,6 +358,10 @@ impl VTab for GitLogVTab {
             (
                 "ignore_all_space".to_string(),
                 LogicalTypeHandle::from(LogicalTypeId::Boolean),
+            ),
+            (
+                "diff_merges".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Varchar),
             ),
         ])
     }
@@ -479,8 +521,12 @@ fn get_file_changes(
 fn create_commit_info(ctx: &GitContext, oid: git2::Oid) -> Result<CommitInfo, git2::Error> {
     let commit = ctx.repo.find_commit(oid)?;
 
-    // ファイル変更を取得
-    let file_changes = get_file_changes(ctx, &commit)?;
+    // diff_mergesの設定に基づいてファイル変更を取得するかどうか決定
+    let file_changes = if ctx.diff_merges.should_skip_file_changes() {
+        Vec::new() // ファイル変更解析をスキップ
+    } else {
+        get_file_changes(ctx, &commit)?
+    };
 
     // 親コミットIDを取得
     let parents: Vec<String> = (0..commit.parent_count())

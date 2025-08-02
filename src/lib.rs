@@ -163,6 +163,13 @@ impl VTab for GitLogVTab {
             commit_oids.push(oid?);
         }
 
+        // 並行処理のためのスレッド数を設定（CPUコア数を基準とする）
+        let cpu_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1); // フォールバックとして1コアを想定
+        let max_threads = std::cmp::min(commit_oids.len(), cpu_cores) as u64;
+        info.set_max_threads(max_threads);
+
         Ok(GitLogInitData {
             commit_ids: commit_oids,
             current_index: AtomicUsize::new(0),
@@ -178,7 +185,6 @@ impl VTab for GitLogVTab {
 
         let current_index = init_data.current_index.load(Ordering::Relaxed);
 
-        // コミットOIDリストから取得
         if current_index >= init_data.commit_ids.len() {
             output.set_len(0);
             return Ok(());
@@ -186,7 +192,7 @@ impl VTab for GitLogVTab {
 
         let oid = init_data.commit_ids[current_index];
 
-        // Gitリポジトリを開く（コミット情報取得のため）
+        // Gitリポジトリを開く（各スレッドで独立して開く必要があるため、ここでは一時的）
         let repo = Repository::open(&bind_data.repo_path)?;
         let ctx = GitContext {
             repo,

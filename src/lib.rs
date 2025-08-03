@@ -24,7 +24,7 @@ struct GitLogBindData {
     revision: Option<String>,
     max_count: Option<usize>,
     ignore_all_space: bool,
-    status: bool,
+    stat: bool,
     name_only: bool,
     name_status: bool,
 }
@@ -69,9 +69,9 @@ impl VTab for GitLogVTab {
             LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("parents", parents_array_type);
 
-        // 名前付きパラメータ "status" を取得（列定義前に必要）
-        let status = bind
-            .get_named_parameter("status")
+        // 名前付きパラメータ "stat" を取得（列定義前に必要）
+        let stat = bind
+            .get_named_parameter("stat")
             .map(|value| value.to_string().to_lowercase() == "true")
             .unwrap_or(false);
 
@@ -88,7 +88,7 @@ impl VTab for GitLogVTab {
             .unwrap_or(false);
 
         // file_changes列はstatus=falseの場合は省略
-        if status || name_only || name_status {
+        if stat || name_only || name_status {
             let file_change_fields = if name_only {
                 // name_only=true: pathのみ
                 vec![("path", LogicalTypeHandle::from(LogicalTypeId::Varchar))]
@@ -99,7 +99,7 @@ impl VTab for GitLogVTab {
                     ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
                 ]
             } else {
-                // status=true: 全フィールド
+                // stat=true: 全フィールド
                 vec![
                     ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
                     ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
@@ -138,7 +138,7 @@ impl VTab for GitLogVTab {
             revision,
             max_count,
             ignore_all_space,
-            status,
+            stat,
             name_only,
             name_status,
         })
@@ -152,7 +152,7 @@ impl VTab for GitLogVTab {
         let ctx = GitContext::new(
             &bind_data.repo_path,
             bind_data.ignore_all_space,
-            bind_data.status || bind_data.name_only || bind_data.name_status,
+            bind_data.stat || bind_data.name_only || bind_data.name_status,
         )?;
 
         // 全てのコミットOIDを収集
@@ -201,7 +201,7 @@ impl VTab for GitLogVTab {
         let ctx = GitContext::new(
             &bind_data.repo_path,
             bind_data.ignore_all_space,
-            bind_data.status || bind_data.name_only || bind_data.name_status,
+            bind_data.stat || bind_data.name_only || bind_data.name_status,
         )?;
 
         // 各列のベクターを取得
@@ -217,7 +217,7 @@ impl VTab for GitLogVTab {
 
         // file_changes列のベクターを条件付きで取得
         let mut file_changes_vector =
-            if bind_data.status || bind_data.name_only || bind_data.name_status {
+            if bind_data.stat || bind_data.name_only || bind_data.name_status {
                 Some(output.list_vector(9))
             } else {
                 None
@@ -264,7 +264,7 @@ impl VTab for GitLogVTab {
             parents_vector.set_entry(batch_idx, 0, parents.len());
 
             // file_changes列の処理（status=falseの場合はスキップ）
-            if bind_data.status || bind_data.name_only || bind_data.name_status {
+            if bind_data.stat || bind_data.name_only || bind_data.name_status {
                 let file_changes = commit.file_changes()?;
                 let file_changes_struct_child = file_changes_vector
                     .as_mut()
@@ -277,7 +277,7 @@ impl VTab for GitLogVTab {
                     path_child.insert(i, file_change.path.as_str());
                 }
 
-                if bind_data.name_status || bind_data.status {
+                if bind_data.name_status || bind_data.stat {
                     // statusフィールド (struct内の1番目のフィールド)
                     let status_child = file_changes_struct_child.child(1, file_changes.len());
                     for (i, file_change) in file_changes.iter().enumerate() {
@@ -285,7 +285,7 @@ impl VTab for GitLogVTab {
                     }
                 }
 
-                if bind_data.status {
+                if bind_data.stat {
                     // blob_idフィールド (struct内の2番目のフィールド)
                     let blob_id_child = file_changes_struct_child.child(2, file_changes.len());
                     for (i, file_change) in file_changes.iter().enumerate() {
@@ -352,7 +352,7 @@ impl VTab for GitLogVTab {
                 LogicalTypeHandle::from(LogicalTypeId::Boolean),
             ),
             (
-                "status".to_string(),
+                "stat".to_string(),
                 LogicalTypeHandle::from(LogicalTypeId::Boolean),
             ),
             (

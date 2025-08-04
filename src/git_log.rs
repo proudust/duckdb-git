@@ -1,6 +1,24 @@
 use git2::Repository;
 use std::collections::HashMap;
 
+#[derive(Clone, Debug)]
+pub enum DecorateMode {
+    No,
+    Short,
+    Full,
+}
+
+impl DecorateMode {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "no" => DecorateMode::No,
+            "short" => DecorateMode::Short,
+            "full" => DecorateMode::Full,
+            _ => DecorateMode::Short, // デフォルトは short
+        }
+    }
+}
+
 pub struct Commit<'a> {
     ctx: &'a GitContext,
     commit: git2::Commit<'a>,
@@ -64,6 +82,94 @@ impl<'a> Commit<'a> {
         let commit = &self.commit;
         self.ctx.get_file_changes(commit)
     }
+
+    pub fn refs(&self) -> Result<Vec<String>, git2::Error> {
+        match &self.ctx.decorate_mode {
+            DecorateMode::No => Ok(Vec::new()),
+            _ => {
+                let commit_id = self.commit.id();
+                let mut refs = Vec::new();
+
+                // ブランチの取得
+                let branches = self.ctx.repo.branches(None)?;
+                for branch_result in branches {
+                    let (branch, branch_type) = branch_result?;
+                    if let Some(target_oid) = branch.get().target() {
+                        if target_oid == commit_id {
+                            if let Some(name) = branch.name()? {
+                                let ref_name = match &self.ctx.decorate_mode {
+                                    DecorateMode::Short => {
+                                        // short形式: refs/heads/main -> main
+                                        match branch_type {
+                                            git2::BranchType::Local => name.to_string(),
+                                            git2::BranchType::Remote => {
+                                                // リモートブランチの場合: origin/main
+                                                name.to_string()
+                                            }
+                                        }
+                                    }
+                                    DecorateMode::Full => {
+                                        // full形式: 完全なref名
+                                        match branch_type {
+                                            git2::BranchType::Local => {
+                                                format!("refs/heads/{}", name)
+                                            }
+                                            git2::BranchType::Remote => {
+                                                format!("refs/remotes/{}", name)
+                                            }
+                                        }
+                                    }
+                                    DecorateMode::No => unreachable!(),
+                                };
+                                refs.push(ref_name);
+                            }
+                        }
+                    }
+                }
+
+                // タグの取得
+                self.ctx.repo.tag_foreach(|tag_oid, name| {
+                    // タグが指すコミットを解決
+                    if let Ok(tag_obj) = self.ctx.repo.find_object(tag_oid, None) {
+                        let target_oid = match tag_obj.kind() {
+                            Some(git2::ObjectType::Tag) => {
+                                // annotated tag の場合、target を取得
+                                if let Some(tag) = tag_obj.as_tag() {
+                                    tag.target_id()
+                                } else {
+                                    tag_oid
+                                }
+                            }
+                            _ => tag_oid, // lightweight tag の場合
+                        };
+
+                        if target_oid == commit_id {
+                            if let Ok(tag_name) = std::str::from_utf8(name) {
+                                let ref_name = match &self.ctx.decorate_mode {
+                                    DecorateMode::Short => {
+                                        // short形式: refs/tags/v1.0.0 -> v1.0.0
+                                        tag_name
+                                            .strip_prefix("refs/tags/")
+                                            .unwrap_or(tag_name)
+                                            .to_string()
+                                    }
+                                    DecorateMode::Full => {
+                                        // full形式: 完全なref名
+                                        tag_name.to_string()
+                                    }
+                                    DecorateMode::No => unreachable!(),
+                                };
+                                refs.push(ref_name);
+                            }
+                        }
+                    }
+                    true
+                })?;
+
+                Ok(refs)
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -126,15 +232,22 @@ pub struct GitContext {
     pub repo: Repository,
     pub ignore_all_space: bool,
     pub status: bool,
+    pub decorate_mode: DecorateMode,
 }
 
 impl GitContext {
-    pub fn new(repo_path: &str, ignore_all_space: bool, status: bool) -> Result<Self, git2::Error> {
+    pub fn new(
+        repo_path: &str,
+        ignore_all_space: bool,
+        status: bool,
+        decorate_mode: DecorateMode,
+    ) -> Result<Self, git2::Error> {
         let repo = Repository::open(repo_path)?;
         Ok(GitContext {
             repo,
             ignore_all_space,
             status,
+            decorate_mode,
         })
     }
 

@@ -3,7 +3,7 @@ extern crate duckdb_loadable_macros;
 extern crate git2;
 extern crate libduckdb_sys;
 
-mod git_log;
+pub mod git_log;
 
 use duckdb::{
     core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
@@ -11,7 +11,7 @@ use duckdb::{
     Connection, Result,
 };
 use duckdb_loadable_macros::duckdb_entrypoint_c_api;
-use git_log::GitContext;
+use git_log::{DecorateMode, GitContext};
 use libduckdb_sys as ffi;
 use std::{
     error::Error,
@@ -27,6 +27,7 @@ struct GitLogBindData {
     stat: bool,
     name_only: bool,
     name_status: bool,
+    decorate: String,
 }
 
 #[repr(C)]
@@ -68,6 +69,18 @@ impl VTab for GitLogVTab {
         let parents_array_type =
             LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("parents", parents_array_type);
+
+        // refs: VARCHAR[] (decorateがnoでない場合のみ)
+        let decorate = bind
+            .get_named_parameter("decorate")
+            .map(|value| value.to_string().to_lowercase())
+            .unwrap_or_else(|| "short".to_string());
+
+        if decorate != "no" {
+            let refs_array_type =
+                LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
+            bind.add_result_column("refs", refs_array_type);
+        }
 
         // 名前付きパラメータ "stat" を取得（列定義前に必要）
         let stat = bind
@@ -141,6 +154,7 @@ impl VTab for GitLogVTab {
             stat,
             name_only,
             name_status,
+            decorate,
         })
     }
 
@@ -153,6 +167,7 @@ impl VTab for GitLogVTab {
             &bind_data.repo_path,
             bind_data.ignore_all_space,
             bind_data.stat || bind_data.name_only || bind_data.name_status,
+            DecorateMode::from_str(&bind_data.decorate),
         )?;
 
         // 全てのコミットOIDを収集
@@ -202,6 +217,7 @@ impl VTab for GitLogVTab {
             &bind_data.repo_path,
             bind_data.ignore_all_space,
             bind_data.stat || bind_data.name_only || bind_data.name_status,
+            DecorateMode::from_str(&bind_data.decorate),
         )?;
 
         // 各列のベクターを取得
@@ -215,10 +231,18 @@ impl VTab for GitLogVTab {
         let message_vector = output.flat_vector(7);
         let mut parents_vector = output.list_vector(8);
 
-        // file_changes列のベクターを条件付きで取得
+        // refs列のベクターを条件付きで取得
+        let mut refs_vector = if bind_data.decorate != "no" {
+            Some(output.list_vector(9))
+        } else {
+            None
+        };
+
+        // file_changes列のベクターを条件付きで取得（refs列の分だけインデックスを調整）
+        let file_changes_index = if bind_data.decorate != "no" { 10 } else { 9 };
         let mut file_changes_vector =
             if bind_data.stat || bind_data.name_only || bind_data.name_status {
-                Some(output.list_vector(9))
+                Some(output.list_vector(file_changes_index))
             } else {
                 None
             };
@@ -262,6 +286,19 @@ impl VTab for GitLogVTab {
                 parents_child.insert(i, parent.as_str());
             }
             parents_vector.set_entry(batch_idx, 0, parents.len());
+
+            // refs列の処理（decorateがnoでない場合）
+            if bind_data.decorate != "no" {
+                let refs = commit.refs()?;
+                let refs_child = refs_vector.as_mut().unwrap().child(refs.len());
+                for (i, ref_name) in refs.iter().enumerate() {
+                    refs_child.insert(i, ref_name.as_str());
+                }
+                refs_vector
+                    .as_mut()
+                    .unwrap()
+                    .set_entry(batch_idx, 0, refs.len());
+            }
 
             // file_changes列の処理（status=falseの場合はスキップ）
             if bind_data.stat || bind_data.name_only || bind_data.name_status {
@@ -321,8 +358,11 @@ impl VTab for GitLogVTab {
             }
         }
 
-        // parentsとfile_changesベクターの長さを設定
+        // parentsとrefsとfile_changesベクターの長さを設定
         parents_vector.set_len(oids.len());
+        if refs_vector.is_some() {
+            refs_vector.as_mut().unwrap().set_len(oids.len());
+        }
         if file_changes_vector.is_some() {
             file_changes_vector.as_mut().unwrap().set_len(oids.len());
         }
@@ -362,6 +402,10 @@ impl VTab for GitLogVTab {
             (
                 "name_status".to_string(),
                 LogicalTypeHandle::from(LogicalTypeId::Boolean),
+            ),
+            (
+                "decorate".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Varchar),
             ),
         ])
     }

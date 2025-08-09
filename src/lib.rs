@@ -4,14 +4,16 @@ extern crate git2;
 extern crate libduckdb_sys;
 
 pub mod git_log;
+pub mod types;
 
+use crate::git_log::GitContext;
+use crate::types::{DecorateMode, GitLogParameter};
 use duckdb::{
     core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection, Result,
 };
 use duckdb_loadable_macros::duckdb_entrypoint_c_api;
-use git_log::{DecorateMode, GitContext};
 use libduckdb_sys as ffi;
 use std::{
     error::Error,
@@ -20,14 +22,7 @@ use std::{
 
 #[repr(C)]
 struct GitLogBindData {
-    repo_path: String,
-    revision: Option<String>,
-    max_count: Option<usize>,
-    ignore_all_space: bool,
-    stat: bool,
-    name_only: bool,
-    name_status: bool,
-    decorate: String,
+    parameters: GitLogParameter,
 }
 
 #[repr(C)]
@@ -43,7 +38,60 @@ impl VTab for GitLogVTab {
     type InitData = GitLogInitData;
     type BindData = GitLogBindData;
 
-    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn std::error::Error>> {
+    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
+        let repo_path = bind.get_parameter(0).to_string();
+
+        // 名前付きパラメータ "revision" を取得
+        let revision = bind
+            .get_named_parameter("revision")
+            .map(|value| value.to_string());
+
+        // refs: VARCHAR[] (decorateがnoでない場合のみ)
+        let decorate = bind
+            .get_named_parameter("decorate")
+            .map(|value| DecorateMode::from_str(&value.to_string()))
+            .unwrap_or_else(|| DecorateMode::Short);
+
+        // 名前付きパラメータ "max_count" を取得
+        let max_count = bind
+            .get_named_parameter("max_count")
+            .and_then(|value| value.to_string().parse::<usize>().ok());
+
+        // 名前付きパラメータ "stat" を取得（列定義前に必要）
+        let stat = bind
+            .get_named_parameter("stat")
+            .map(|value| value.to_string().to_lowercase() == "true")
+            .unwrap_or(false);
+
+        // 名前付きパラメータ "name_only" を取得（列定義前に必要）
+        let name_only = bind
+            .get_named_parameter("name_only")
+            .map(|value| value.to_string().to_lowercase() == "true")
+            .unwrap_or(false);
+
+        // 名前付きパラメータ "name_status" を取得（列定義前に必要）
+        let name_status = bind
+            .get_named_parameter("name_status")
+            .map(|value| value.to_string().to_lowercase() == "true")
+            .unwrap_or(false);
+
+        // 名前付きパラメータ "ignore_all_space" を取得
+        let ignore_all_space = bind
+            .get_named_parameter("ignore_all_space")
+            .map(|value| value.to_string().to_lowercase() == "true")
+            .unwrap_or(false);
+
+        let parameters = GitLogParameter {
+            repo_path,
+            revision,
+            decorate,
+            max_count,
+            stat,
+            name_only,
+            name_status,
+            ignore_all_space,
+        };
+
         bind.add_result_column("commit_id", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("author", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column(
@@ -70,35 +118,11 @@ impl VTab for GitLogVTab {
             LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("parents", parents_array_type);
 
-        // refs: VARCHAR[] (decorateがnoでない場合のみ)
-        let decorate = bind
-            .get_named_parameter("decorate")
-            .map(|value| value.to_string().to_lowercase())
-            .unwrap_or_else(|| "short".to_string());
-
-        if decorate != "no" {
+        if parameters.decorate != DecorateMode::No {
             let refs_array_type =
                 LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
             bind.add_result_column("refs", refs_array_type);
         }
-
-        // 名前付きパラメータ "stat" を取得（列定義前に必要）
-        let stat = bind
-            .get_named_parameter("stat")
-            .map(|value| value.to_string().to_lowercase() == "true")
-            .unwrap_or(false);
-
-        // 名前付きパラメータ "name_only" を取得（列定義前に必要）
-        let name_only = bind
-            .get_named_parameter("name_only")
-            .map(|value| value.to_string().to_lowercase() == "true")
-            .unwrap_or(false);
-
-        // 名前付きパラメータ "name_status" を取得（列定義前に必要）
-        let name_status = bind
-            .get_named_parameter("name_status")
-            .map(|value| value.to_string().to_lowercase() == "true")
-            .unwrap_or(false);
 
         // file_changes列はstatus=falseの場合は省略
         if stat || name_only || name_status {
@@ -128,50 +152,20 @@ impl VTab for GitLogVTab {
             bind.add_result_column("file_changes", file_changes_array_type);
         }
 
-        let repo_path = bind.get_parameter(0).to_string();
-
-        // 名前付きパラメータ "revision" を取得
-        let revision = bind
-            .get_named_parameter("revision")
-            .map(|value| value.to_string());
-
-        // 名前付きパラメータ "max_count" を取得
-        let max_count = bind
-            .get_named_parameter("max_count")
-            .and_then(|value| value.to_string().parse::<usize>().ok());
-
-        // 名前付きパラメータ "ignore_all_space" を取得
-        let ignore_all_space = bind
-            .get_named_parameter("ignore_all_space")
-            .map(|value| value.to_string().to_lowercase() == "true")
-            .unwrap_or(false);
-
-        Ok(GitLogBindData {
-            repo_path,
-            revision,
-            max_count,
-            ignore_all_space,
-            stat,
-            name_only,
-            name_status,
-            decorate,
-        })
+        Ok(GitLogBindData { parameters })
     }
 
-    fn init(info: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
+    fn init(info: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
         let bind_data = info.get_bind_data::<GitLogBindData>();
-        let bind_data = unsafe { &*bind_data };
+        // 生ポインタ経由でフィールドをムーブせず参照を取得 (所有権エラー回避)
+        let parameters = unsafe { &(*bind_data).parameters };
 
         // GitContext を作成
-        let ctx = GitContext::new(
-            &bind_data.repo_path,
-            bind_data.ignore_all_space,
-            bind_data.stat || bind_data.name_only || bind_data.name_status,
-            DecorateMode::from_str(&bind_data.decorate),
-        )?;
+        let ctx = GitContext::new(&parameters)?;
 
         // 全てのコミットOIDを収集
-        let commit_oids = ctx.get_commit_oids(bind_data.revision.as_ref(), bind_data.max_count)?;
+        let commit_oids =
+            ctx.get_commit_oids(parameters.revision.as_ref(), parameters.max_count)?;
 
         // 並行処理のためのスレッド数を設定（CPUコア数を基準とする）
         let cpu_cores = std::thread::available_parallelism()
@@ -193,9 +187,9 @@ impl VTab for GitLogVTab {
     fn func(
         func: &TableFunctionInfo<Self>,
         output: &mut DataChunkHandle,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let init_data = func.get_init_data();
-        let bind_data = func.get_bind_data();
+        let parameters = &func.get_bind_data().parameters;
 
         // 事前計算されたバッチサイズを使用
         let batch_size = init_data.batch_size;
@@ -213,12 +207,7 @@ impl VTab for GitLogVTab {
         let end_index = std::cmp::min(start_index + batch_size, init_data.commit_ids.len());
 
         // GitContext を作成
-        let ctx = GitContext::new(
-            &bind_data.repo_path,
-            bind_data.ignore_all_space,
-            bind_data.stat || bind_data.name_only || bind_data.name_status,
-            DecorateMode::from_str(&bind_data.decorate),
-        )?;
+        let ctx = GitContext::new(parameters)?;
 
         // 各列のベクターを取得
         let commit_id_vector = output.flat_vector(0);
@@ -232,16 +221,20 @@ impl VTab for GitLogVTab {
         let mut parents_vector = output.list_vector(8);
 
         // refs列のベクターを条件付きで取得
-        let mut refs_vector = if bind_data.decorate != "no" {
+        let mut refs_vector = if parameters.decorate != DecorateMode::No {
             Some(output.list_vector(9))
         } else {
             None
         };
 
         // file_changes列のベクターを条件付きで取得（refs列の分だけインデックスを調整）
-        let file_changes_index = if bind_data.decorate != "no" { 10 } else { 9 };
+        let file_changes_index = if parameters.decorate != DecorateMode::No {
+            10
+        } else {
+            9
+        };
         let mut file_changes_vector =
-            if bind_data.stat || bind_data.name_only || bind_data.name_status {
+            if parameters.stat || parameters.name_only || parameters.name_status {
                 Some(output.list_vector(file_changes_index))
             } else {
                 None
@@ -288,7 +281,7 @@ impl VTab for GitLogVTab {
             parents_vector.set_entry(batch_idx, 0, parents.len());
 
             // refs列の処理（decorateがnoでない場合）
-            if bind_data.decorate != "no" {
+            if parameters.decorate != DecorateMode::No {
                 let refs = commit.refs()?;
                 let refs_child = refs_vector.as_mut().unwrap().child(refs.len());
                 for (i, ref_name) in refs.iter().enumerate() {
@@ -301,7 +294,7 @@ impl VTab for GitLogVTab {
             }
 
             // file_changes列の処理（status=falseの場合はスキップ）
-            if bind_data.stat || bind_data.name_only || bind_data.name_status {
+            if parameters.stat || parameters.name_only || parameters.name_status {
                 let file_changes = commit.file_changes()?;
                 let file_changes_struct_child = file_changes_vector
                     .as_mut()
@@ -314,7 +307,7 @@ impl VTab for GitLogVTab {
                     path_child.insert(i, file_change.path.as_str());
                 }
 
-                if bind_data.name_status || bind_data.stat {
+                if parameters.name_status || parameters.stat {
                     // statusフィールド (struct内の1番目のフィールド)
                     let status_child = file_changes_struct_child.child(1, file_changes.len());
                     for (i, file_change) in file_changes.iter().enumerate() {
@@ -322,7 +315,7 @@ impl VTab for GitLogVTab {
                     }
                 }
 
-                if bind_data.stat {
+                if parameters.stat {
                     // blob_idフィールド (struct内の2番目のフィールド)
                     let blob_id_child = file_changes_struct_child.child(2, file_changes.len());
                     for (i, file_change) in file_changes.iter().enumerate() {
@@ -384,12 +377,12 @@ impl VTab for GitLogVTab {
                 LogicalTypeHandle::from(LogicalTypeId::Varchar),
             ),
             (
-                "max_count".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Integer),
+                "decorate".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Varchar),
             ),
             (
-                "ignore_all_space".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Boolean),
+                "max_count".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Integer),
             ),
             (
                 "stat".to_string(),
@@ -404,8 +397,8 @@ impl VTab for GitLogVTab {
                 LogicalTypeHandle::from(LogicalTypeId::Boolean),
             ),
             (
-                "decorate".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Varchar),
+                "ignore_all_space".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Boolean),
             ),
         ])
     }

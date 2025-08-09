@@ -1,23 +1,6 @@
+use crate::types::{DecorateMode, FileStatus, GitLogParameter};
 use git2::Repository;
 use std::collections::HashMap;
-
-#[derive(Clone, Debug)]
-pub enum DecorateMode {
-    No,
-    Short,
-    Full,
-}
-
-impl DecorateMode {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "no" => DecorateMode::No,
-            "short" => DecorateMode::Short,
-            "full" => DecorateMode::Full,
-            _ => DecorateMode::Short, // デフォルトは short
-        }
-    }
-}
 
 pub struct Commit<'a> {
     ctx: &'a GitContext,
@@ -182,52 +165,6 @@ pub struct FileChange {
     pub del_lines: i32,
 }
 
-#[derive(Clone, Debug)]
-pub enum FileStatus {
-    Added,
-    Deleted,
-    Modified,
-    Renamed,
-    Copied,
-    Ignored,
-    Untracked,
-    Typechange,
-    Unmodified,
-    Unknown,
-}
-
-impl FileStatus {
-    pub fn as_bytes(&self) -> &'static [u8] {
-        match self {
-            FileStatus::Added => b"A",
-            FileStatus::Deleted => b"D",
-            FileStatus::Modified => b"M",
-            FileStatus::Renamed => b"R",
-            FileStatus::Copied => b"C",
-            FileStatus::Ignored => b"I",
-            FileStatus::Untracked => b"?",
-            FileStatus::Typechange => b"T",
-            FileStatus::Unmodified => b" ",
-            FileStatus::Unknown => b"U",
-        }
-    }
-
-    pub fn from_delta(delta: git2::Delta) -> Self {
-        match delta {
-            git2::Delta::Added => FileStatus::Added,
-            git2::Delta::Deleted => FileStatus::Deleted,
-            git2::Delta::Modified => FileStatus::Modified,
-            git2::Delta::Renamed => FileStatus::Renamed,
-            git2::Delta::Copied => FileStatus::Copied,
-            git2::Delta::Ignored => FileStatus::Ignored,
-            git2::Delta::Untracked => FileStatus::Untracked,
-            git2::Delta::Typechange => FileStatus::Typechange,
-            git2::Delta::Unmodified => FileStatus::Unmodified,
-            _ => FileStatus::Unknown,
-        }
-    }
-}
-
 pub struct GitContext {
     pub repo: Repository,
     pub ignore_all_space: bool,
@@ -236,18 +173,13 @@ pub struct GitContext {
 }
 
 impl GitContext {
-    pub fn new(
-        repo_path: &str,
-        ignore_all_space: bool,
-        status: bool,
-        decorate_mode: DecorateMode,
-    ) -> Result<Self, git2::Error> {
-        let repo = Repository::open(repo_path)?;
+    pub fn new(parameters: &GitLogParameter) -> Result<Self, git2::Error> {
+        let repo = Repository::open(&parameters.repo_path)?;
         Ok(GitContext {
             repo,
-            ignore_all_space,
-            status,
-            decorate_mode,
+            ignore_all_space: parameters.ignore_all_space,
+            status: parameters.stat || parameters.name_only || parameters.name_status,
+            decorate_mode: parameters.decorate.clone(),
         })
     }
 
@@ -285,7 +217,7 @@ impl GitContext {
         Ok(commit_oids)
     }
 
-    pub fn get_commit(&self, oid: git2::Oid) -> Result<Commit, git2::Error> {
+    pub fn get_commit(&'_ self, oid: git2::Oid) -> Result<Commit<'_>, git2::Error> {
         Commit::new(self, oid)
     }
 

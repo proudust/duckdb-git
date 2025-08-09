@@ -28,6 +28,37 @@ impl DecorateMode {
     }
 }
 
+pub trait GitContext {
+    type Commit: GitCommit;
+
+    fn get_commit(&self) -> &Self::Commit;
+}
+
+pub trait GitCommit {
+    type FileChange: GitFileChange;
+
+    fn commit_id(&self) -> &[u8];
+    fn refs(&self) -> Vec<&[u8]>;
+    fn parents(&self) -> Vec<&[u8]>;
+    fn author_name(&self) -> &[u8];
+    fn author_email(&self) -> &[u8];
+    fn author_timestamp(&self) -> i64;
+    fn committer_name(&self) -> &[u8];
+    fn committer_email(&self) -> &[u8];
+    fn committer_timestamp(&self) -> i64;
+    fn message(&self) -> &[u8];
+    fn file_changes(&self) -> Vec<Self::FileChange>;
+}
+
+pub trait GitFileChange {
+    fn blob_id(&self) -> &[u8];
+    fn path(&self) -> &[u8];
+    fn status(&self) -> FileStatus;
+    fn add_lines(&self) -> i32;
+    fn del_lines(&self) -> i32;
+    fn file_size(&self) -> i64;
+}
+
 #[derive(Clone, Debug)]
 pub enum FileStatus {
     Added,

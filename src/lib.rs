@@ -6,8 +6,8 @@ extern crate libduckdb_sys;
 pub mod git_log;
 pub mod types;
 
-use crate::git_log::GitContext;
-use crate::types::{DecorateMode, GitLogParameter};
+use crate::git_log::LibGitContext;
+use crate::types::{DecorateMode, GitCommit, GitFileChange, GitLogParameter};
 use duckdb::{
     core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
@@ -161,7 +161,7 @@ impl VTab for GitLogVTab {
         let parameters = unsafe { &(*bind_data).parameters };
 
         // GitContext を作成
-        let ctx = GitContext::new(&parameters)?;
+        let ctx = LibGitContext::new(&parameters)?;
 
         // 全てのコミットOIDを収集
         let commit_oids =
@@ -207,7 +207,7 @@ impl VTab for GitLogVTab {
         let end_index = std::cmp::min(start_index + batch_size, init_data.commit_ids.len());
 
         // GitContext を作成
-        let ctx = GitContext::new(parameters)?;
+        let ctx = LibGitContext::new(parameters)?;
 
         // 各列のベクターを取得
         let commit_id_vector = output.flat_vector(0);
@@ -276,16 +276,16 @@ impl VTab for GitLogVTab {
             let parents = commit.parents();
             let parents_child = parents_vector.child(parents.len());
             for (i, parent) in parents.iter().enumerate() {
-                parents_child.insert(i, parent.as_str());
+                parents_child.insert(i, *parent);
             }
             parents_vector.set_entry(batch_idx, 0, parents.len());
 
             // refs列の処理（decorateがnoでない場合）
             if parameters.decorate != DecorateMode::No {
-                let refs = commit.refs()?;
+                let refs = commit.refs();
                 let refs_child = refs_vector.as_mut().unwrap().child(refs.len());
                 for (i, ref_name) in refs.iter().enumerate() {
-                    refs_child.insert(i, ref_name.as_str());
+                    refs_child.insert(i, *ref_name);
                 }
                 refs_vector
                     .as_mut()
@@ -295,7 +295,7 @@ impl VTab for GitLogVTab {
 
             // file_changes列の処理（status=falseの場合はスキップ）
             if parameters.stat || parameters.name_only || parameters.name_status {
-                let file_changes = commit.file_changes()?;
+                let file_changes = commit.file_changes();
                 let file_changes_struct_child = file_changes_vector
                     .as_mut()
                     .unwrap()
@@ -304,14 +304,14 @@ impl VTab for GitLogVTab {
                 // pathフィールド (struct内の0番目のフィールド)
                 let path_child = file_changes_struct_child.child(0, file_changes.len());
                 for (i, file_change) in file_changes.iter().enumerate() {
-                    path_child.insert(i, file_change.path.as_str());
+                    path_child.insert(i, file_change.path());
                 }
 
                 if parameters.name_status || parameters.stat {
                     // statusフィールド (struct内の1番目のフィールド)
                     let status_child = file_changes_struct_child.child(1, file_changes.len());
                     for (i, file_change) in file_changes.iter().enumerate() {
-                        status_child.insert(i, file_change.status.as_bytes());
+                        status_child.insert(i, file_change.status().as_bytes());
                     }
                 }
 
@@ -319,28 +319,28 @@ impl VTab for GitLogVTab {
                     // blob_idフィールド (struct内の2番目のフィールド)
                     let blob_id_child = file_changes_struct_child.child(2, file_changes.len());
                     for (i, file_change) in file_changes.iter().enumerate() {
-                        blob_id_child.insert(i, file_change.blob_id.as_str());
+                        blob_id_child.insert(i, file_change.blob_id());
                     }
 
                     // file_sizeフィールド (struct内の3番目のフィールド)
                     let mut file_size_child =
                         file_changes_struct_child.child(3, file_changes.len());
                     for (i, file_change) in file_changes.iter().enumerate() {
-                        file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size;
+                        file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size();
                     }
 
                     // add_linesフィールド (struct内の4番目のフィールド)
                     let mut add_lines_child =
                         file_changes_struct_child.child(4, file_changes.len());
                     for (i, file_change) in file_changes.iter().enumerate() {
-                        add_lines_child.as_mut_slice::<i32>()[i] = file_change.add_lines;
+                        add_lines_child.as_mut_slice::<i32>()[i] = file_change.add_lines();
                     }
 
                     // del_linesフィールド (struct内の5番目のフィールド)
                     let mut del_lines_child =
                         file_changes_struct_child.child(5, file_changes.len());
                     for (i, file_change) in file_changes.iter().enumerate() {
-                        del_lines_child.as_mut_slice::<i32>()[i] = file_change.del_lines;
+                        del_lines_child.as_mut_slice::<i32>()[i] = file_change.del_lines();
                     }
                 }
 

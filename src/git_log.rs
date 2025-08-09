@@ -1,185 +1,219 @@
-use crate::types::{DecorateMode, FileStatus, GitLogParameter};
+use crate::types::{DecorateMode, FileStatus, GitCommit, GitFileChange, GitLogParameter};
 use git2::Repository;
+use internment::Arena;
 use std::collections::HashMap;
 
-pub struct Commit<'a> {
-    ctx: &'a GitContext,
+pub struct LibGitCommit<'a> {
+    ctx: &'a LibGitContext,
     commit: git2::Commit<'a>,
     author: git2::Signature<'a>,
     committer: git2::Signature<'a>,
 }
 
-impl<'a> Commit<'a> {
-    pub fn new(ctx: &'a GitContext, oid: git2::Oid) -> Result<Self, git2::Error> {
+impl<'a> LibGitCommit<'a> {
+    pub fn new(ctx: &'a LibGitContext, oid: git2::Oid) -> Result<Self, git2::Error> {
         let commit = ctx.repo.find_commit(oid)?;
         let author = commit.author().to_owned();
         let committer = commit.committer().to_owned();
-        Ok(Commit {
+        Ok(LibGitCommit {
             ctx,
             commit,
             author,
             committer,
         })
     }
+}
 
-    pub fn author_name(&self) -> &[u8] {
+impl<'a> GitCommit for LibGitCommit<'a> {
+    type FileChange = LibGitFileChange;
+
+    fn commit_id(&self) -> &[u8] {
+        self.ctx
+            .arena
+            .intern_ref(self.commit.id().as_bytes())
+            .into_ref()
+    }
+
+    fn author_name(&self) -> &[u8] {
         self.author.name_bytes()
     }
 
-    pub fn author_email(&self) -> &[u8] {
+    fn author_email(&self) -> &[u8] {
         self.author.email_bytes()
     }
 
-    pub fn author_timestamp(&self) -> i64 {
+    fn author_timestamp(&self) -> i64 {
         self.commit.time().seconds()
     }
 
-    pub fn committer_name(&self) -> &[u8] {
+    fn committer_name(&self) -> &[u8] {
         self.committer.name_bytes()
     }
 
-    pub fn committer_email(&self) -> &[u8] {
+    fn committer_email(&self) -> &[u8] {
         self.committer.email_bytes()
     }
 
-    pub fn committer_timestamp(&self) -> i64 {
+    fn committer_timestamp(&self) -> i64 {
         self.committer.when().seconds()
     }
 
-    pub fn message(&self) -> &[u8] {
+    fn message(&self) -> &[u8] {
         self.commit.message_bytes()
     }
 
-    pub fn parents(&self) -> Vec<String> {
+    fn parents(&self) -> Vec<&[u8]> {
         (0..self.commit.parent_count())
-            .map(|i| self.commit.parent_id(i).unwrap().to_string())
+            .map(|i| {
+                self.ctx
+                    .arena
+                    .intern_ref(self.commit.parent_id(i).unwrap().as_bytes())
+                    .into_ref()
+            })
             .collect()
     }
 
-    pub fn file_changes(&self) -> Result<Vec<FileChange>, git2::Error> {
+    fn file_changes(&self) -> Vec<LibGitFileChange> {
         if !self.ctx.status {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         // コミットを直接参照
         let commit = &self.commit;
-        self.ctx.get_file_changes(commit)
+        self.ctx.get_file_changes(commit).unwrap()
     }
 
-    pub fn refs(&self) -> Result<Vec<String>, git2::Error> {
-        match &self.ctx.decorate_mode {
-            DecorateMode::No => Ok(Vec::new()),
-            _ => {
-                let commit_id = self.commit.id();
-                let mut refs = Vec::new();
+    fn refs(&self) -> Vec<&[u8]> {
+        if self.ctx.decorate == DecorateMode::No {
+            return Vec::new();
+        }
 
-                // ブランチの取得
-                let branches = self.ctx.repo.branches(None)?;
-                for branch_result in branches {
-                    let (branch, branch_type) = branch_result?;
-                    if let Some(target_oid) = branch.get().target() {
-                        if target_oid == commit_id {
-                            if let Some(name) = branch.name()? {
-                                let ref_name = match &self.ctx.decorate_mode {
-                                    DecorateMode::Short => {
-                                        // short形式: refs/heads/main -> main
-                                        match branch_type {
-                                            git2::BranchType::Local => name.to_string(),
-                                            git2::BranchType::Remote => {
-                                                // リモートブランチの場合: origin/main
-                                                name.to_string()
-                                            }
-                                        }
+        let commit_id = self.commit.id();
+        let arena = &self.ctx.arena;
+        let mut refs = Vec::new();
+
+        // ブランチの取得
+        let branches = self.ctx.repo.branches(None).unwrap();
+        for branch_result in branches {
+            let (branch, branch_type) = branch_result.unwrap();
+            if let Some(target_oid) = branch.get().target() {
+                if target_oid == commit_id {
+                    if let Some(name) = branch.name().unwrap() {
+                        let ref_name = match &self.ctx.decorate {
+                            DecorateMode::Short => arena.intern_ref(name.as_bytes()),
+                            DecorateMode::Full => {
+                                // full形式: 完全なref名
+                                match branch_type {
+                                    git2::BranchType::Local => {
+                                        arena.intern_ref(format!("refs/heads/{}", name).as_bytes())
                                     }
-                                    DecorateMode::Full => {
-                                        // full形式: 完全なref名
-                                        match branch_type {
-                                            git2::BranchType::Local => {
-                                                format!("refs/heads/{}", name)
-                                            }
-                                            git2::BranchType::Remote => {
-                                                format!("refs/remotes/{}", name)
-                                            }
-                                        }
-                                    }
-                                    DecorateMode::No => unreachable!(),
-                                };
-                                refs.push(ref_name);
+                                    git2::BranchType::Remote => arena
+                                        .intern_ref(format!("refs/remotes/{}", name).as_bytes()),
+                                }
                             }
+                            DecorateMode::No => unreachable!(),
+                        };
+                        refs.push(ref_name.into_ref());
+                    }
+                }
+            }
+        }
+
+        // タグの取得
+        self.ctx
+            .repo
+            .tag_foreach(|tag_oid, name| {
+                // タグが指すコミットを解決
+                if let Ok(tag_obj) = self.ctx.repo.find_object(tag_oid, None) {
+                    let target_oid = match tag_obj.kind() {
+                        Some(git2::ObjectType::Tag) => {
+                            // annotated tag の場合、target を取得
+                            if let Some(tag) = tag_obj.as_tag() {
+                                tag.target_id()
+                            } else {
+                                tag_oid
+                            }
+                        }
+                        _ => tag_oid, // lightweight tag の場合
+                    };
+
+                    if target_oid == commit_id {
+                        if let Ok(tag_name) = std::str::from_utf8(name) {
+                            let ref_name = match &self.ctx.decorate {
+                                DecorateMode::Short => {
+                                    // short形式: refs/tags/v1.0.0 -> v1.0.0
+                                    tag_name
+                                        .strip_prefix("refs/tags/")
+                                        .unwrap_or(tag_name)
+                                        .as_bytes()
+                                }
+                                DecorateMode::Full => {
+                                    // full形式: 完全なref名
+                                    tag_name.as_bytes()
+                                }
+                                DecorateMode::No => unreachable!(),
+                            };
+                            refs.push(arena.intern_ref(ref_name).into_ref());
                         }
                     }
                 }
+                true
+            })
+            .unwrap();
 
-                // タグの取得
-                self.ctx.repo.tag_foreach(|tag_oid, name| {
-                    // タグが指すコミットを解決
-                    if let Ok(tag_obj) = self.ctx.repo.find_object(tag_oid, None) {
-                        let target_oid = match tag_obj.kind() {
-                            Some(git2::ObjectType::Tag) => {
-                                // annotated tag の場合、target を取得
-                                if let Some(tag) = tag_obj.as_tag() {
-                                    tag.target_id()
-                                } else {
-                                    tag_oid
-                                }
-                            }
-                            _ => tag_oid, // lightweight tag の場合
-                        };
-
-                        if target_oid == commit_id {
-                            if let Ok(tag_name) = std::str::from_utf8(name) {
-                                let ref_name = match &self.ctx.decorate_mode {
-                                    DecorateMode::Short => {
-                                        // short形式: refs/tags/v1.0.0 -> v1.0.0
-                                        tag_name
-                                            .strip_prefix("refs/tags/")
-                                            .unwrap_or(tag_name)
-                                            .to_string()
-                                    }
-                                    DecorateMode::Full => {
-                                        // full形式: 完全なref名
-                                        tag_name.to_string()
-                                    }
-                                    DecorateMode::No => unreachable!(),
-                                };
-                                refs.push(ref_name);
-                            }
-                        }
-                    }
-                    true
-                })?;
-
-                Ok(refs)
-            }
-        }
+        refs
     }
 }
 
 #[derive(Clone)]
-pub struct FileChange {
-    pub path: String,
-    pub status: FileStatus,
-    pub blob_id: String,
-    pub file_size: i64,
-    pub add_lines: i32,
-    pub del_lines: i32,
+pub struct LibGitFileChange {
+    path: String,
+    status: FileStatus,
+    blob_id: String,
+    file_size: i64,
+    add_lines: i32,
+    del_lines: i32,
 }
 
-pub struct GitContext {
-    pub repo: Repository,
-    pub ignore_all_space: bool,
-    pub status: bool,
-    pub decorate_mode: DecorateMode,
+impl GitFileChange for LibGitFileChange {
+    fn blob_id(&self) -> &[u8] {
+        self.blob_id.as_bytes()
+    }
+    fn path(&self) -> &[u8] {
+        self.path.as_bytes()
+    }
+    fn status(&self) -> FileStatus {
+        self.status.clone()
+    }
+    fn add_lines(&self) -> i32 {
+        self.add_lines
+    }
+    fn del_lines(&self) -> i32 {
+        self.del_lines
+    }
+    fn file_size(&self) -> i64 {
+        self.file_size
+    }
 }
 
-impl GitContext {
+pub struct LibGitContext {
+    arena: Arena<[u8]>,
+    repo: Repository,
+    ignore_all_space: bool,
+    status: bool,
+    decorate: DecorateMode,
+}
+
+impl LibGitContext {
     pub fn new(parameters: &GitLogParameter) -> Result<Self, git2::Error> {
+        let arena = Arena::new();
         let repo = Repository::open(&parameters.repo_path)?;
-        Ok(GitContext {
+        Ok(LibGitContext {
+            arena,
             repo,
             ignore_all_space: parameters.ignore_all_space,
             status: parameters.stat || parameters.name_only || parameters.name_status,
-            decorate_mode: parameters.decorate.clone(),
+            decorate: parameters.decorate.clone(),
         })
     }
 
@@ -217,11 +251,14 @@ impl GitContext {
         Ok(commit_oids)
     }
 
-    pub fn get_commit(&'_ self, oid: git2::Oid) -> Result<Commit<'_>, git2::Error> {
-        Commit::new(self, oid)
+    pub fn get_commit(&'_ self, oid: git2::Oid) -> Result<LibGitCommit<'_>, git2::Error> {
+        LibGitCommit::new(self, oid)
     }
 
-    pub fn get_file_changes(&self, commit: &git2::Commit) -> Result<Vec<FileChange>, git2::Error> {
+    pub fn get_file_changes(
+        &self,
+        commit: &git2::Commit,
+    ) -> Result<Vec<LibGitFileChange>, git2::Error> {
         let mut file_changes = Vec::new();
 
         // 各コミットについて変更されたファイルを取得
@@ -245,7 +282,7 @@ impl GitContext {
                         (0, 0) // ディレクトリや取得できない場合は0
                     };
 
-                    file_changes.push(FileChange {
+                    file_changes.push(LibGitFileChange {
                         path: name.to_string(),
                         status: FileStatus::Added,
                         blob_id: oid.to_string(),
@@ -332,7 +369,7 @@ impl GitContext {
                     // 統計情報から行数を取得
                     let (add_lines, del_lines) = file_stats.get(&file_path).unwrap_or(&(0, 0));
 
-                    file_changes.push(FileChange {
+                    file_changes.push(LibGitFileChange {
                         path: file_path,
                         status,
                         blob_id,

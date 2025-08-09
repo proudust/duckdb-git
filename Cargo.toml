@@ -24,3 +24,4 @@ duckdb = { version = "1.3.2", features = ["vtab-loadable"] }
 duckdb-loadable-macros = "0.1.9"
 libduckdb-sys = { version = "1.3.2", features = ["loadable-extension"] }
 git2 = { version = "0.20.2", default-features = false, features = [] }
+internment = { version = "0.8.6", default-features = false, features = ["arena"] }

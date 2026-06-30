@@ -12,6 +12,8 @@
         "revparse",
         "revwalk",
         "staticlib",
+        "timestamptz",
+        "varchar",
         "venv",
         "vtab"
     ]

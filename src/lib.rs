@@ -1,18 +1,12 @@
-extern crate duckdb;
-extern crate duckdb_loadable_macros;
-extern crate git2;
-extern crate libduckdb_sys;
-
 mod git_log;
 
 use duckdb::{
     core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
+    duckdb_entrypoint_c_api,
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection, Result,
 };
-use duckdb_loadable_macros::duckdb_entrypoint_c_api;
 use git_log::{DiffMerges, GitContext};
-use libduckdb_sys as ffi;
 use std::{
     error::Error,
     sync::atomic::{AtomicUsize, Ordering},
@@ -209,7 +203,7 @@ impl VTab for GitLogVTab {
 
             // author_timestamp column - convert to microseconds for DuckDB TIMESTAMP
             let author_timestamp_micros = commit.author_timestamp() * 1_000_000;
-            author_timestamp_vector.as_mut_slice::<i64>()[batch_idx] = author_timestamp_micros;
+            unsafe { author_timestamp_vector.as_mut_slice::<i64>()[batch_idx] = author_timestamp_micros };
 
             // committer column
             committer_vector.insert(batch_idx, commit.committer_name());
@@ -219,8 +213,7 @@ impl VTab for GitLogVTab {
 
             // committer_timestamp column - convert to microseconds for DuckDB TIMESTAMP
             let committer_timestamp_micros = commit.committer_timestamp() * 1_000_000;
-            committer_timestamp_vector.as_mut_slice::<i64>()[batch_idx] =
-                committer_timestamp_micros;
+            unsafe { committer_timestamp_vector.as_mut_slice::<i64>()[batch_idx] = committer_timestamp_micros };
 
             // message column
             message_vector.insert(batch_idx, commit.message());
@@ -262,19 +255,19 @@ impl VTab for GitLogVTab {
                 // file_sizeフィールド (struct内の3番目のフィールド)
                 let mut file_size_child = file_changes_struct_child.child(3, file_changes.len());
                 for (i, file_change) in file_changes.iter().enumerate() {
-                    file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size;
+                    unsafe { file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size };
                 }
 
                 // add_linesフィールド (struct内の4番目のフィールド)
                 let mut add_lines_child = file_changes_struct_child.child(4, file_changes.len());
                 for (i, file_change) in file_changes.iter().enumerate() {
-                    add_lines_child.as_mut_slice::<i32>()[i] = file_change.add_lines;
+                    unsafe { add_lines_child.as_mut_slice::<i32>()[i] = file_change.add_lines };
                 }
 
                 // del_linesフィールド (struct内の5番目のフィールド)
                 let mut del_lines_child = file_changes_struct_child.child(5, file_changes.len());
                 for (i, file_change) in file_changes.iter().enumerate() {
-                    del_lines_child.as_mut_slice::<i32>()[i] = file_change.del_lines;
+                    unsafe { del_lines_child.as_mut_slice::<i32>()[i] = file_change.del_lines };
                 }
 
                 file_changes_vector
@@ -322,9 +315,8 @@ impl VTab for GitLogVTab {
     }
 }
 
-#[duckdb_entrypoint_c_api()]
+#[duckdb_entrypoint_c_api]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
-    con.register_table_function::<GitLogVTab>("git_log")
-        .expect("Failed to register git_log table function");
+    con.register_table_function::<GitLogVTab>("git_log")?;
     Ok(())
 }

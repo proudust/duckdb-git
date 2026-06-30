@@ -151,7 +151,7 @@ impl GitContext {
         Ok(commit_oids)
     }
 
-    pub fn get_commit(&self, oid: git2::Oid) -> Result<Commit, git2::Error> {
+    pub fn get_commit(&self, oid: git2::Oid) -> Result<Commit<'_>, git2::Error> {
         Commit::new(self, oid)
     }
 

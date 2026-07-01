@@ -1,5 +1,5 @@
 use git2::Repository;
-use std::collections::HashMap;
+use std::cell::RefCell;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiffMerges {
@@ -207,29 +207,7 @@ impl GitContext {
                 Some(&mut diff_options),
             )?;
 
-            // 各ファイルの統計情報を格納するマップ
-            let mut file_stats = HashMap::new();
-
-            // まず統計情報を収集
-            diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
-                let file_path = if let Some(new_file) = delta.new_file().path() {
-                    new_file.to_string_lossy().to_string()
-                } else if let Some(old_file) = delta.old_file().path() {
-                    old_file.to_string_lossy().to_string()
-                } else {
-                    "unknown".to_string()
-                };
-
-                let entry = file_stats.entry(file_path).or_insert((0i32, 0i32));
-
-                match line.origin() {
-                    '+' => entry.0 += 1, // add_lines
-                    '-' => entry.1 += 1, // del_lines
-                    _ => {}
-                }
-                true
-            })?;
-
+            let file_changes = RefCell::new(&mut file_changes);
             diff.foreach(
                 &mut |delta, _progress| {
                     let status = match delta.status() {
@@ -252,45 +230,46 @@ impl GitContext {
                         "unknown".to_string()
                     };
 
-                    // blob_idとファイルサイズの取得
                     let (blob_id, file_size) = if delta.new_file().path().is_some() {
-                        let new_oid = delta.new_file().id();
-                        let size = if let Ok(blob) = self.repo.find_blob(new_oid) {
-                            blob.size() as i64
-                        } else {
-                            0 // ディレクトリや削除されたファイルは0
-                        };
-                        (new_oid.to_string(), size)
+                        (
+                            delta.new_file().id().to_string(),
+                            delta.new_file().size() as i64,
+                        )
                     } else if delta.old_file().path().is_some() {
-                        let old_oid = delta.old_file().id();
-                        let size = if let Ok(blob) = self.repo.find_blob(old_oid) {
-                            blob.size() as i64
-                        } else {
-                            0
-                        };
-                        (old_oid.to_string(), size)
+                        (
+                            delta.old_file().id().to_string(),
+                            delta.old_file().size() as i64,
+                        )
                     } else {
                         ("unknown".to_string(), 0)
                     };
 
-                    // 統計情報から行数を取得
-                    let (add_lines, del_lines) = file_stats.get(&file_path).unwrap_or(&(0, 0));
-
-                    file_changes.push(FileChange {
+                    file_changes.borrow_mut().push(FileChange {
                         path: file_path,
                         status: status.to_string(),
                         blob_id,
                         file_size,
-                        add_lines: *add_lines,
-                        del_lines: *del_lines,
+                        add_lines: 0,
+                        del_lines: 0,
                     });
 
                     true
                 },
                 None,
                 None,
-                None,
+                Some(&mut |_delta, _hunk, line| {
+                    let mut fc = file_changes.borrow_mut();
+                    if let Some(last) = fc.last_mut() {
+                        match line.origin() {
+                            '+' => last.add_lines += 1,
+                            '-' => last.del_lines += 1,
+                            _ => {}
+                        }
+                    }
+                    true
+                }),
             )?;
+            let _ = file_changes;
         }
 
         Ok(file_changes)

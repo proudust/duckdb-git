@@ -114,11 +114,9 @@ impl GitContext {
         ignore_all_space: bool,
         diff_merges: DiffMerges,
     ) -> Result<Self, git2::Error> {
-        let repo = CACHED_REPO.with_borrow_mut(|cached| {
-            match cached {
-                Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1),
-                _ => Repository::open(repo_path),
-            }
+        let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
+            Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1),
+            _ => Repository::open(repo_path),
         })?;
         Ok(GitContext {
             repo: Some(repo),
@@ -179,7 +177,10 @@ impl GitContext {
         if parent_count == 0 {
             // 初回コミットの場合、全てのファイルを新規追加として扱う
             let tree = commit.tree()?;
-            tree.walk(git2::TreeWalkMode::PreOrder, |_root, entry| {
+            tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+                if entry.kind() == Some(git2::ObjectType::Tree) {
+                    return git2::TreeWalkResult::Ok;
+                }
                 if let Some(name) = entry.name() {
                     let oid = entry.id();
                     let (file_size, add_lines) = if let Ok(blob) = self.repo().find_blob(oid) {
@@ -195,7 +196,7 @@ impl GitContext {
                     };
 
                     file_changes.push(FileChange {
-                        path: name.to_string(),
+                        path: format!("{}{}", root, name),
                         status: "A".to_string(), // Added
                         blob_id: oid.to_string(),
                         file_size,
@@ -300,4 +301,3 @@ impl Drop for GitContext {
         }
     }
 }
-

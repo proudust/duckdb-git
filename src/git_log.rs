@@ -1,6 +1,10 @@
 use git2::Repository;
 use std::cell::RefCell;
 
+thread_local! {
+    static CACHED_REPO: RefCell<Option<(String, Repository)>> = const { RefCell::new(None) };
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiffMerges {
     Off,
@@ -31,7 +35,7 @@ pub struct Commit<'a> {
 
 impl<'a> Commit<'a> {
     pub fn new(ctx: &'a GitContext, oid: git2::Oid) -> Result<Self, git2::Error> {
-        let commit = ctx.repo.find_commit(oid)?;
+        let commit = ctx.repo().find_commit(oid)?;
         let author = commit.author().to_owned();
         let committer = commit.committer().to_owned();
         Ok(Commit {
@@ -98,7 +102,8 @@ pub struct FileChange {
 }
 
 pub struct GitContext {
-    pub repo: Repository,
+    repo: Option<Repository>,
+    pub repo_path: String,
     pub ignore_all_space: bool,
     pub diff_merges: DiffMerges,
 }
@@ -109,12 +114,22 @@ impl GitContext {
         ignore_all_space: bool,
         diff_merges: DiffMerges,
     ) -> Result<Self, git2::Error> {
-        let repo = Repository::open(repo_path)?;
+        let repo = CACHED_REPO.with_borrow_mut(|cached| {
+            match cached {
+                Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1),
+                _ => Repository::open(repo_path),
+            }
+        })?;
         Ok(GitContext {
-            repo,
+            repo: Some(repo),
+            repo_path: repo_path.to_string(),
             ignore_all_space,
             diff_merges,
         })
+    }
+
+    fn repo(&self) -> &Repository {
+        self.repo.as_ref().unwrap()
     }
 
     pub fn get_commit_oids(
@@ -122,13 +137,13 @@ impl GitContext {
         revision: Option<&String>,
         max_count: Option<usize>,
     ) -> Result<Vec<git2::Oid>, git2::Error> {
-        let mut revwalk = self.repo.revwalk()?;
+        let mut revwalk = self.repo().revwalk()?;
 
         // リビジョンが指定されている場合はそれを使用、そうでなければHEADを使用
         match revision {
             Some(rev) => {
                 // ブランチ名やコミットハッシュを解決
-                let obj = self.repo.revparse_single(rev)?;
+                let obj = self.repo().revparse_single(rev)?;
                 revwalk.push(obj.id())?;
             }
             None => {
@@ -167,7 +182,7 @@ impl GitContext {
             tree.walk(git2::TreeWalkMode::PreOrder, |_root, entry| {
                 if let Some(name) = entry.name() {
                     let oid = entry.id();
-                    let (file_size, add_lines) = if let Ok(blob) = self.repo.find_blob(oid) {
+                    let (file_size, add_lines) = if let Ok(blob) = self.repo().find_blob(oid) {
                         let content = std::str::from_utf8(blob.content());
                         let lines = if let Ok(text) = content {
                             text.lines().count() as i32
@@ -201,7 +216,7 @@ impl GitContext {
                 diff_options.ignore_whitespace(true);
             }
 
-            let diff = self.repo.diff_tree_to_tree(
+            let diff = self.repo().diff_tree_to_tree(
                 Some(&parent_tree),
                 Some(&current_tree),
                 Some(&mut diff_options),
@@ -275,3 +290,14 @@ impl GitContext {
         Ok(file_changes)
     }
 }
+
+impl Drop for GitContext {
+    fn drop(&mut self) {
+        if let Some(repo) = self.repo.take() {
+            CACHED_REPO.with_borrow_mut(|cached| {
+                *cached = Some((std::mem::take(&mut self.repo_path), repo));
+            });
+        }
+    }
+}
+

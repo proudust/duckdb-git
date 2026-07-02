@@ -2,7 +2,6 @@ mod git_log;
 
 use duckdb::{
     core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
-    duckdb_entrypoint_c_api,
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection, Result,
 };
@@ -203,7 +202,9 @@ impl VTab for GitLogVTab {
 
             // author_timestamp column - convert to microseconds for DuckDB TIMESTAMP
             let author_timestamp_micros = commit.author_timestamp() * 1_000_000;
-            unsafe { author_timestamp_vector.as_mut_slice::<i64>()[batch_idx] = author_timestamp_micros };
+            unsafe {
+                author_timestamp_vector.as_mut_slice::<i64>()[batch_idx] = author_timestamp_micros
+            };
 
             // committer column
             committer_vector.insert(batch_idx, commit.committer_name());
@@ -213,7 +214,10 @@ impl VTab for GitLogVTab {
 
             // committer_timestamp column - convert to microseconds for DuckDB TIMESTAMP
             let committer_timestamp_micros = commit.committer_timestamp() * 1_000_000;
-            unsafe { committer_timestamp_vector.as_mut_slice::<i64>()[batch_idx] = committer_timestamp_micros };
+            unsafe {
+                committer_timestamp_vector.as_mut_slice::<i64>()[batch_idx] =
+                    committer_timestamp_micros
+            };
 
             // message column
             message_vector.insert(batch_idx, commit.message());
@@ -315,8 +319,13 @@ impl VTab for GitLogVTab {
     }
 }
 
-#[duckdb_entrypoint_c_api]
-pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
+pub fn register(con: &Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<GitLogVTab>("git_log")?;
     Ok(())
+}
+
+#[cfg(feature = "loadable-extension")]
+#[duckdb::duckdb_entrypoint_c_api]
+pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
+    register(&con)
 }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [profile.release]
 lto = true
@@ -19,6 +19,18 @@ name = "duckdb-git"
 path = "src/wasm_lib.rs"
 crate-type = ["staticlib"]
 
+[features]
+default = ["loadable-extension"]
+loadable-extension = ["duckdb/loadable-extension"]
+bundled = ["duckdb/bundled"]                       # For benchmark
+
 [dependencies]
-duckdb = { version = "~1.10504.0", features = ["loadable-extension"] }
+duckdb = { version = "~1.10504.0", features = ["vtab"] }
 git2 = { version = "0.20.2", default-features = false, features = [] }
+
+[dev-dependencies]
+divan = "0.1"
+
+[[bench]]
+name = "git_log_with_duckdb"
+harness = false

@@ -27,5 +27,8 @@ test: test_debug
 test_debug: test_extension_debug
 test_release: test_extension_release
 
+bench:
+	cargo bench --no-default-features --features bundled
+
 clean: clean_build clean_rust
 clean_all: clean_configure clean

@@ -1,11 +1,13 @@
 mod git_log;
+mod vector;
 
 use duckdb::{
-    core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
+    core::{DataChunkHandle, LogicalTypeHandle, LogicalTypeId},
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection, Result,
 };
 use git_log::{DiffMerges, GitContext};
+use vector::VectorInserter;
 use std::{
     error::Error,
     sync::atomic::{AtomicUsize, Ordering},
@@ -168,125 +170,18 @@ impl VTab for GitLogVTab {
             bind_data.diff_merges.clone(),
         )?;
 
-        // 各列のベクターを取得
-        let commit_id_vector = output.flat_vector(0);
-        let author_vector = output.flat_vector(1);
-        let email_vector = output.flat_vector(2);
-        let mut author_timestamp_vector = output.flat_vector(3);
-        let committer_vector = output.flat_vector(4);
-        let committer_email_vector = output.flat_vector(5);
-        let mut committer_timestamp_vector = output.flat_vector(6);
-        let message_vector = output.flat_vector(7);
-        let mut parents_vector = output.list_vector(8);
-
-        // file_changes列のベクターを条件付きで取得
-        let mut file_changes_vector = if !bind_data.diff_merges.should_skip_file_changes() {
-            Some(output.list_vector(9))
-        } else {
-            None
-        };
+        // 出力チャンクのインサーターを構築（各カラムベクターを事前取得）
+        let mut writer =
+            VectorInserter::new(output, !bind_data.diff_merges.should_skip_file_changes());
 
         // バッチ内の各コミットを処理
         let oids = &init_data.commit_ids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
             let commit = ctx.get_commit(*oid)?;
-
-            // commit_id column
-            commit_id_vector.insert(batch_idx, &oid.to_string());
-
-            // author column
-            author_vector.insert(batch_idx, commit.author_name());
-
-            // author_email column
-            email_vector.insert(batch_idx, commit.author_email());
-
-            // author_timestamp column - convert to microseconds for DuckDB TIMESTAMP
-            let author_timestamp_micros = commit.author_timestamp() * 1_000_000;
-            unsafe {
-                author_timestamp_vector.as_mut_slice::<i64>()[batch_idx] = author_timestamp_micros
-            };
-
-            // committer column
-            committer_vector.insert(batch_idx, commit.committer_name());
-
-            // committer_email column
-            committer_email_vector.insert(batch_idx, commit.committer_email());
-
-            // committer_timestamp column - convert to microseconds for DuckDB TIMESTAMP
-            let committer_timestamp_micros = commit.committer_timestamp() * 1_000_000;
-            unsafe {
-                committer_timestamp_vector.as_mut_slice::<i64>()[batch_idx] =
-                    committer_timestamp_micros
-            };
-
-            // message column
-            message_vector.insert(batch_idx, commit.message());
-
-            // parents column (string array)
-            let parents = commit.parents();
-            let parents_child = parents_vector.child(parents.len());
-            for (i, parent) in parents.iter().enumerate() {
-                parents_child.insert(i, parent.as_str());
-            }
-            parents_vector.set_entry(batch_idx, 0, parents.len());
-
-            // file_changes列の処理（diff_merges=offの場合はスキップ）
-            if !bind_data.diff_merges.should_skip_file_changes() {
-                let file_changes = commit.file_changes()?;
-                let file_changes_struct_child = file_changes_vector
-                    .as_mut()
-                    .unwrap()
-                    .struct_child(file_changes.len());
-
-                // pathフィールド (struct内の0番目のフィールド)
-                let path_child = file_changes_struct_child.child(0, file_changes.len());
-                for (i, file_change) in file_changes.iter().enumerate() {
-                    path_child.insert(i, file_change.path.as_str());
-                }
-
-                // statusフィールド (struct内の1番目のフィールド)
-                let status_child = file_changes_struct_child.child(1, file_changes.len());
-                for (i, file_change) in file_changes.iter().enumerate() {
-                    status_child.insert(i, file_change.status.as_str());
-                }
-
-                // blob_idフィールド (struct内の2番目のフィールド)
-                let blob_id_child = file_changes_struct_child.child(2, file_changes.len());
-                for (i, file_change) in file_changes.iter().enumerate() {
-                    blob_id_child.insert(i, file_change.blob_id.as_str());
-                }
-
-                // file_sizeフィールド (struct内の3番目のフィールド)
-                let mut file_size_child = file_changes_struct_child.child(3, file_changes.len());
-                for (i, file_change) in file_changes.iter().enumerate() {
-                    unsafe { file_size_child.as_mut_slice::<i64>()[i] = file_change.file_size };
-                }
-
-                // add_linesフィールド (struct内の4番目のフィールド)
-                let mut add_lines_child = file_changes_struct_child.child(4, file_changes.len());
-                for (i, file_change) in file_changes.iter().enumerate() {
-                    unsafe { add_lines_child.as_mut_slice::<i32>()[i] = file_change.add_lines };
-                }
-
-                // del_linesフィールド (struct内の5番目のフィールド)
-                let mut del_lines_child = file_changes_struct_child.child(5, file_changes.len());
-                for (i, file_change) in file_changes.iter().enumerate() {
-                    unsafe { del_lines_child.as_mut_slice::<i32>()[i] = file_change.del_lines };
-                }
-
-                file_changes_vector
-                    .as_mut()
-                    .unwrap()
-                    .set_entry(batch_idx, 0, file_changes.len());
-            }
+            writer.push(batch_idx, oid, &commit)?;
         }
 
-        // parentsとfile_changesベクターの長さを設定
-        parents_vector.set_len(oids.len());
-        if file_changes_vector.is_some() {
-            file_changes_vector.as_mut().unwrap().set_len(oids.len());
-        }
-
+        writer.finish(oids.len());
         output.set_len(oids.len());
         Ok(())
     }

@@ -52,12 +52,12 @@ jobs:
         run: |
           for dir in artifacts/*/; do
             arch=$(basename "$dir" | sed 's/duckdb_git-v[0-9.]*-extension-//')
-            mv "$dir"/*.duckdb_extension "artifacts/duckdb_git-${arch}.duckdb_extension"
+            gzip -c "$dir"/*.duckdb_extension >"artifacts/duckdb_git.duckdb_extension.${arch}.gz"
           done
           if gh release view "${GITHUB_RELEASE_TAG}" --json tagName >/dev/null 2>&1; then
-            gh release upload --clobber "${GITHUB_RELEASE_TAG}" artifacts/*.duckdb_extension
+            gh release upload --clobber "${GITHUB_RELEASE_TAG}" artifacts/*.duckdb_extension.*.gz
           else
-            gh release create -d --generate-notes "${GITHUB_RELEASE_TAG}" artifacts/*.duckdb_extension
+            gh release create -d --generate-notes "${GITHUB_RELEASE_TAG}" artifacts/*.duckdb_extension.*.gz
           fi
         env:
           GH_REPO: ${{ github.repository }}

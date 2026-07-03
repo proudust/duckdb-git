@@ -1,0 +1,28 @@
+name: Build
+
+on:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: make all
+
+      - name: Test
+        run: make test

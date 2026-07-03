@@ -4,6 +4,7 @@
 name: Main Extension Distribution Pipeline
 on:
   push:
+    tags: ["*"]
   pull_request:
   release:
     types: [published]

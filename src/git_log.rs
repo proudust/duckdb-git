@@ -94,7 +94,7 @@ impl<'a> Commit<'a> {
 #[derive(Clone)]
 pub struct FileChange {
     pub path: String,
-    pub status: String,
+    pub status: &'static str,
     pub blob_id: String,
     pub file_size: i64,
     pub add_lines: i32,
@@ -197,7 +197,7 @@ impl GitContext {
 
                     file_changes.push(FileChange {
                         path: format!("{}{}", root, name),
-                        status: "A".to_string(), // Added
+                        status: "A", // Added
                         blob_id: oid.to_string(),
                         file_size,
                         add_lines,
@@ -262,7 +262,7 @@ impl GitContext {
 
                     file_changes.borrow_mut().push(FileChange {
                         path: file_path,
-                        status: status.to_string(),
+                        status: status,
                         blob_id,
                         file_size,
                         add_lines: 0,

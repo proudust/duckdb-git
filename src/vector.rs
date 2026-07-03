@@ -75,7 +75,7 @@ impl<'a> VectorInserter<'a> {
             let mut del_lines = struct_child.child(5, len);
             for (i, fc) in file_changes.iter().enumerate() {
                 path.insert(i, fc.path.as_str());
-                status.insert(i, fc.status.as_str());
+                status.insert(i, fc.status);
                 blob_id.insert(i, fc.blob_id.as_str());
                 unsafe {
                     file_size.as_mut_slice::<i64>()[i] = fc.file_size;

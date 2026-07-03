@@ -35,10 +35,10 @@ impl<'a> VectorInserter<'a> {
     pub fn push(
         &mut self,
         idx: usize,
-        oid: &git2::Oid,
+        oid: &str,
         commit: &Commit,
-    ) -> Result<(), git2::Error> {
-        self.commit_id.insert(idx, &oid.to_string());
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.commit_id.insert(idx, oid);
         self.author.insert(idx, commit.author_name());
         self.author_email.insert(idx, commit.author_email());
         // TIMESTAMP はマイクロ秒で格納

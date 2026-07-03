@@ -1,40 +1,21 @@
-use git2::Repository;
+use super::{DiffMerges, FileChange};
+use ::git2::Repository;
 use std::cell::RefCell;
 
 thread_local! {
     static CACHED_REPO: RefCell<Option<(String, Repository)>> = const { RefCell::new(None) };
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum DiffMerges {
-    Off,
-    FirstParent,
-}
-
-impl DiffMerges {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "off" => DiffMerges::Off,
-            "none" => DiffMerges::Off,
-            "first-parent" => DiffMerges::FirstParent,
-            _ => DiffMerges::FirstParent, // デフォルト
-        }
-    }
-
-    pub fn should_skip_file_changes(&self) -> bool {
-        matches!(self, DiffMerges::Off)
-    }
-}
-
 pub struct Commit<'a> {
     ctx: &'a GitContext,
-    commit: git2::Commit<'a>,
-    author: git2::Signature<'a>,
-    committer: git2::Signature<'a>,
+    commit: ::git2::Commit<'a>,
+    author: ::git2::Signature<'a>,
+    committer: ::git2::Signature<'a>,
 }
 
 impl<'a> Commit<'a> {
-    pub fn new(ctx: &'a GitContext, oid: git2::Oid) -> Result<Self, git2::Error> {
+    fn new(ctx: &'a GitContext, oid: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let oid = ::git2::Oid::from_str(oid)?;
         let commit = ctx.repo().find_commit(oid)?;
         let author = commit.author().to_owned();
         let committer = commit.committer().to_owned();
@@ -80,25 +61,12 @@ impl<'a> Commit<'a> {
             .collect()
     }
 
-    pub fn file_changes(&self) -> Result<Vec<FileChange>, git2::Error> {
+    pub fn file_changes(&self) -> Result<Vec<FileChange>, Box<dyn std::error::Error>> {
         if self.ctx.diff_merges.should_skip_file_changes() {
             return Ok(Vec::new());
         }
-
-        // コミットを直接参照
-        let commit = &self.commit;
-        self.ctx.get_file_changes(commit)
+        Ok(self.ctx.get_file_changes(&self.commit)?)
     }
-}
-
-#[derive(Clone)]
-pub struct FileChange {
-    pub path: String,
-    pub status: &'static str,
-    pub blob_id: String,
-    pub file_size: i64,
-    pub add_lines: i32,
-    pub del_lines: i32,
 }
 
 pub struct GitContext {
@@ -113,7 +81,7 @@ impl GitContext {
         repo_path: &str,
         ignore_all_space: bool,
         diff_merges: DiffMerges,
-    ) -> Result<Self, git2::Error> {
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
             Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1),
             _ => Repository::open(repo_path),
@@ -134,13 +102,11 @@ impl GitContext {
         &self,
         revision: Option<&String>,
         max_count: Option<usize>,
-    ) -> Result<Vec<git2::Oid>, git2::Error> {
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let mut revwalk = self.repo().revwalk()?;
 
-        // リビジョンが指定されている場合はそれを使用、そうでなければHEADを使用
         match revision {
             Some(rev) => {
-                // ブランチ名やコミットハッシュを解決
                 let obj = self.repo().revparse_single(rev)?;
                 revwalk.push(obj.id())?;
             }
@@ -149,37 +115,32 @@ impl GitContext {
             }
         }
 
-        // max_countが指定されていればその値を使用、そうでなければデフォルトで全件を取得
         let revwalk_iter: Box<dyn Iterator<Item = _>> = match max_count {
             Some(count) => Box::new(revwalk.take(count)),
             None => Box::new(revwalk),
         };
 
-        // 全てのコミットOIDを収集
         let mut commit_oids = Vec::new();
         for oid in revwalk_iter {
-            commit_oids.push(oid?);
+            commit_oids.push(oid?.to_string());
         }
 
         Ok(commit_oids)
     }
 
-    pub fn get_commit(&self, oid: git2::Oid) -> Result<Commit<'_>, git2::Error> {
+    pub fn get_commit(&self, oid: &str) -> Result<Commit<'_>, Box<dyn std::error::Error>> {
         Commit::new(self, oid)
     }
 
-    pub fn get_file_changes(&self, commit: &git2::Commit) -> Result<Vec<FileChange>, git2::Error> {
+    fn get_file_changes(&self, commit: &::git2::Commit) -> Result<Vec<FileChange>, ::git2::Error> {
         let mut file_changes = Vec::new();
-
-        // 各コミットについて変更されたファイルを取得
         let parent_count = commit.parent_count();
 
         if parent_count == 0 {
-            // 初回コミットの場合、全てのファイルを新規追加として扱う
             let tree = commit.tree()?;
-            tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
-                if entry.kind() == Some(git2::ObjectType::Tree) {
-                    return git2::TreeWalkResult::Ok;
+            tree.walk(::git2::TreeWalkMode::PreOrder, |root, entry| {
+                if entry.kind() == Some(::git2::ObjectType::Tree) {
+                    return ::git2::TreeWalkResult::Ok;
                 }
                 if let Some(name) = entry.name() {
                     let oid = entry.id();
@@ -188,31 +149,30 @@ impl GitContext {
                         let lines = if let Ok(text) = content {
                             text.lines().count() as i32
                         } else {
-                            0 // バイナリファイルの場合は0行とする
+                            0
                         };
                         (blob.size() as i64, lines)
                     } else {
-                        (0, 0) // ディレクトリや取得できない場合は0
+                        (0, 0)
                     };
 
                     file_changes.push(FileChange {
                         path: format!("{}{}", root, name),
-                        status: "A", // Added
+                        status: "A",
                         blob_id: oid.to_string(),
                         file_size,
                         add_lines,
-                        del_lines: 0, // 初回コミットなので削除行は0
+                        del_lines: 0,
                     });
                 }
-                git2::TreeWalkResult::Ok
+                ::git2::TreeWalkResult::Ok
             })?;
         } else {
-            // 親コミットとの差分を取得
             let parent = commit.parent(0)?;
             let parent_tree = parent.tree()?;
             let current_tree = commit.tree()?;
 
-            let mut diff_options = git2::DiffOptions::new();
+            let mut diff_options = ::git2::DiffOptions::new();
             if self.ignore_all_space {
                 diff_options.ignore_whitespace(true);
             }
@@ -227,15 +187,15 @@ impl GitContext {
             diff.foreach(
                 &mut |delta, _progress| {
                     let status = match delta.status() {
-                        git2::Delta::Added => "A",
-                        git2::Delta::Deleted => "D",
-                        git2::Delta::Modified => "M",
-                        git2::Delta::Renamed => "R",
-                        git2::Delta::Copied => "C",
-                        git2::Delta::Ignored => "I",
-                        git2::Delta::Untracked => "?",
-                        git2::Delta::Typechange => "T",
-                        _ => "U", // Unknown/Unmodified
+                        ::git2::Delta::Added => "A",
+                        ::git2::Delta::Deleted => "D",
+                        ::git2::Delta::Modified => "M",
+                        ::git2::Delta::Renamed => "R",
+                        ::git2::Delta::Copied => "C",
+                        ::git2::Delta::Ignored => "I",
+                        ::git2::Delta::Untracked => "?",
+                        ::git2::Delta::Typechange => "T",
+                        _ => "U",
                     };
 
                     let file_path = if let Some(new_file) = delta.new_file().path() {
@@ -262,7 +222,7 @@ impl GitContext {
 
                     file_changes.borrow_mut().push(FileChange {
                         path: file_path,
-                        status: status,
+                        status,
                         blob_id,
                         file_size,
                         add_lines: 0,

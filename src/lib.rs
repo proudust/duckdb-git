@@ -24,7 +24,7 @@ struct GitLogBindData {
 
 #[repr(C)]
 struct GitLogInitData {
-    commit_ids: Vec<git2::Oid>,
+    commit_ids: Vec<String>,
     current_index: AtomicUsize,
     batch_size: usize,
 }
@@ -177,7 +177,7 @@ impl VTab for GitLogVTab {
         // バッチ内の各コミットを処理
         let oids = &init_data.commit_ids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
-            let commit = ctx.get_commit(*oid)?;
+            let commit = ctx.get_commit(oid)?;
             writer.push(batch_idx, oid, &commit)?;
         }
 

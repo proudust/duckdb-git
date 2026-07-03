@@ -20,13 +20,16 @@ path = "src/wasm_lib.rs"
 crate-type = ["staticlib"]
 
 [features]
-default = ["loadable-extension"]
+default = ["loadable-extension", "git2-backend"]
 loadable-extension = ["duckdb/loadable-extension"]
 bundled = ["duckdb/bundled"]                       # For benchmark
+git2-backend = ["dep:git2"]
+gix-backend = ["dep:gix"]
 
 [dependencies]
 duckdb = { version = "~1.10504.0", features = ["vtab"] }
-git2 = { version = "0.20.2", default-features = false, features = [] }
+git2 = { version = "0.20.2", default-features = false, features = [], optional = true }
+gix = { version = "0.72", optional = true }
 
 [dev-dependencies]
 divan = "0.1"

@@ -4,16 +4,20 @@
 name: Main Extension Distribution Pipeline
 on:
   push:
-    branches: [main]
   pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  duckdb-stable-build:
+  build:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
     with:
@@ -21,5 +25,40 @@ jobs:
       ci_tools_version: v1.5-variegata
       extension_name: duckdb_git
       extra_toolchains: rust;python3
-      # en: Exclude windows_amd64_mingw due to linking failure
-      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;linux_amd64_musl;windows_amd64_mingw'
+      exclude_archs: "wasm_mvp;wasm_eh;wasm_threads;linux_amd64_musl;windows_amd64_mingw"
+
+  release:
+    runs-on: ubuntu-latest
+    if: >
+      startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'release'
+    needs: build
+    steps:
+      - name: Restore
+        uses: actions/download-artifact@v4
+        with:
+          pattern: duckdb_git-*-extension-*
+          path: artifacts
+
+      - name: Run gh-describe
+        id: ghd
+        uses: proudust/gh-describe@v2
+        with:
+          repo: ${{ github.repository }}
+          commit-ish: ${{ github.sha }}
+
+      - name: Upload release assets
+        run: |
+          for dir in artifacts/*/; do
+            arch=$(basename "$dir" | sed 's/duckdb_git-v[0-9.]*-extension-//')
+            mv "$dir"/*.duckdb_extension "artifacts/duckdb_git-${arch}.duckdb_extension"
+          done
+          if gh release view "${GITHUB_RELEASE_TAG}" --json tagName >/dev/null 2>&1; then
+            gh release upload --clobber "${GITHUB_RELEASE_TAG}" artifacts/*.duckdb_extension
+          else
+            gh release create -d --generate-notes "${GITHUB_RELEASE_TAG}" artifacts/*.duckdb_extension
+          fi
+        env:
+          GH_REPO: ${{ github.repository }}
+          GITHUB_RELEASE_TAG: ${{ steps.ghd.outputs.tag }}
+          GITHUB_TOKEN: ${{ github.token }}

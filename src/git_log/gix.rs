@@ -155,6 +155,21 @@ impl GitContext {
             .for_each_to_obtain_tree(&current_tree, |change| {
                 use gix::object::tree::diff::Change;
 
+                // Directories are reported as their own Addition/Deletion/Modification
+                // entries alongside their recursed-into children; skip them so only
+                // blob-level changes are returned, matching the git2 backend.
+                let entry_mode = match &change {
+                    Change::Addition { entry_mode, .. } => *entry_mode,
+                    Change::Deletion { entry_mode, .. } => *entry_mode,
+                    Change::Modification { entry_mode, .. } => *entry_mode,
+                    Change::Rewrite { entry_mode, .. } => *entry_mode,
+                };
+                if entry_mode.is_tree() {
+                    return Ok::<_, std::convert::Infallible>(
+                        gix::object::tree::diff::Action::Continue,
+                    );
+                }
+
                 let location = change.location().to_string();
                 let status = match &change {
                     Change::Addition { .. } => "A",

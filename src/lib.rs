@@ -181,7 +181,7 @@ impl VTab for GitLogVTab {
             writer.push(batch_idx, oid, &commit)?;
         }
 
-        writer.finish(oids.len());
+        writer.finish();
         output.set_len(oids.len());
         Ok(())
     }

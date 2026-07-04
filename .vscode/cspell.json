@@ -21,6 +21,7 @@
         "swatinem",
         "timestamptz",
         "varchar",
+        "variegata",
         "venv",
         "vtab"
     ]

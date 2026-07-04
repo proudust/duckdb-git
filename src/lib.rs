@@ -1,15 +1,18 @@
-mod git_log;
+mod backend;
+mod types;
 mod vector;
 
+use backend::GitBackend;
 use duckdb::{
     core::{DataChunkHandle, LogicalTypeHandle, LogicalTypeId},
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection, Result,
 };
-use git_log::{DiffMerges, GitContext};
+use types::DiffMerges;
 use vector::VectorInserter;
 use std::{
     error::Error,
+    str::FromStr,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -62,15 +65,12 @@ impl VTab for GitLogVTab {
             LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("parents", parents_array_type);
 
-        // 名前付きパラメータ "diff_merges" を取得（列定義前に必要）
         let diff_merges = bind
             .get_named_parameter("diff_merges")
-            .map(|value| DiffMerges::from_str(value.to_string().as_str()))
+            .map(|value| DiffMerges::from_str(value.to_string().as_str()).unwrap())
             .unwrap_or_else(|| DiffMerges::Off);
 
-        // file_changes列はdiff_merges=offの場合は省略
         if !diff_merges.should_skip_file_changes() {
-            // file_changes: STRUCT(path VARCHAR, status VARCHAR, blob_id VARCHAR, file_size BIGINT, add_lines INTEGER, del_lines INTEGER)[]
             let file_change_struct = LogicalTypeHandle::struct_type(&[
                 ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
                 ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
@@ -85,17 +85,14 @@ impl VTab for GitLogVTab {
 
         let repo_path = bind.get_parameter(0).to_string();
 
-        // 名前付きパラメータ "revision" を取得
         let revision = bind
             .get_named_parameter("revision")
             .map(|value| value.to_string());
 
-        // 名前付きパラメータ "max_count" を取得
         let max_count = bind
             .get_named_parameter("max_count")
             .and_then(|value| value.to_string().parse::<usize>().ok());
 
-        // 名前付きパラメータ "ignore_all_space" を取得
         let ignore_all_space = bind
             .get_named_parameter("ignore_all_space")
             .map(|value| value.to_string().to_lowercase() == "true")
@@ -114,24 +111,21 @@ impl VTab for GitLogVTab {
         let bind_data = info.get_bind_data::<GitLogBindData>();
         let bind_data = unsafe { &*bind_data };
 
-        // GitContext を作成
-        let ctx = GitContext::new(
+        let backend = backend::open(
             &bind_data.repo_path,
             bind_data.ignore_all_space,
             bind_data.diff_merges.clone(),
         )?;
 
-        // 全てのコミットOIDを収集
-        let commit_oids = ctx.get_commit_oids(bind_data.revision.as_ref(), bind_data.max_count)?;
+        let commit_oids =
+            backend.get_commit_oids(bind_data.revision.as_deref(), bind_data.max_count)?;
 
-        // 並行処理のためのスレッド数を設定（CPUコア数を基準とする）
         let cpu_cores = std::thread::available_parallelism()
             .map(|n| n.get())
-            .unwrap_or(1); // フォールバックとして1コアを想定
+            .unwrap_or(1);
         let max_threads = std::cmp::min(commit_oids.len(), cpu_cores) as u64;
         info.set_max_threads(max_threads);
 
-        // バッチサイズを事前計算（DuckDBのチャンクサイズ制限を考慮）
         let batch_size = (commit_oids.len() / cpu_cores).clamp(1, 2048);
 
         Ok(GitLogInitData {
@@ -148,7 +142,6 @@ impl VTab for GitLogVTab {
         let init_data = func.get_init_data();
         let bind_data = func.get_bind_data();
 
-        // 事前計算されたバッチサイズを使用
         let batch_size = init_data.batch_size;
 
         let start_index = init_data
@@ -160,25 +153,21 @@ impl VTab for GitLogVTab {
             return Ok(());
         }
 
-        // 処理する範囲を計算
         let end_index = std::cmp::min(start_index + batch_size, init_data.commit_ids.len());
 
-        // GitContext を作成
-        let ctx = GitContext::new(
+        let backend = backend::open(
             &bind_data.repo_path,
             bind_data.ignore_all_space,
             bind_data.diff_merges.clone(),
         )?;
 
-        // 出力チャンクのインサーターを構築（各カラムベクターを事前取得）
         let mut writer =
             VectorInserter::new(output, !bind_data.diff_merges.should_skip_file_changes());
 
-        // バッチ内の各コミットを処理
         let oids = &init_data.commit_ids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
-            let commit = ctx.get_commit(oid)?;
-            writer.push(batch_idx, oid, &commit)?;
+            let commit = backend.get_commit(oid)?;
+            writer.push(batch_idx, oid, &commit);
         }
 
         writer.finish();

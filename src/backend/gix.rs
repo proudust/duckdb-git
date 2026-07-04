@@ -1,137 +1,41 @@
-use super::{DiffMerges, FileChange};
+use super::GitBackend;
+use crate::types::{CommitData, DiffMerges, FileChange};
 use std::cell::RefCell;
 
 thread_local! {
     static CACHED_REPO: RefCell<Option<(String, gix::ThreadSafeRepository)>> = const { RefCell::new(None) };
 }
 
-pub struct Commit<'a> {
-    ctx: &'a GitContext,
-    commit: gix::Commit<'a>,
-}
-
-impl<'a> Commit<'a> {
-    fn new(ctx: &'a GitContext, oid: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let oid = gix::ObjectId::from_hex(oid.as_bytes())?;
-        let commit = ctx.repo().find_commit(oid)?;
-        Ok(Commit { ctx, commit })
-    }
-
-    pub fn author_name(&self) -> &[u8] {
-        self.commit.author().map(|a| a.name.as_ref()).unwrap_or(b"")
-    }
-
-    pub fn author_email(&self) -> &[u8] {
-        self.commit
-            .author()
-            .map(|a| a.email.as_ref())
-            .unwrap_or(b"")
-    }
-
-    pub fn author_timestamp(&self) -> i64 {
-        self.commit
-            .author()
-            .ok()
-            .and_then(|a| a.time().ok())
-            .map(|t| t.seconds)
-            .unwrap_or(0)
-    }
-
-    pub fn committer_name(&self) -> &[u8] {
-        self.commit
-            .committer()
-            .map(|a| a.name.as_ref())
-            .unwrap_or(b"")
-    }
-
-    pub fn committer_email(&self) -> &[u8] {
-        self.commit
-            .committer()
-            .map(|a| a.email.as_ref())
-            .unwrap_or(b"")
-    }
-
-    pub fn committer_timestamp(&self) -> i64 {
-        self.commit
-            .committer()
-            .ok()
-            .and_then(|a| a.time().ok())
-            .map(|t| t.seconds)
-            .unwrap_or(0)
-    }
-
-    pub fn message(&self) -> &[u8] {
-        self.commit.message_raw_sloppy().as_ref()
-    }
-
-    pub fn parents(&self) -> Vec<String> {
-        self.commit.parent_ids().map(|id| id.to_string()).collect()
-    }
-
-    pub fn file_changes(&self) -> Result<Vec<FileChange>, Box<dyn std::error::Error>> {
-        if self.ctx.diff_merges.should_skip_file_changes() {
-            return Ok(Vec::new());
-        }
-        self.ctx.get_file_changes(&self.commit)
-    }
-}
-
-pub struct GitContext {
+pub struct GixBackend {
     repo: Option<gix::Repository>,
-    pub repo_path: String,
+    repo_path: String,
     // TODO: gix does not yet support ignore_all_space option for diffs
-    pub ignore_all_space: bool,
-    pub diff_merges: DiffMerges,
+    _ignore_all_space: bool,
+    diff_merges: DiffMerges,
 }
 
-impl GitContext {
+impl GixBackend {
     pub fn new(
         repo_path: &str,
         ignore_all_space: bool,
         diff_merges: DiffMerges,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
-            Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1.to_thread_local()),
+            Some((path, _)) if path == repo_path => {
+                Ok(cached.take().unwrap().1.to_thread_local())
+            }
             _ => gix::open(repo_path),
         })?;
-        Ok(GitContext {
+        Ok(GixBackend {
             repo: Some(repo),
             repo_path: repo_path.to_string(),
-            ignore_all_space,
+            _ignore_all_space: ignore_all_space,
             diff_merges,
         })
     }
 
     fn repo(&self) -> &gix::Repository {
         self.repo.as_ref().unwrap()
-    }
-
-    pub fn get_commit_oids(
-        &self,
-        revision: Option<&String>,
-        max_count: Option<usize>,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let tip = match revision {
-            Some(rev) => self.repo().rev_parse_single(rev.as_str())?.detach(),
-            None => self.repo().head_id()?.detach(),
-        };
-
-        let walk = self.repo().rev_walk([tip]);
-        let all = walk.all()?;
-
-        let oids: Result<Vec<String>, Box<dyn std::error::Error>> = match max_count {
-            Some(count) => all
-                .take(count)
-                .map(|info| Ok(info?.id.to_string()))
-                .collect(),
-            None => all.map(|info| Ok(info?.id.to_string())).collect(),
-        };
-
-        oids
-    }
-
-    pub fn get_commit(&self, oid: &str) -> Result<Commit<'_>, Box<dyn std::error::Error>> {
-        Commit::new(self, oid)
     }
 
     fn get_file_changes(
@@ -171,7 +75,7 @@ impl GitContext {
                 }
 
                 let location = change.location().to_string();
-                let status = match &change {
+                let status: &'static str = match &change {
                     Change::Addition { .. } => "A",
                     Change::Deletion { .. } => "D",
                     Change::Modification { .. } => "M",
@@ -212,7 +116,89 @@ impl GitContext {
     }
 }
 
-impl Drop for GitContext {
+impl GitBackend for GixBackend {
+    fn get_commit_oids(
+        &self,
+        revision: Option<&str>,
+        max_count: Option<usize>,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let tip = match revision {
+            Some(rev) => self.repo().rev_parse_single(rev)?.detach(),
+            None => self.repo().head_id()?.detach(),
+        };
+
+        let walk = self.repo().rev_walk([tip]);
+        let all = walk.all()?;
+
+        let oids: Result<Vec<String>, Box<dyn std::error::Error>> = match max_count {
+            Some(count) => all
+                .take(count)
+                .map(|info| Ok(info?.id.to_string()))
+                .collect(),
+            None => all.map(|info| Ok(info?.id.to_string())).collect(),
+        };
+
+        oids
+    }
+
+    fn get_commit(&self, oid: &str) -> Result<CommitData, Box<dyn std::error::Error>> {
+        let oid = gix::ObjectId::from_hex(oid.as_bytes())?;
+        let commit = self.repo().find_commit(oid)?;
+
+        let author_name = commit
+            .author()
+            .map(|a| a.name.to_vec())
+            .unwrap_or_default();
+        let author_email = commit
+            .author()
+            .map(|a| a.email.to_vec())
+            .unwrap_or_default();
+        let author_timestamp = commit
+            .author()
+            .ok()
+            .and_then(|a| a.time().ok())
+            .map(|t| t.seconds)
+            .unwrap_or(0);
+
+        let committer_name = commit
+            .committer()
+            .map(|a| a.name.to_vec())
+            .unwrap_or_default();
+        let committer_email = commit
+            .committer()
+            .map(|a| a.email.to_vec())
+            .unwrap_or_default();
+        let committer_timestamp = commit
+            .committer()
+            .ok()
+            .and_then(|a| a.time().ok())
+            .map(|t| t.seconds)
+            .unwrap_or(0);
+
+        let message = commit.message_raw_sloppy().to_vec();
+        let parents = commit.parent_ids().map(|id| id.to_string()).collect();
+
+        let file_changes = if self.diff_merges.should_skip_file_changes() {
+            Vec::new()
+        } else {
+            self.get_file_changes(&commit)?
+        };
+
+        Ok(CommitData {
+            author_name,
+            author_email,
+            author_timestamp,
+            committer_name,
+            committer_email,
+            committer_timestamp,
+            message,
+            parents,
+            file_changes,
+        })
+    }
+}
+
+impl Drop for GixBackend {
     fn drop(&mut self) {
         if let Some(repo) = self.repo.take() {
             let sync_repo = repo.into_sync();

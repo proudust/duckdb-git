@@ -1,4 +1,5 @@
-use super::{DiffMerges, FileChange};
+use super::GitBackend;
+use crate::types::{CommitData, DiffMerges, FileChange};
 use ::git2::Repository;
 use std::cell::RefCell;
 
@@ -6,77 +7,14 @@ thread_local! {
     static CACHED_REPO: RefCell<Option<(String, Repository)>> = const { RefCell::new(None) };
 }
 
-pub struct Commit<'a> {
-    ctx: &'a GitContext,
-    commit: ::git2::Commit<'a>,
-    author: ::git2::Signature<'a>,
-    committer: ::git2::Signature<'a>,
-}
-
-impl<'a> Commit<'a> {
-    fn new(ctx: &'a GitContext, oid: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let oid = ::git2::Oid::from_str(oid)?;
-        let commit = ctx.repo().find_commit(oid)?;
-        let author = commit.author().to_owned();
-        let committer = commit.committer().to_owned();
-        Ok(Commit {
-            ctx,
-            commit,
-            author,
-            committer,
-        })
-    }
-
-    pub fn author_name(&self) -> &[u8] {
-        self.author.name_bytes()
-    }
-
-    pub fn author_email(&self) -> &[u8] {
-        self.author.email_bytes()
-    }
-
-    pub fn author_timestamp(&self) -> i64 {
-        self.commit.time().seconds()
-    }
-
-    pub fn committer_name(&self) -> &[u8] {
-        self.committer.name_bytes()
-    }
-
-    pub fn committer_email(&self) -> &[u8] {
-        self.committer.email_bytes()
-    }
-
-    pub fn committer_timestamp(&self) -> i64 {
-        self.committer.when().seconds()
-    }
-
-    pub fn message(&self) -> &[u8] {
-        self.commit.message_bytes()
-    }
-
-    pub fn parents(&self) -> Vec<String> {
-        (0..self.commit.parent_count())
-            .map(|i| self.commit.parent_id(i).unwrap().to_string())
-            .collect()
-    }
-
-    pub fn file_changes(&self) -> Result<Vec<FileChange>, Box<dyn std::error::Error>> {
-        if self.ctx.diff_merges.should_skip_file_changes() {
-            return Ok(Vec::new());
-        }
-        Ok(self.ctx.get_file_changes(&self.commit)?)
-    }
-}
-
-pub struct GitContext {
+pub struct Git2Backend {
     repo: Option<Repository>,
-    pub repo_path: String,
-    pub ignore_all_space: bool,
-    pub diff_merges: DiffMerges,
+    repo_path: String,
+    ignore_all_space: bool,
+    diff_merges: DiffMerges,
 }
 
-impl GitContext {
+impl Git2Backend {
     pub fn new(
         repo_path: &str,
         ignore_all_space: bool,
@@ -86,7 +24,7 @@ impl GitContext {
             Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1),
             _ => Repository::open(repo_path),
         })?;
-        Ok(GitContext {
+        Ok(Git2Backend {
             repo: Some(repo),
             repo_path: repo_path.to_string(),
             ignore_all_space,
@@ -98,41 +36,10 @@ impl GitContext {
         self.repo.as_ref().unwrap()
     }
 
-    pub fn get_commit_oids(
+    fn get_file_changes(
         &self,
-        revision: Option<&String>,
-        max_count: Option<usize>,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let mut revwalk = self.repo().revwalk()?;
-
-        match revision {
-            Some(rev) => {
-                let obj = self.repo().revparse_single(rev)?;
-                revwalk.push(obj.id())?;
-            }
-            None => {
-                revwalk.push_head()?;
-            }
-        }
-
-        let revwalk_iter: Box<dyn Iterator<Item = _>> = match max_count {
-            Some(count) => Box::new(revwalk.take(count)),
-            None => Box::new(revwalk),
-        };
-
-        let mut commit_oids = Vec::new();
-        for oid in revwalk_iter {
-            commit_oids.push(oid?.to_string());
-        }
-
-        Ok(commit_oids)
-    }
-
-    pub fn get_commit(&self, oid: &str) -> Result<Commit<'_>, Box<dyn std::error::Error>> {
-        Commit::new(self, oid)
-    }
-
-    fn get_file_changes(&self, commit: &::git2::Commit) -> Result<Vec<FileChange>, ::git2::Error> {
+        commit: &::git2::Commit,
+    ) -> Result<Vec<FileChange>, ::git2::Error> {
         let mut file_changes = Vec::new();
         let parent_count = commit.parent_count();
 
@@ -252,7 +159,66 @@ impl GitContext {
     }
 }
 
-impl Drop for GitContext {
+impl GitBackend for Git2Backend {
+    fn get_commit_oids(
+        &self,
+        revision: Option<&str>,
+        max_count: Option<usize>,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let mut revwalk = self.repo().revwalk()?;
+
+        match revision {
+            Some(rev) => {
+                let obj = self.repo().revparse_single(rev)?;
+                revwalk.push(obj.id())?;
+            }
+            None => {
+                revwalk.push_head()?;
+            }
+        }
+
+        let revwalk_iter: Box<dyn Iterator<Item = _>> = match max_count {
+            Some(count) => Box::new(revwalk.take(count)),
+            None => Box::new(revwalk),
+        };
+
+        let mut commit_oids = Vec::new();
+        for oid in revwalk_iter {
+            commit_oids.push(oid?.to_string());
+        }
+
+        Ok(commit_oids)
+    }
+
+    fn get_commit(&self, oid: &str) -> Result<CommitData, Box<dyn std::error::Error>> {
+        let oid = ::git2::Oid::from_str(oid)?;
+        let commit = self.repo().find_commit(oid)?;
+        let author = commit.author();
+        let committer = commit.committer();
+
+        let file_changes = if self.diff_merges.should_skip_file_changes() {
+            Vec::new()
+        } else {
+            self.get_file_changes(&commit)?
+        };
+
+        Ok(CommitData {
+            author_name: author.name_bytes().to_vec(),
+            author_email: author.email_bytes().to_vec(),
+            author_timestamp: commit.time().seconds(),
+            committer_name: committer.name_bytes().to_vec(),
+            committer_email: committer.email_bytes().to_vec(),
+            committer_timestamp: committer.when().seconds(),
+            message: commit.message_bytes().to_vec(),
+            parents: (0..commit.parent_count())
+                .map(|i| commit.parent_id(i).unwrap().to_string())
+                .collect(),
+            file_changes,
+        })
+    }
+}
+
+impl Drop for Git2Backend {
     fn drop(&mut self) {
         if let Some(repo) = self.repo.take() {
             CACHED_REPO.with_borrow_mut(|cached| {

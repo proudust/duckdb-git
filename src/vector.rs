@@ -1,7 +1,6 @@
-use crate::git_log::Commit;
+use crate::types::CommitData;
 use duckdb::core::{DataChunkHandle, FlatVector, Inserter, ListVector};
 
-/// 出力チャンクの各カラムベクターを事前取得し、コミット単位の転記を担うインサーター。
 pub struct VectorInserter<'a> {
     commit_id: FlatVector<'a>,
     author: FlatVector<'a>,
@@ -35,31 +34,23 @@ impl<'a> VectorInserter<'a> {
         }
     }
 
-    /// 1コミット分をチャンクの `idx` 行へ転記する。
-    pub fn push(
-        &mut self,
-        idx: usize,
-        oid: &str,
-        commit: &Commit,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn push(&mut self, idx: usize, oid: &str, commit: &CommitData) {
         self.commit_id.insert(idx, oid);
-        self.author.insert(idx, commit.author_name());
-        self.author_email.insert(idx, commit.author_email());
-        // TIMESTAMP はマイクロ秒で格納
+        self.author.insert(idx, &commit.author_name);
+        self.author_email.insert(idx, &commit.author_email);
         unsafe {
             self.author_timestamp.as_mut_slice::<i64>()[idx] =
-                commit.author_timestamp() * 1_000_000;
+                commit.author_timestamp * 1_000_000;
         }
-        self.committer.insert(idx, commit.committer_name());
-        self.committer_email.insert(idx, commit.committer_email());
+        self.committer.insert(idx, &commit.committer_name);
+        self.committer_email.insert(idx, &commit.committer_email);
         unsafe {
             self.committer_timestamp.as_mut_slice::<i64>()[idx] =
-                commit.committer_timestamp() * 1_000_000;
+                commit.committer_timestamp * 1_000_000;
         }
-        self.message.insert(idx, commit.message());
+        self.message.insert(idx, &commit.message);
 
-        // parents (VARCHAR[])
-        let parents = commit.parents();
+        let parents = &commit.parents;
         let parents_child = self.parents.child(self.parents_offset + parents.len());
         for (i, parent) in parents.iter().enumerate() {
             parents_child.insert(self.parents_offset + i, parent.as_str());
@@ -67,9 +58,8 @@ impl<'a> VectorInserter<'a> {
         self.parents.set_entry(idx, self.parents_offset, parents.len());
         self.parents_offset += parents.len();
 
-        // file_changes (STRUCT(...)[])
         if let Some(fc_vec) = self.file_changes.as_mut() {
-            let file_changes = commit.file_changes()?;
+            let file_changes = &commit.file_changes;
             let len = file_changes.len();
             let total = self.file_changes_offset + len;
             let struct_child = fc_vec.struct_child(total);
@@ -93,11 +83,8 @@ impl<'a> VectorInserter<'a> {
             fc_vec.set_entry(idx, self.file_changes_offset, len);
             self.file_changes_offset += len;
         }
-
-        Ok(())
     }
 
-    /// 全行転記後にリストベクターの長さを確定する。
     pub fn finish(mut self) {
         self.parents.set_len(self.parents_offset);
         if let Some(fc_vec) = self.file_changes.as_mut() {

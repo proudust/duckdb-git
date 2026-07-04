@@ -1,7 +1,7 @@
-#[cfg(feature = "git2-backend")]
-mod git2;
 #[cfg(feature = "gix-backend")]
 mod gix;
+#[cfg(feature = "libgit-backend")]
+mod libgit;
 
 use crate::types::CommitData;
 use std::collections::HashMap;
@@ -24,9 +24,9 @@ pub trait GitBackend {
     fn get_refs(&self) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>>;
 }
 
-#[cfg(feature = "git2-backend")]
+#[cfg(feature = "libgit-backend")]
 pub fn open(repo_path: &str) -> Result<impl GitBackend, Box<dyn Error>> {
-    git2::Git2Backend::new(repo_path)
+    libgit::LibGitBackend::new(repo_path)
 }
 
 #[cfg(feature = "gix-backend")]

@@ -8,18 +8,18 @@ thread_local! {
     static CACHED_REPO: RefCell<Option<(String, Repository)>> = const { RefCell::new(None) };
 }
 
-pub struct Git2Backend {
+pub struct LibGitBackend {
     repo: Option<Repository>,
     repo_path: String,
 }
 
-impl Git2Backend {
+impl LibGitBackend {
     pub fn new(repo_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
             Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1),
             _ => Repository::open(repo_path),
         })?;
-        Ok(Git2Backend {
+        Ok(LibGitBackend {
             repo: Some(repo),
             repo_path: repo_path.to_string(),
         })
@@ -153,7 +153,7 @@ impl Git2Backend {
     }
 }
 
-impl GitBackend for Git2Backend {
+impl GitBackend for LibGitBackend {
     fn get_commit_oids(
         &self,
         revision: Option<&str>,
@@ -235,7 +235,7 @@ impl GitBackend for Git2Backend {
     }
 }
 
-impl Drop for Git2Backend {
+impl Drop for LibGitBackend {
     fn drop(&mut self) {
         if let Some(repo) = self.repo.take() {
             CACHED_REPO.with_borrow_mut(|cached| {
@@ -254,21 +254,21 @@ mod tests {
 
     #[test]
     fn skip_file_changes_returns_empty() {
-        let backend = Git2Backend::new(".").unwrap();
+        let backend = LibGitBackend::new(".").unwrap();
         let commit = backend.get_commit(SECOND_COMMIT, false, true).unwrap();
         assert!(commit.file_changes.is_empty());
     }
 
     #[test]
     fn no_skip_returns_file_changes() {
-        let backend = Git2Backend::new(".").unwrap();
+        let backend = LibGitBackend::new(".").unwrap();
         let commit = backend.get_commit(SECOND_COMMIT, false, false).unwrap();
         assert!(!commit.file_changes.is_empty());
     }
 
     #[test]
     fn get_refs_peels_annotated_tag_to_commit() {
-        let backend = Git2Backend::new(".").unwrap();
+        let backend = LibGitBackend::new(".").unwrap();
         let refs = backend.get_refs().unwrap();
         let names = refs
             .get(TAGGED_COMMIT)
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn get_refs_returns_empty_for_commit_without_refs() {
-        let backend = Git2Backend::new(".").unwrap();
+        let backend = LibGitBackend::new(".").unwrap();
         let refs = backend.get_refs().unwrap();
         assert!(!refs.contains_key(SECOND_COMMIT));
     }

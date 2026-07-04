@@ -32,7 +32,7 @@ test_debug: test_extension_debug
 test_release: test_extension_release
 
 bench:
-	cargo bench --no-default-features --features bundled,git2-backend
+	cargo bench --no-default-features --features bundled,libgit-backend
 
 clean: clean_build clean_rust
 clean_all: clean_configure clean

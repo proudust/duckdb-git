@@ -13,7 +13,7 @@ require-env GIT_LOG_BACKEND git2
 query II
 SELECT change.add_lines, change.del_lines FROM (
   SELECT unnest(file_changes) as change
-  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=false, diff_merges='first-parent')
+  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=false)
 ) WHERE change.path = 'src/lib.rs';
 ----
 112	83
@@ -21,7 +21,7 @@ SELECT change.add_lines, change.del_lines FROM (
 query II
 SELECT change.add_lines, change.del_lines FROM (
   SELECT unnest(file_changes) as change
-  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=true, diff_merges='first-parent')
+  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=true)
 ) WHERE change.path = 'src/lib.rs';
 ----
 64	35

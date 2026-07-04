@@ -1,26 +1,3 @@
-#[derive(Debug, Clone, PartialEq)]
-pub enum DiffMerges {
-    Off,
-    FirstParent,
-}
-
-impl DiffMerges {
-    pub fn should_skip_file_changes(&self) -> bool {
-        matches!(self, DiffMerges::Off)
-    }
-}
-
-impl std::str::FromStr for DiffMerges {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s.to_lowercase().as_str() {
-            "off" | "none" => DiffMerges::Off,
-            _ => DiffMerges::FirstParent,
-        })
-    }
-}
-
 #[derive(Clone)]
 pub struct FileChange {
     pub path: String,

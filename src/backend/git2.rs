@@ -1,5 +1,5 @@
 use super::GitBackend;
-use crate::types::{CommitData, DiffMerges, FileChange};
+use crate::types::{CommitData, FileChange};
 use ::git2::Repository;
 use std::cell::RefCell;
 
@@ -10,16 +10,10 @@ thread_local! {
 pub struct Git2Backend {
     repo: Option<Repository>,
     repo_path: String,
-    ignore_all_space: bool,
-    diff_merges: DiffMerges,
 }
 
 impl Git2Backend {
-    pub fn new(
-        repo_path: &str,
-        ignore_all_space: bool,
-        diff_merges: DiffMerges,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(repo_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
             Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1),
             _ => Repository::open(repo_path),
@@ -27,8 +21,6 @@ impl Git2Backend {
         Ok(Git2Backend {
             repo: Some(repo),
             repo_path: repo_path.to_string(),
-            ignore_all_space,
-            diff_merges,
         })
     }
 
@@ -39,6 +31,7 @@ impl Git2Backend {
     fn get_file_changes(
         &self,
         commit: &::git2::Commit,
+        ignore_all_space: bool,
     ) -> Result<Vec<FileChange>, ::git2::Error> {
         let mut file_changes = Vec::new();
         let parent_count = commit.parent_count();
@@ -80,7 +73,7 @@ impl Git2Backend {
             let current_tree = commit.tree()?;
 
             let mut diff_options = ::git2::DiffOptions::new();
-            if self.ignore_all_space {
+            if ignore_all_space {
                 diff_options.ignore_whitespace(true);
             }
 
@@ -190,16 +183,21 @@ impl GitBackend for Git2Backend {
         Ok(commit_oids)
     }
 
-    fn get_commit(&self, oid: &str) -> Result<CommitData, Box<dyn std::error::Error>> {
+    fn get_commit(
+        &self,
+        oid: &str,
+        ignore_all_space: bool,
+        skip_file_changes: bool,
+    ) -> Result<CommitData, Box<dyn std::error::Error>> {
         let oid = ::git2::Oid::from_str(oid)?;
         let commit = self.repo().find_commit(oid)?;
         let author = commit.author();
         let committer = commit.committer();
 
-        let file_changes = if self.diff_merges.should_skip_file_changes() {
+        let file_changes = if skip_file_changes {
             Vec::new()
         } else {
-            self.get_file_changes(&commit)?
+            self.get_file_changes(&commit, ignore_all_space)?
         };
 
         Ok(CommitData {
@@ -225,5 +223,26 @@ impl Drop for Git2Backend {
                 *cached = Some((std::mem::take(&mut self.repo_path), repo));
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECOND_COMMIT: &str = "2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5";
+
+    #[test]
+    fn skip_file_changes_returns_empty() {
+        let backend = Git2Backend::new(".").unwrap();
+        let commit = backend.get_commit(SECOND_COMMIT, false, true).unwrap();
+        assert!(commit.file_changes.is_empty());
+    }
+
+    #[test]
+    fn no_skip_returns_file_changes() {
+        let backend = Git2Backend::new(".").unwrap();
+        let commit = backend.get_commit(SECOND_COMMIT, false, false).unwrap();
+        assert!(!commit.file_changes.is_empty());
     }
 }

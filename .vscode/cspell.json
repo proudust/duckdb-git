@@ -11,6 +11,7 @@
         "libgit",
         "oids",
         "overriden",
+        "pushdown",
         "pytz",
         "repr",
         "revparse",

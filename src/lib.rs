@@ -8,13 +8,13 @@ use duckdb::{
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection, Result,
 };
-use types::DiffMerges;
 use vector::VectorInserter;
 use std::{
     error::Error,
-    str::FromStr,
     sync::atomic::{AtomicUsize, Ordering},
 };
+
+const FILE_CHANGES_COLUMN_INDEX: u64 = 9;
 
 #[repr(C)]
 struct GitLogBindData {
@@ -22,7 +22,6 @@ struct GitLogBindData {
     revision: Option<String>,
     max_count: Option<usize>,
     ignore_all_space: bool,
-    diff_merges: DiffMerges,
 }
 
 #[repr(C)]
@@ -30,6 +29,13 @@ struct GitLogInitData {
     commit_ids: Vec<String>,
     current_index: AtomicUsize,
     batch_size: usize,
+    column_indices: Vec<u64>,
+}
+
+impl GitLogInitData {
+    fn need_file_changes(&self) -> bool {
+        self.column_indices.contains(&FILE_CHANGES_COLUMN_INDEX)
+    }
 }
 
 struct GitLogVTab;
@@ -65,23 +71,17 @@ impl VTab for GitLogVTab {
             LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("parents", parents_array_type);
 
-        let diff_merges = bind
-            .get_named_parameter("diff_merges")
-            .map(|value| DiffMerges::from_str(value.to_string().as_str()).unwrap())
-            .unwrap_or_else(|| DiffMerges::Off);
-
-        if !diff_merges.should_skip_file_changes() {
-            let file_change_struct = LogicalTypeHandle::struct_type(&[
-                ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-                ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-                ("blob_id", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-                ("file_size", LogicalTypeHandle::from(LogicalTypeId::Bigint)),
-                ("add_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
-                ("del_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
-            ]);
-            let file_changes_array_type = LogicalTypeHandle::list(&file_change_struct);
-            bind.add_result_column("file_changes", file_changes_array_type);
-        }
+        // file_changes: STRUCT(path, status, blob_id, file_size, add_lines, del_lines)[]
+        let file_change_struct = LogicalTypeHandle::struct_type(&[
+            ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+            ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+            ("blob_id", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+            ("file_size", LogicalTypeHandle::from(LogicalTypeId::Bigint)),
+            ("add_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
+            ("del_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
+        ]);
+        let file_changes_array_type = LogicalTypeHandle::list(&file_change_struct);
+        bind.add_result_column("file_changes", file_changes_array_type);
 
         let repo_path = bind.get_parameter(0).to_string();
 
@@ -103,7 +103,6 @@ impl VTab for GitLogVTab {
             revision,
             max_count,
             ignore_all_space,
-            diff_merges,
         })
     }
 
@@ -111,11 +110,9 @@ impl VTab for GitLogVTab {
         let bind_data = info.get_bind_data::<GitLogBindData>();
         let bind_data = unsafe { &*bind_data };
 
-        let backend = backend::open(
-            &bind_data.repo_path,
-            bind_data.ignore_all_space,
-            bind_data.diff_merges.clone(),
-        )?;
+        let column_indices = info.get_column_indices();
+
+        let backend = backend::open(&bind_data.repo_path)?;
 
         let commit_oids =
             backend.get_commit_oids(bind_data.revision.as_deref(), bind_data.max_count)?;
@@ -132,6 +129,7 @@ impl VTab for GitLogVTab {
             commit_ids: commit_oids,
             current_index: AtomicUsize::new(0),
             batch_size,
+            column_indices,
         })
     }
 
@@ -155,24 +153,24 @@ impl VTab for GitLogVTab {
 
         let end_index = std::cmp::min(start_index + batch_size, init_data.commit_ids.len());
 
-        let backend = backend::open(
-            &bind_data.repo_path,
-            bind_data.ignore_all_space,
-            bind_data.diff_merges.clone(),
-        )?;
+        let backend = backend::open(&bind_data.repo_path)?;
 
-        let mut writer =
-            VectorInserter::new(output, !bind_data.diff_merges.should_skip_file_changes());
+        let mut writer = VectorInserter::new(output, &init_data.column_indices);
 
+        let skip_file_changes = !init_data.need_file_changes();
         let oids = &init_data.commit_ids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
-            let commit = backend.get_commit(oid)?;
+            let commit = backend.get_commit(oid, bind_data.ignore_all_space, skip_file_changes)?;
             writer.push(batch_idx, oid, &commit);
         }
 
         writer.finish();
         output.set_len(oids.len());
         Ok(())
+    }
+
+    fn supports_pushdown() -> bool {
+        true
     }
 
     fn parameters() -> Option<Vec<LogicalTypeHandle>> {
@@ -194,10 +192,6 @@ impl VTab for GitLogVTab {
             (
                 "ignore_all_space".to_string(),
                 LogicalTypeHandle::from(LogicalTypeId::Boolean),
-            ),
-            (
-                "diff_merges".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Varchar),
             ),
         ])
     }

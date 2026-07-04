@@ -1,5 +1,5 @@
 use super::GitBackend;
-use crate::types::{CommitData, DiffMerges, FileChange};
+use crate::types::{CommitData, FileChange};
 use std::cell::RefCell;
 
 thread_local! {
@@ -9,17 +9,10 @@ thread_local! {
 pub struct GixBackend {
     repo: Option<gix::Repository>,
     repo_path: String,
-    // TODO: gix does not yet support ignore_all_space option for diffs
-    _ignore_all_space: bool,
-    diff_merges: DiffMerges,
 }
 
 impl GixBackend {
-    pub fn new(
-        repo_path: &str,
-        ignore_all_space: bool,
-        diff_merges: DiffMerges,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(repo_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
             Some((path, _)) if path == repo_path => {
                 Ok(cached.take().unwrap().1.to_thread_local())
@@ -29,8 +22,6 @@ impl GixBackend {
         Ok(GixBackend {
             repo: Some(repo),
             repo_path: repo_path.to_string(),
-            _ignore_all_space: ignore_all_space,
-            diff_merges,
         })
     }
 
@@ -141,7 +132,13 @@ impl GitBackend for GixBackend {
         oids
     }
 
-    fn get_commit(&self, oid: &str) -> Result<CommitData, Box<dyn std::error::Error>> {
+    fn get_commit(
+        &self,
+        oid: &str,
+        // TODO: gix does not yet support ignore_all_space option for diffs
+        _ignore_all_space: bool,
+        skip_file_changes: bool,
+    ) -> Result<CommitData, Box<dyn std::error::Error>> {
         let oid = gix::ObjectId::from_hex(oid.as_bytes())?;
         let commit = self.repo().find_commit(oid)?;
 
@@ -178,7 +175,7 @@ impl GitBackend for GixBackend {
         let message = commit.message_raw_sloppy().to_vec();
         let parents = commit.parent_ids().map(|id| id.to_string()).collect();
 
-        let file_changes = if self.diff_merges.should_skip_file_changes() {
+        let file_changes = if skip_file_changes {
             Vec::new()
         } else {
             self.get_file_changes(&commit)?
@@ -195,6 +192,27 @@ impl GitBackend for GixBackend {
             parents,
             file_changes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECOND_COMMIT: &str = "2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5";
+
+    #[test]
+    fn skip_file_changes_returns_empty() {
+        let backend = GixBackend::new(".").unwrap();
+        let commit = backend.get_commit(SECOND_COMMIT, false, true).unwrap();
+        assert!(commit.file_changes.is_empty());
+    }
+
+    #[test]
+    fn no_skip_returns_file_changes() {
+        let backend = GixBackend::new(".").unwrap();
+        let commit = backend.get_commit(SECOND_COMMIT, false, false).unwrap();
+        assert!(!commit.file_changes.is_empty());
     }
 }
 

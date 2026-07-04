@@ -2,61 +2,104 @@ use crate::types::CommitData;
 use duckdb::core::{DataChunkHandle, FlatVector, Inserter, ListVector};
 
 pub struct VectorInserter<'a> {
-    commit_id: FlatVector<'a>,
-    author: FlatVector<'a>,
-    author_email: FlatVector<'a>,
-    author_timestamp: FlatVector<'a>,
-    committer: FlatVector<'a>,
-    committer_email: FlatVector<'a>,
-    committer_timestamp: FlatVector<'a>,
-    message: FlatVector<'a>,
-    parents: ListVector<'a>,
+    commit_id: Option<FlatVector<'a>>,
+    author: Option<FlatVector<'a>>,
+    author_email: Option<FlatVector<'a>>,
+    author_timestamp: Option<FlatVector<'a>>,
+    committer: Option<FlatVector<'a>>,
+    committer_email: Option<FlatVector<'a>>,
+    committer_timestamp: Option<FlatVector<'a>>,
+    message: Option<FlatVector<'a>>,
+    parents: Option<ListVector<'a>>,
     parents_offset: usize,
     file_changes: Option<ListVector<'a>>,
     file_changes_offset: usize,
 }
 
 impl<'a> VectorInserter<'a> {
-    pub fn new(chunk: &'a DataChunkHandle, with_file_changes: bool) -> Self {
+    pub fn new(chunk: &'a DataChunkHandle, column_indices: &[u64]) -> Self {
+        let mut commit_id = None;
+        let mut author = None;
+        let mut author_email = None;
+        let mut author_timestamp = None;
+        let mut committer = None;
+        let mut committer_email = None;
+        let mut committer_timestamp = None;
+        let mut message = None;
+        let mut parents = None;
+        let mut file_changes = None;
+
+        for (chunk_pos, &orig_idx) in column_indices.iter().enumerate() {
+            match orig_idx {
+                0 => commit_id = Some(chunk.flat_vector(chunk_pos)),
+                1 => author = Some(chunk.flat_vector(chunk_pos)),
+                2 => author_email = Some(chunk.flat_vector(chunk_pos)),
+                3 => author_timestamp = Some(chunk.flat_vector(chunk_pos)),
+                4 => committer = Some(chunk.flat_vector(chunk_pos)),
+                5 => committer_email = Some(chunk.flat_vector(chunk_pos)),
+                6 => committer_timestamp = Some(chunk.flat_vector(chunk_pos)),
+                7 => message = Some(chunk.flat_vector(chunk_pos)),
+                8 => parents = Some(chunk.list_vector(chunk_pos)),
+                9 => file_changes = Some(chunk.list_vector(chunk_pos)),
+                _ => {}
+            }
+        }
+
         VectorInserter {
-            commit_id: chunk.flat_vector(0),
-            author: chunk.flat_vector(1),
-            author_email: chunk.flat_vector(2),
-            author_timestamp: chunk.flat_vector(3),
-            committer: chunk.flat_vector(4),
-            committer_email: chunk.flat_vector(5),
-            committer_timestamp: chunk.flat_vector(6),
-            message: chunk.flat_vector(7),
-            parents: chunk.list_vector(8),
+            commit_id,
+            author,
+            author_email,
+            author_timestamp,
+            committer,
+            committer_email,
+            committer_timestamp,
+            message,
+            parents,
             parents_offset: 0,
-            file_changes: with_file_changes.then(|| chunk.list_vector(9)),
+            file_changes,
             file_changes_offset: 0,
         }
     }
 
     pub fn push(&mut self, idx: usize, oid: &str, commit: &CommitData) {
-        self.commit_id.insert(idx, oid);
-        self.author.insert(idx, &commit.author_name);
-        self.author_email.insert(idx, &commit.author_email);
-        unsafe {
-            self.author_timestamp.as_mut_slice::<i64>()[idx] =
-                commit.author_timestamp * 1_000_000;
+        if let Some(v) = self.commit_id.as_mut() {
+            v.insert(idx, oid);
         }
-        self.committer.insert(idx, &commit.committer_name);
-        self.committer_email.insert(idx, &commit.committer_email);
-        unsafe {
-            self.committer_timestamp.as_mut_slice::<i64>()[idx] =
-                commit.committer_timestamp * 1_000_000;
+        if let Some(v) = self.author.as_mut() {
+            v.insert(idx, &commit.author_name);
         }
-        self.message.insert(idx, &commit.message);
+        if let Some(v) = self.author_email.as_mut() {
+            v.insert(idx, &commit.author_email);
+        }
+        if let Some(v) = self.author_timestamp.as_mut() {
+            unsafe {
+                v.as_mut_slice::<i64>()[idx] = commit.author_timestamp * 1_000_000;
+            }
+        }
+        if let Some(v) = self.committer.as_mut() {
+            v.insert(idx, &commit.committer_name);
+        }
+        if let Some(v) = self.committer_email.as_mut() {
+            v.insert(idx, &commit.committer_email);
+        }
+        if let Some(v) = self.committer_timestamp.as_mut() {
+            unsafe {
+                v.as_mut_slice::<i64>()[idx] = commit.committer_timestamp * 1_000_000;
+            }
+        }
+        if let Some(v) = self.message.as_mut() {
+            v.insert(idx, &commit.message);
+        }
 
-        let parents = &commit.parents;
-        let parents_child = self.parents.child(self.parents_offset + parents.len());
-        for (i, parent) in parents.iter().enumerate() {
-            parents_child.insert(self.parents_offset + i, parent.as_str());
+        if let Some(parents_vec) = self.parents.as_mut() {
+            let parents = &commit.parents;
+            let parents_child = parents_vec.child(self.parents_offset + parents.len());
+            for (i, parent) in parents.iter().enumerate() {
+                parents_child.insert(self.parents_offset + i, parent.as_str());
+            }
+            parents_vec.set_entry(idx, self.parents_offset, parents.len());
+            self.parents_offset += parents.len();
         }
-        self.parents.set_entry(idx, self.parents_offset, parents.len());
-        self.parents_offset += parents.len();
 
         if let Some(fc_vec) = self.file_changes.as_mut() {
             let file_changes = &commit.file_changes;
@@ -86,7 +129,9 @@ impl<'a> VectorInserter<'a> {
     }
 
     pub fn finish(mut self) {
-        self.parents.set_len(self.parents_offset);
+        if let Some(parents_vec) = self.parents.as_mut() {
+            parents_vec.set_len(self.parents_offset);
+        }
         if let Some(fc_vec) = self.file_changes.as_mut() {
             fc_vec.set_len(self.file_changes_offset);
         }

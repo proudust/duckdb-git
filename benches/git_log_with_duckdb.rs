@@ -43,7 +43,7 @@ fn with_diff(bencher: divan::Bencher, threads: usize) {
     let db = setup_duckdb(threads);
     bencher.bench_local(|| {
         let mut stmt = db
-            .prepare("SELECT count(*) FROM git_log(?, diff_merges='first-parent')")
+            .prepare("SELECT count(file_changes) FROM git_log(?)")
             .unwrap();
         stmt.query_row([&path], |row| row.get::<_, i64>(0)).unwrap()
     });

@@ -19,6 +19,9 @@ jobs:
       - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
 
+      - name: Unit test
+        run: cargo test --lib
+
       - name: Build
         run: make all
 
@@ -42,6 +45,9 @@ jobs:
 
       - name: Configure
         run: make configure
+
+      - name: Unit test (gix-backend)
+        run: cargo test --lib --no-default-features --features bundled,gix-backend
 
       - name: Build (gix-backend)
         env:

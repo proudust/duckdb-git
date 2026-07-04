@@ -42,28 +42,27 @@ Returns commit history as a table.
 
 #### Parameters
 
-| Name               | Type      | Default       | Description                                             |
-| ------------------ | --------- | ------------- | ------------------------------------------------------- |
-| `repo_path`        | `VARCHAR` | *(required)*  | Path to the Git repository                              |
-| `revision`         | `VARCHAR` | `NULL` (HEAD) | Branch, tag, or commit hash                             |
-| `max_count`        | `INTEGER` | `NULL` (all)  | Maximum number of commits to return                     |
-| `diff_merges`      | `VARCHAR` | `'off'`       | File change retrieval mode: `'off'` or `'first-parent'` |
-| `ignore_all_space` | `BOOLEAN` | `false`       | Ignore whitespace changes in diffs                      |
+| Name               | Type      | Default       | Description                         |
+| ------------------ | --------- | ------------- | ----------------------------------- |
+| `repo_path`        | `VARCHAR` | *(required)*  | Path to the Git repository          |
+| `revision`         | `VARCHAR` | `NULL` (HEAD) | Branch, tag, or commit hash         |
+| `max_count`        | `INTEGER` | `NULL` (all)  | Maximum number of commits to return |
+| `ignore_all_space` | `BOOLEAN` | `false`       | Ignore whitespace changes in diffs  |
 
 #### Output Columns
 
-| Column                | Type            | Description                                     |
-| --------------------- | --------------- | ----------------------------------------------- |
-| `commit_id`           | `VARCHAR`       | Full commit hash                                |
-| `author`              | `VARCHAR`       | Author name                                     |
-| `author_email`        | `VARCHAR`       | Author email                                    |
-| `author_timestamp`    | `TIMESTAMPTZ`   | Author timestamp                                |
-| `committer`           | `VARCHAR`       | Committer name                                  |
-| `committer_email`     | `VARCHAR`       | Committer email                                 |
-| `committer_timestamp` | `TIMESTAMPTZ`   | Committer timestamp                             |
-| `message`             | `VARCHAR`       | Commit message                                  |
-| `parents`             | `VARCHAR[]`     | Parent commit hashes                            |
-| `file_changes`        | `STRUCT(...)[]` | File changes (only when `diff_merges != 'off'`) |
+| Column                | Type            | Description          |
+| --------------------- | --------------- | -------------------- |
+| `commit_id`           | `VARCHAR`       | Full commit hash     |
+| `author`              | `VARCHAR`       | Author name          |
+| `author_email`        | `VARCHAR`       | Author email         |
+| `author_timestamp`    | `TIMESTAMPTZ`   | Author timestamp     |
+| `committer`           | `VARCHAR`       | Committer name       |
+| `committer_email`     | `VARCHAR`       | Committer email      |
+| `committer_timestamp` | `TIMESTAMPTZ`   | Committer timestamp  |
+| `message`             | `VARCHAR`       | Commit message       |
+| `parents`             | `VARCHAR[]`     | Parent commit hashes |
+| `file_changes`        | `STRUCT(...)[]` | File changes         |
 
 The `file_changes` struct contains:
 

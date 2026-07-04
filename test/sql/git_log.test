@@ -131,21 +131,3 @@ SELECT commit_id, len(file_changes) FROM git_log('.', ignore_all_space=false, di
 # Test that ignore_all_space parameter defaults to false
 statement ok
 SELECT commit_id FROM git_log('.') WHERE commit_id = (SELECT commit_id FROM git_log('.', ignore_all_space=false) LIMIT 1) LIMIT 1;
-
-# Test that ignore_all_space=true reduces diff line counts on a commit with indentation changes
-# Commit 8769ae5 has src/lib.rs with 112 add / 83 del normally, but 64 add / 35 del with -w
-query II
-SELECT change.add_lines, change.del_lines FROM (
-  SELECT unnest(file_changes) as change
-  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=false, diff_merges='first-parent')
-) WHERE change.path = 'src/lib.rs';
-----
-112	83
-
-query II
-SELECT change.add_lines, change.del_lines FROM (
-  SELECT unnest(file_changes) as change
-  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=true, diff_merges='first-parent')
-) WHERE change.path = 'src/lib.rs';
-----
-64	35

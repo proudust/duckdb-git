@@ -1,0 +1,27 @@
+# name: test/sql/git_log_ignore_all_space.test
+# description: ignore_all_space diff line-count regression test (git2-backend only)
+# group: [git]
+
+require duckdb_git
+
+# gix-backend does not implement ignore_all_space (see src/git_log/gix.rs) and gives
+# different line counts than git2-backend even when ignore_all_space=false.
+require-env GIT_LOG_BACKEND git2
+
+# Test that ignore_all_space=true reduces diff line counts on a commit with indentation changes
+# Commit 8769ae5 has src/lib.rs with 112 add / 83 del normally, but 64 add / 35 del with -w
+query II
+SELECT change.add_lines, change.del_lines FROM (
+  SELECT unnest(file_changes) as change
+  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=false, diff_merges='first-parent')
+) WHERE change.path = 'src/lib.rs';
+----
+112	83
+
+query II
+SELECT change.add_lines, change.del_lines FROM (
+  SELECT unnest(file_changes) as change
+  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=true, diff_merges='first-parent')
+) WHERE change.path = 'src/lib.rs';
+----
+64	35

@@ -12,6 +12,8 @@ pub struct VectorInserter<'a> {
     message: Option<FlatVector<'a>>,
     parents: Option<ListVector<'a>>,
     parents_offset: usize,
+    decorate: Option<ListVector<'a>>,
+    decorate_offset: usize,
     file_changes: Option<ListVector<'a>>,
     file_changes_offset: usize,
 }
@@ -27,6 +29,7 @@ impl<'a> VectorInserter<'a> {
         let mut committer_timestamp = None;
         let mut message = None;
         let mut parents = None;
+        let mut decorate = None;
         let mut file_changes = None;
 
         for (chunk_pos, &orig_idx) in column_indices.iter().enumerate() {
@@ -40,7 +43,8 @@ impl<'a> VectorInserter<'a> {
                 6 => committer_timestamp = Some(chunk.flat_vector(chunk_pos)),
                 7 => message = Some(chunk.flat_vector(chunk_pos)),
                 8 => parents = Some(chunk.list_vector(chunk_pos)),
-                9 => file_changes = Some(chunk.list_vector(chunk_pos)),
+                9 => decorate = Some(chunk.list_vector(chunk_pos)),
+                10 => file_changes = Some(chunk.list_vector(chunk_pos)),
                 _ => {}
             }
         }
@@ -56,12 +60,14 @@ impl<'a> VectorInserter<'a> {
             message,
             parents,
             parents_offset: 0,
+            decorate,
+            decorate_offset: 0,
             file_changes,
             file_changes_offset: 0,
         }
     }
 
-    pub fn push(&mut self, idx: usize, oid: &str, commit: &CommitData) {
+    pub fn push(&mut self, idx: usize, oid: &str, commit: &CommitData, refs: &[String]) {
         if let Some(v) = self.commit_id.as_mut() {
             v.insert(idx, oid);
         }
@@ -101,6 +107,15 @@ impl<'a> VectorInserter<'a> {
             self.parents_offset += parents.len();
         }
 
+        if let Some(decorate_vec) = self.decorate.as_mut() {
+            let decorate_child = decorate_vec.child(self.decorate_offset + refs.len());
+            for (i, ref_name) in refs.iter().enumerate() {
+                decorate_child.insert(self.decorate_offset + i, ref_name.as_str());
+            }
+            decorate_vec.set_entry(idx, self.decorate_offset, refs.len());
+            self.decorate_offset += refs.len();
+        }
+
         if let Some(fc_vec) = self.file_changes.as_mut() {
             let file_changes = &commit.file_changes;
             let len = file_changes.len();
@@ -131,6 +146,9 @@ impl<'a> VectorInserter<'a> {
     pub fn finish(mut self) {
         if let Some(parents_vec) = self.parents.as_mut() {
             parents_vec.set_len(self.parents_offset);
+        }
+        if let Some(decorate_vec) = self.decorate.as_mut() {
+            decorate_vec.set_len(self.decorate_offset);
         }
         if let Some(fc_vec) = self.file_changes.as_mut() {
             fc_vec.set_len(self.file_changes_offset);

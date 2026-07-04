@@ -2,6 +2,7 @@ use super::GitBackend;
 use crate::types::{CommitData, FileChange};
 use ::git2::Repository;
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 thread_local! {
     static CACHED_REPO: RefCell<Option<(String, Repository)>> = const { RefCell::new(None) };
@@ -214,6 +215,24 @@ impl GitBackend for Git2Backend {
             file_changes,
         })
     }
+
+    fn get_refs(&self) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
+        let mut refs_map: HashMap<String, Vec<String>> = HashMap::new();
+        for reference in self.repo().references()? {
+            let reference = reference?;
+            let name = reference.shorthand().unwrap_or("").to_string();
+            if name.is_empty() {
+                continue;
+            }
+            if let Ok(commit) = reference.peel_to_commit() {
+                refs_map
+                    .entry(commit.id().to_string())
+                    .or_default()
+                    .push(name);
+            }
+        }
+        Ok(refs_map)
+    }
 }
 
 impl Drop for Git2Backend {
@@ -231,6 +250,7 @@ mod tests {
     use super::*;
 
     const SECOND_COMMIT: &str = "2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5";
+    const TAGGED_COMMIT: &str = "295db8704f2b2e12fe71a1f433b8b17906fedf25"; // v0.1.1 (annotated tag)
 
     #[test]
     fn skip_file_changes_returns_empty() {
@@ -244,5 +264,22 @@ mod tests {
         let backend = Git2Backend::new(".").unwrap();
         let commit = backend.get_commit(SECOND_COMMIT, false, false).unwrap();
         assert!(!commit.file_changes.is_empty());
+    }
+
+    #[test]
+    fn get_refs_peels_annotated_tag_to_commit() {
+        let backend = Git2Backend::new(".").unwrap();
+        let refs = backend.get_refs().unwrap();
+        let names = refs
+            .get(TAGGED_COMMIT)
+            .expect("tagged commit should have refs");
+        assert!(names.iter().any(|n| n == "v0.1.1"));
+    }
+
+    #[test]
+    fn get_refs_returns_empty_for_commit_without_refs() {
+        let backend = Git2Backend::new(".").unwrap();
+        let refs = backend.get_refs().unwrap();
+        assert!(!refs.contains_key(SECOND_COMMIT));
     }
 }

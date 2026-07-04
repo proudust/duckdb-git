@@ -1,6 +1,7 @@
 use super::GitBackend;
 use crate::types::{CommitData, FileChange};
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 thread_local! {
     static CACHED_REPO: RefCell<Option<(String, gix::ThreadSafeRepository)>> = const { RefCell::new(None) };
@@ -14,9 +15,7 @@ pub struct GixBackend {
 impl GixBackend {
     pub fn new(repo_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
-            Some((path, _)) if path == repo_path => {
-                Ok(cached.take().unwrap().1.to_thread_local())
-            }
+            Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1.to_thread_local()),
             _ => gix::open(repo_path),
         })?;
         Ok(GixBackend {
@@ -142,10 +141,7 @@ impl GitBackend for GixBackend {
         let oid = gix::ObjectId::from_hex(oid.as_bytes())?;
         let commit = self.repo().find_commit(oid)?;
 
-        let author_name = commit
-            .author()
-            .map(|a| a.name.to_vec())
-            .unwrap_or_default();
+        let author_name = commit.author().map(|a| a.name.to_vec()).unwrap_or_default();
         let author_email = commit
             .author()
             .map(|a| a.email.to_vec())
@@ -193,6 +189,25 @@ impl GitBackend for GixBackend {
             file_changes,
         })
     }
+    fn get_refs(&self) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
+        let mut refs_map: HashMap<String, Vec<String>> = HashMap::new();
+
+        let platform = self.repo().references()?;
+        for reference in platform.all()? {
+            let mut reference = reference.map_err(|e| e.to_string())?;
+            let name = reference.name().shorten().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            if let Ok(commit) = reference.peel_to_commit() {
+                refs_map
+                    .entry(commit.id.to_string())
+                    .or_default()
+                    .push(name);
+            }
+        }
+        Ok(refs_map)
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +215,7 @@ mod tests {
     use super::*;
 
     const SECOND_COMMIT: &str = "2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5";
+    const TAGGED_COMMIT: &str = "295db8704f2b2e12fe71a1f433b8b17906fedf25"; // v0.1.1 (annotated tag)
 
     #[test]
     fn skip_file_changes_returns_empty() {
@@ -213,6 +229,23 @@ mod tests {
         let backend = GixBackend::new(".").unwrap();
         let commit = backend.get_commit(SECOND_COMMIT, false, false).unwrap();
         assert!(!commit.file_changes.is_empty());
+    }
+
+    #[test]
+    fn get_refs_peels_annotated_tag_to_commit() {
+        let backend = GixBackend::new(".").unwrap();
+        let refs = backend.get_refs().unwrap();
+        let names = refs
+            .get(TAGGED_COMMIT)
+            .expect("tagged commit should have refs");
+        assert!(names.iter().any(|n| n == "v0.1.1"));
+    }
+
+    #[test]
+    fn get_refs_returns_empty_for_commit_without_refs() {
+        let backend = GixBackend::new(".").unwrap();
+        let refs = backend.get_refs().unwrap();
+        assert!(!refs.contains_key(SECOND_COMMIT));
     }
 }
 

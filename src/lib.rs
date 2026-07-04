@@ -10,11 +10,13 @@ use duckdb::{
 };
 use vector::VectorInserter;
 use std::{
+    collections::HashMap,
     error::Error,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-const FILE_CHANGES_COLUMN_INDEX: u64 = 9;
+const DECORATE_COLUMN_INDEX: u64 = 9;
+const FILE_CHANGES_COLUMN_INDEX: u64 = 10;
 
 #[repr(C)]
 struct GitLogBindData {
@@ -27,6 +29,7 @@ struct GitLogBindData {
 #[repr(C)]
 struct GitLogInitData {
     commit_ids: Vec<String>,
+    decorations: HashMap<String, Vec<String>>,
     current_index: AtomicUsize,
     batch_size: usize,
     column_indices: Vec<u64>,
@@ -70,6 +73,11 @@ impl VTab for GitLogVTab {
         let parents_array_type =
             LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("parents", parents_array_type);
+
+        // decorate: VARCHAR[]
+        let decorate_array_type =
+            LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        bind.add_result_column("decorate", decorate_array_type);
 
         // file_changes: STRUCT(path, status, blob_id, file_size, add_lines, del_lines)[]
         let file_change_struct = LogicalTypeHandle::struct_type(&[
@@ -116,6 +124,11 @@ impl VTab for GitLogVTab {
 
         let commit_oids =
             backend.get_commit_oids(bind_data.revision.as_deref(), bind_data.max_count)?;
+        let decorations = if column_indices.contains(&DECORATE_COLUMN_INDEX) {
+            backend.get_refs()?
+        } else {
+            HashMap::new()
+        };
 
         let cpu_cores = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -127,6 +140,7 @@ impl VTab for GitLogVTab {
 
         Ok(GitLogInitData {
             commit_ids: commit_oids,
+            decorations,
             current_index: AtomicUsize::new(0),
             batch_size,
             column_indices,
@@ -157,11 +171,13 @@ impl VTab for GitLogVTab {
 
         let mut writer = VectorInserter::new(output, &init_data.column_indices);
 
+        let empty_refs: Vec<String> = Vec::new();
         let skip_file_changes = !init_data.need_file_changes();
         let oids = &init_data.commit_ids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
             let commit = backend.get_commit(oid, bind_data.ignore_all_space, skip_file_changes)?;
-            writer.push(batch_idx, oid, &commit);
+            let refs = init_data.decorations.get(oid).unwrap_or(&empty_refs);
+            writer.push(batch_idx, oid, &commit, refs);
         }
 
         writer.finish();

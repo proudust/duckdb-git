@@ -4,6 +4,7 @@ mod git2;
 mod gix;
 
 use crate::types::CommitData;
+use std::collections::HashMap;
 use std::error::Error;
 
 pub trait GitBackend {
@@ -19,6 +20,8 @@ pub trait GitBackend {
         ignore_all_space: bool,
         skip_file_changes: bool,
     ) -> Result<CommitData, Box<dyn Error>>;
+
+    fn get_refs(&self) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>>;
 }
 
 #[cfg(feature = "git2-backend")]

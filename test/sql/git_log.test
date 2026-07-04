@@ -23,9 +23,9 @@ SELECT commit_id, author FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca0
 ----
 b1e7e960fcbee2de7489b7dcca09a9223039521e	Proudust
 
-# Test that all columns are accessible including file changes and parents
+# Test that all columns are accessible including file changes, parents, and decorate
 statement ok
-SELECT commit_id, author, author_email, message, author_timestamp, parents, file_changes FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;
+SELECT commit_id, author, author_email, message, author_timestamp, parents, decorate, file_changes FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;
 
 # Test that parents array works correctly for initial commit (should be empty)
 query I
@@ -135,3 +135,19 @@ SELECT commit_id, author FROM git_log('.') LIMIT 1;
 # Test that ignore_all_space parameter defaults to false
 statement ok
 SELECT commit_id FROM git_log('.') WHERE commit_id = (SELECT commit_id FROM git_log('.', ignore_all_space=false) LIMIT 1) LIMIT 1;
+
+# Test that decorate is an empty array for a commit with no branch/tag pointing to it
+query I
+SELECT decorate FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1);
+----
+[]
+
+# Test that decorate includes an annotated tag pointing to the commit (exercises tag peeling)
+query I
+SELECT decorate FROM git_log('.', revision='295db8704f2b2e12fe71a1f433b8b17906fedf25', max_count=1);
+----
+[v0.1.1]
+
+# Test filtering commits by decorate content
+statement ok
+SELECT commit_id FROM git_log('.') WHERE len(decorate) > 0 LIMIT 3;

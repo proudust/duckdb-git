@@ -6,8 +6,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -26,3 +24,44 @@ jobs:
 
       - name: Test
         run: make test
+
+  build-gix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Configure
+        run: make configure
+
+      - name: Build (gix-backend)
+        env:
+          DUCKDB_EXTENSION_NAME: duckdb_git
+          DUCKDB_EXTENSION_MIN_DUCKDB_VERSION: v1.5.4
+        run: cargo build --no-default-features --features loadable-extension,gix-backend
+
+      - name: Package as loadable extension
+        run: |
+          mkdir -p build/gix-debug
+          cp target/debug/libduckdb_git.so build/gix-debug/
+          ./configure/venv/bin/python extension-ci-tools/scripts/append_extension_metadata.py \
+            -l build/gix-debug/libduckdb_git.so \
+            -o build/gix-debug/duckdb_git.duckdb_extension \
+            -n duckdb_git -dv v1.5.4 \
+            -evf configure/extension_version.txt -pf configure/platform.txt \
+            --abi-type C_STRUCT_UNSTABLE
+
+      - name: Test (gix-backend)
+        run: |
+          ./configure/venv/bin/python -m duckdb_sqllogictest \
+            --test-dir test/sql \
+            --external-extension build/gix-debug/duckdb_git.duckdb_extension

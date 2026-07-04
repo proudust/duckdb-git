@@ -110,9 +110,10 @@ b1e7e960fcbee2de7489b7dcca09a9223039521e	[]
 5873dd77bb3d3734a23dab4dc195a2a734e45d03	[78ae3ce3e7cb6ee193569710b3213352ed1c857f]
 86b5cb415f95c10b06f7623e5cbecb5f92f612ba	[5873dd77bb3d3734a23dab4dc195a2a734e45d03]
 
-# Test that file_changes values are correct per row (regression: offsets were always 0)
+# Test that file_changes values are correct per row
+# NOTE: File order may vary depending on the backend.
 query II
-SELECT commit_id, list_transform(file_changes, x -> x.path)
+SELECT commit_id, list_sort(list_transform(file_changes, x -> x.path))
 FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', diff_merges='first-parent')
 ORDER BY author_timestamp ASC;
 ----

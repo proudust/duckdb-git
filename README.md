@@ -4,13 +4,35 @@ A [DuckDB](https://duckdb.org/) extension for querying Git repository history wi
 
 ## Usage
 
-Load the extension and query any local Git repository:
+Require DuckDB v1.5.4 or later.
+
+Since it is not signed, you need to start it with the `-unsigned` option.
+
+```sh
+duckdb -unsigned
+```
 
 ```sql
-LOAD 'duckdb_git';
+-- Install the binary for your platform
+INSTALL 'https://github.com/proudust/duckdb-git/releases/latest/download/duckdb_git.duckdb_extension.linux_amd64.gz';
+INSTALL 'https://github.com/proudust/duckdb-git/releases/latest/download/duckdb_git.duckdb_extension.linux_arm64.gz';
+INSTALL 'https://github.com/proudust/duckdb-git/releases/latest/download/duckdb_git.duckdb_extension.osx_amd64.gz';
+INSTALL 'https://github.com/proudust/duckdb-git/releases/latest/download/duckdb_git.duckdb_extension.osx_arm64.gz';
+INSTALL 'https://github.com/proudust/duckdb-git/releases/latest/download/duckdb_git.duckdb_extension.windows_amd64.gz';
+
+LOAD duckdb_git;
 
 SELECT * FROM git_log('.');
 ```
+
+> [!NOTE]
+> If you see the following error when running `LOAD`, your local extension cache might be corrupted.
+> Try running `FORCE INSTALL` to reinstall the extension.
+> 
+> ```
+> Invalid Input Error:
+> Failed to load 'duckdb_git', The file is not a DuckDB extension. The metadata at the end of the file is invalid
+> ```
 
 ## Function Reference
 
@@ -56,26 +78,17 @@ The `file_changes` struct contains:
 
 ## Building
 
-### Dependencies
+Require:
 
 - [Rust](https://www.rust-lang.org/tools/install)
 - Python 3
 - [Make](https://www.gnu.org/software/make)
 - Git
 
-### Build
-
 ```sh
-# Build
-make configure
-make release # or `make debug` for debug builds
-# The built extension is written to `build/release/extension/duckdb_git/duckdb_git.duckdb_extension`.
-
-# Run
-duckdb -unsigned
-```
-
-```sql
-LOAD 'build/release/extension/duckdb_git/duckdb_git.duckdb_extension';
-SELECT * FROM git_log('.');
+make debug # Build (debug)
+make release # Build (release)
+make test # Run E2E tests (sqllogictest)
+make bench # Run benchmarks on this repository
+BENCH_REPO=/here/any/repo make bench # Run benchmarks on /here/any/repo
 ```

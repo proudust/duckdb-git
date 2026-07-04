@@ -5,6 +5,7 @@
         "cstring",
         "duckdb",
         "emcc",
+        "gitoxide",
         "libduckdb",
         "libgit",
         "oids",

@@ -1,6 +1,6 @@
 [package]
 name = "duckdb_git"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 [lib]
@@ -28,7 +28,8 @@ gix-backend = ["dep:gix"]
 
 [dependencies]
 duckdb = { version = "~1.10504.0", features = ["vtab"] }
-git2 = { version = "0.20.2", default-features = false, features = [], optional = true }
+git2 = { version = "0.20.2", default-features = false, features = [
+], optional = true }
 gix = { version = "0.72", optional = true }
 
 [dev-dependencies]

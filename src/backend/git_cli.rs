@@ -1,7 +1,7 @@
 use super::GitBackend;
 use crate::types::{CommitData, FileChange};
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
 pub struct GitCliBackend {
@@ -33,17 +33,45 @@ impl GitCliBackend {
         cmd.stderr(Stdio::piped());
 
         let mut child = cmd.spawn()?;
-        if let Some(ref mut stdin) = child.stdin {
-            stdin.write_all(stdin_data)?;
-        }
-        drop(child.stdin.take());
+        let stdin = child.stdin.take();
+        let mut stdout = child.stdout.take().expect("stdout piped");
+        let mut stderr = child.stderr.take().expect("stderr piped");
+        let stdin_data = stdin_data.to_vec();
 
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let (stdout_buf, stderr_buf) = std::thread::scope(
+            |s| -> Result<(Vec<u8>, Vec<u8>), std::io::Error> {
+                let stdin_handle = s.spawn(move || -> Result<(), std::io::Error> {
+                    if let Some(mut stdin) = stdin {
+                        stdin.write_all(&stdin_data)?;
+                    }
+                    Ok(())
+                });
+
+                let stdout_handle = s.spawn(move || -> Result<Vec<u8>, std::io::Error> {
+                    let mut buf = Vec::new();
+                    stdout.read_to_end(&mut buf)?;
+                    Ok(buf)
+                });
+
+                let stderr_handle = s.spawn(move || -> Result<Vec<u8>, std::io::Error> {
+                    let mut buf = Vec::new();
+                    stderr.read_to_end(&mut buf)?;
+                    Ok(buf)
+                });
+
+                stdin_handle.join().unwrap()?;
+                let stdout_buf = stdout_handle.join().unwrap()?;
+                let stderr_buf = stderr_handle.join().unwrap()?;
+                Ok((stdout_buf, stderr_buf))
+            },
+        )?;
+
+        let status = child.wait()?;
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&stderr_buf);
             return Err(format!("git {} failed: {}", args[0], stderr).into());
         }
-        Ok(output.stdout)
+        Ok(stdout_buf)
     }
 
     fn fetch_metadata(

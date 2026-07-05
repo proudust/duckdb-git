@@ -147,8 +147,14 @@ impl<'a> VectorInserter<'a> {
                 }
                 status.insert(off + i, fc.status);
                 blob_id.insert(off + i, fc.blob_id.as_str());
+                if let Some(size) = fc.file_size {
+                    unsafe {
+                        file_size.as_mut_slice::<i64>()[off + i] = size;
+                    }
+                } else {
+                    file_size.set_null(off + i);
+                }
                 unsafe {
-                    file_size.as_mut_slice::<i64>()[off + i] = fc.file_size;
                     add_lines.as_mut_slice::<i32>()[off + i] = fc.add_lines;
                     del_lines.as_mut_slice::<i32>()[off + i] = fc.del_lines;
                 }

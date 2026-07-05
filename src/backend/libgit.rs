@@ -1,5 +1,5 @@
 use super::GitBackend;
-use crate::types::{CommitData, FileChange};
+use crate::types::{gitlink_numstat, CommitData, FileChange};
 use ::git2::Repository;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -45,27 +45,36 @@ impl LibGitBackend {
                 }
                 if let Some(name) = entry.name() {
                     let oid = entry.id();
-                    let (file_size, add_lines) = if let Ok(blob) = self.repo().find_blob(oid) {
+                    if entry.kind() == Some(::git2::ObjectType::Commit) {
+                        let (add_lines, del_lines) = gitlink_numstat("A");
+                        file_changes.push(FileChange {
+                            path: format!("{}{}", root, name),
+                            old_path: None,
+                            status: "A",
+                            blob_id: oid.to_string(),
+                            file_size: None,
+                            add_lines,
+                            del_lines,
+                            is_gitlink: true,
+                        });
+                    } else if let Ok(blob) = self.repo().find_blob(oid) {
                         let content = std::str::from_utf8(blob.content());
-                        let lines = if let Ok(text) = content {
+                        let add_lines = if let Ok(text) = content {
                             text.lines().count() as i32
                         } else {
                             0
                         };
-                        (blob.size() as i64, lines)
-                    } else {
-                        (0, 0)
-                    };
-
-                    file_changes.push(FileChange {
-                        path: format!("{}{}", root, name),
-                        old_path: None,
-                        status: "A",
-                        blob_id: oid.to_string(),
-                        file_size,
-                        add_lines,
-                        del_lines: 0,
-                    });
+                        file_changes.push(FileChange {
+                            path: format!("{}{}", root, name),
+                            old_path: None,
+                            status: "A",
+                            blob_id: oid.to_string(),
+                            file_size: Some(blob.size() as i64),
+                            add_lines,
+                            del_lines: 0,
+                            is_gitlink: false,
+                        });
+                    }
                 }
                 ::git2::TreeWalkResult::Ok
             })?;
@@ -124,18 +133,35 @@ impl LibGitBackend {
                         _ => None,
                     };
 
-                    let (blob_id, file_size) = if delta.new_file().path().is_some() {
+                    let is_gitlink = delta.new_file().mode() == ::git2::FileMode::Commit
+                        || delta.old_file().mode() == ::git2::FileMode::Commit;
+
+                    let (blob_id, file_size, add_lines, del_lines) = if is_gitlink {
+                        let id = if delta.new_file().path().is_some() {
+                            delta.new_file().id().to_string()
+                        } else if delta.old_file().path().is_some() {
+                            delta.old_file().id().to_string()
+                        } else {
+                            "unknown".to_string()
+                        };
+                        let (add, del) = gitlink_numstat(status);
+                        (id, None, add, del)
+                    } else if delta.new_file().path().is_some() {
                         (
                             delta.new_file().id().to_string(),
-                            delta.new_file().size() as i64,
+                            Some(delta.new_file().size() as i64),
+                            0,
+                            0,
                         )
                     } else if delta.old_file().path().is_some() {
                         (
                             delta.old_file().id().to_string(),
-                            delta.old_file().size() as i64,
+                            Some(delta.old_file().size() as i64),
+                            0,
+                            0,
                         )
                     } else {
-                        ("unknown".to_string(), 0)
+                        ("unknown".to_string(), Some(0), 0, 0)
                     };
 
                     file_changes.borrow_mut().push(FileChange {
@@ -144,8 +170,9 @@ impl LibGitBackend {
                         status,
                         blob_id,
                         file_size,
-                        add_lines: 0,
-                        del_lines: 0,
+                        add_lines,
+                        del_lines,
+                        is_gitlink,
                     });
 
                     true
@@ -155,10 +182,12 @@ impl LibGitBackend {
                 Some(&mut |_delta, _hunk, line| {
                     let mut fc = file_changes.borrow_mut();
                     if let Some(last) = fc.last_mut() {
-                        match line.origin() {
-                            '+' => last.add_lines += 1,
-                            '-' => last.del_lines += 1,
-                            _ => {}
+                        if !last.is_gitlink {
+                            match line.origin() {
+                                '+' => last.add_lines += 1,
+                                '-' => last.del_lines += 1,
+                                _ => {}
+                            }
                         }
                     }
                     true

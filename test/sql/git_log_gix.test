@@ -45,3 +45,21 @@ SELECT COUNT(*) FROM (
 ) WHERE change.path = 'src/backend/git2.rs';
 ----
 0
+
+# Submodule gitlink (A): gix does not yet match libgit/git numstat (documents current output)
+query IIII
+SELECT change.status, change.add_lines, change.del_lines, change.file_size
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e', max_count=1, backend='gix'))
+WHERE change.path = 'extension-ci-tools';
+----
+A	0	0	0
+
+# Submodule gitlink (M): gix does not yet match libgit/git numstat (documents current output)
+query IIII
+SELECT change.status, change.add_lines, change.del_lines, change.file_size
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('.', revision='81e3dcae30d1b953227e49c0ce69d5747abcf6ab', max_count=1, backend='gix'))
+WHERE change.path = 'extension-ci-tools';
+----
+M	0	0	0

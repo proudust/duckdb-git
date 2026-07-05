@@ -109,9 +109,10 @@ impl GixBackend {
                     old_path,
                     status,
                     blob_id: id.to_string(),
-                    file_size,
+                    file_size: Some(file_size),
                     add_lines,
                     del_lines,
+                    is_gitlink: false,
                 });
 
                 Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)

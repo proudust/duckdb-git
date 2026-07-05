@@ -204,7 +204,7 @@ impl GitBackend for LibGitBackend {
         Ok(CommitData {
             author_name: author.name_bytes().to_vec(),
             author_email: author.email_bytes().to_vec(),
-            author_timestamp: commit.time().seconds(),
+            author_timestamp: author.when().seconds(),
             committer_name: committer.name_bytes().to_vec(),
             committer_email: committer.email_bytes().to_vec(),
             committer_timestamp: committer.when().seconds(),

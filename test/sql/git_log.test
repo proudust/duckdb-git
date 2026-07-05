@@ -23,6 +23,12 @@ SELECT commit_id, author FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca0
 ----
 b1e7e960fcbee2de7489b7dcca09a9223039521e	Proudust
 
+# author_timestamp matches git log %ai (commit amended: author and committer dates differ)
+query I
+SELECT author_timestamp FROM git_log('.', revision='7106f0ced64487e26de144c25c71fbf4447735dc', max_count=1);
+----
+2025-07-31 22:46:08+09
+
 # Test that all columns are accessible including file changes, parents, and decorate
 statement ok
 SELECT commit_id, author, author_email, message, author_timestamp, parents, decorate, file_changes FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;

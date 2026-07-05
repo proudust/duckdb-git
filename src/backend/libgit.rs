@@ -59,6 +59,7 @@ impl LibGitBackend {
 
                     file_changes.push(FileChange {
                         path: format!("{}{}", root, name),
+                        old_path: None,
                         status: "A",
                         blob_id: oid.to_string(),
                         file_size,
@@ -78,11 +79,19 @@ impl LibGitBackend {
                 diff_options.ignore_whitespace(true);
             }
 
-            let diff = self.repo().diff_tree_to_tree(
+            let mut diff = self.repo().diff_tree_to_tree(
                 Some(&parent_tree),
                 Some(&current_tree),
                 Some(&mut diff_options),
             )?;
+
+            let mut find_opts = ::git2::DiffFindOptions::new();
+            find_opts
+                .renames(true)
+                .rename_threshold(50)
+                .ignore_whitespace(ignore_all_space);
+
+            diff.find_similar(Some(&mut find_opts))?;
 
             let file_changes = RefCell::new(&mut file_changes);
             diff.foreach(
@@ -107,6 +116,14 @@ impl LibGitBackend {
                         "unknown".to_string()
                     };
 
+                    let old_path = match delta.status() {
+                        ::git2::Delta::Renamed | ::git2::Delta::Copied => delta
+                            .old_file()
+                            .path()
+                            .map(|p| p.to_string_lossy().to_string()),
+                        _ => None,
+                    };
+
                     let (blob_id, file_size) = if delta.new_file().path().is_some() {
                         (
                             delta.new_file().id().to_string(),
@@ -123,6 +140,7 @@ impl LibGitBackend {
 
                     file_changes.borrow_mut().push(FileChange {
                         path: file_path,
+                        old_path,
                         status,
                         blob_id,
                         file_size,

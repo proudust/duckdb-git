@@ -157,3 +157,20 @@ SELECT decorate FROM git_log('.', revision='295db8704f2b2e12fe71a1f433b8b17906fe
 # Test filtering commits by decorate content
 statement ok
 SELECT commit_id FROM git_log('.') WHERE len(decorate) > 0 LIMIT 3;
+
+# Rename: single R entry with old_path (matches git show --name-status / --numstat)
+query IIIII
+SELECT change.path, change.old_path, change.status, change.add_lines, change.del_lines
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('.', revision='5fcebaf735065c06e1d8962216b14a99d5bc0401', max_count=1, backend='libgit'))
+WHERE change.path = 'src/backend/libgit.rs';
+----
+src/backend/libgit.rs	src/backend/git2.rs	R	9	9
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT unnest(file_changes) AS change
+  FROM git_log('.', revision='5fcebaf735065c06e1d8962216b14a99d5bc0401', max_count=1, backend='libgit')
+) WHERE change.path = 'src/backend/git2.rs';
+----
+0

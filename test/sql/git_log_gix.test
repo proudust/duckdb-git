@@ -28,3 +28,20 @@ SELECT len(parents) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a922
 # Projection pushdown without file_changes
 statement ok
 SELECT commit_id, author FROM git_log('.', backend='gix') LIMIT 1;
+
+# Rename: same query as git_log.test, documents gix output
+query IIIII
+SELECT change.path, change.old_path, change.status, change.add_lines, change.del_lines
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('.', revision='5fcebaf735065c06e1d8962216b14a99d5bc0401', max_count=1, backend='gix'))
+WHERE change.path = 'src/backend/libgit.rs';
+----
+src/backend/libgit.rs	src/backend/git2.rs	R	9	9
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT unnest(file_changes) AS change
+  FROM git_log('.', revision='5fcebaf735065c06e1d8962216b14a99d5bc0401', max_count=1, backend='gix')
+) WHERE change.path = 'src/backend/git2.rs';
+----
+0

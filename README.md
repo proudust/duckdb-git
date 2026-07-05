@@ -72,7 +72,8 @@ The `file_changes` struct contains:
 
 | Field       | Type      | Description                                                 |
 | ----------- | --------- | ----------------------------------------------------------- |
-| `path`      | `VARCHAR` | File path                                                   |
+| `path`      | `VARCHAR` | File path (new path for renames/copies)                     |
+| `old_path`  | `VARCHAR` | Previous path for renames/copies; `NULL` otherwise          |
 | `status`    | `VARCHAR` | Change status (`A`dd, `D`elete, `M`odify, `R`ename, `C`opy) |
 | `blob_id`   | `VARCHAR` | Git blob object ID                                          |
 | `file_size` | `BIGINT`  | File size in bytes                                          |

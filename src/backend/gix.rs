@@ -65,12 +65,26 @@ impl GixBackend {
                 }
 
                 let location = change.location().to_string();
-                let status: &'static str = match &change {
-                    Change::Addition { .. } => "A",
-                    Change::Deletion { .. } => "D",
-                    Change::Modification { .. } => "M",
-                    Change::Rewrite { copy: true, .. } => "C",
-                    Change::Rewrite { copy: false, .. } => "R",
+                let (status, old_path): (&'static str, Option<String>) = match &change {
+                    Change::Addition { .. } => ("A", None),
+                    Change::Deletion { .. } => ("D", None),
+                    Change::Modification { .. } => ("M", None),
+                    Change::Rewrite {
+                        copy: true,
+                        source_location,
+                        ..
+                    } => (
+                        "C",
+                        Some(String::from_utf8_lossy(source_location).into_owned()),
+                    ),
+                    Change::Rewrite {
+                        copy: false,
+                        source_location,
+                        ..
+                    } => (
+                        "R",
+                        Some(String::from_utf8_lossy(source_location).into_owned()),
+                    ),
                 };
 
                 let id = change.id();
@@ -92,6 +106,7 @@ impl GixBackend {
 
                 file_changes.push(FileChange {
                     path: location,
+                    old_path,
                     status,
                     blob_id: id.to_string(),
                     file_size,

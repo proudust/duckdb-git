@@ -51,11 +51,12 @@ impl TryFrom<u64> for GitLogColumn {
 #[repr(u8)]
 pub enum FileChangeField {
     Path = 0,
-    Status = 1,
-    BlobId = 2,
-    FileSize = 3,
-    AddLines = 4,
-    DelLines = 5,
+    OldPath = 1,
+    Status = 2,
+    BlobId = 3,
+    FileSize = 4,
+    AddLines = 5,
+    DelLines = 6,
 }
 
 impl FileChangeField {
@@ -67,6 +68,7 @@ impl FileChangeField {
 fn file_change_struct_type() -> LogicalTypeHandle {
     LogicalTypeHandle::struct_type(&[
         ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
+        ("old_path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
         ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
         ("blob_id", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
         ("file_size", LogicalTypeHandle::from(LogicalTypeId::Bigint)),

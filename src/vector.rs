@@ -131,6 +131,7 @@ impl<'a> VectorInserter<'a> {
             let total = self.file_changes_offset + len;
             let struct_child = fc_vec.struct_child(total);
             let path = struct_child.child(FileChangeField::Path.index(), total);
+            let mut old_path = struct_child.child(FileChangeField::OldPath.index(), total);
             let status = struct_child.child(FileChangeField::Status.index(), total);
             let blob_id = struct_child.child(FileChangeField::BlobId.index(), total);
             let mut file_size = struct_child.child(FileChangeField::FileSize.index(), total);
@@ -139,6 +140,11 @@ impl<'a> VectorInserter<'a> {
             let off = self.file_changes_offset;
             for (i, fc) in file_changes.iter().enumerate() {
                 path.insert(off + i, fc.path.as_str());
+                if let Some(ref p) = fc.old_path {
+                    old_path.insert(off + i, p.as_str());
+                } else {
+                    old_path.set_null(off + i);
+                }
                 status.insert(off + i, fc.status);
                 blob_id.insert(off + i, fc.blob_id.as_str());
                 unsafe {

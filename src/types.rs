@@ -1,6 +1,7 @@
 #[derive(Clone)]
 pub struct FileChange {
     pub path: String,
+    pub old_path: Option<String>,
     pub status: &'static str,
     pub blob_id: String,
     pub file_size: i64,

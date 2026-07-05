@@ -54,18 +54,19 @@ Returns commit history as a table.
 
 #### Output Columns
 
-| Column                | Type            | Description          |
-| --------------------- | --------------- | -------------------- |
-| `commit_id`           | `VARCHAR`       | Full commit hash     |
-| `author`              | `VARCHAR`       | Author name          |
-| `author_email`        | `VARCHAR`       | Author email         |
-| `author_timestamp`    | `TIMESTAMPTZ`   | Author timestamp     |
-| `committer`           | `VARCHAR`       | Committer name       |
-| `committer_email`     | `VARCHAR`       | Committer email      |
-| `committer_timestamp` | `TIMESTAMPTZ`   | Committer timestamp  |
-| `message`             | `VARCHAR`       | Commit message       |
-| `parents`             | `VARCHAR[]`     | Parent commit hashes |
-| `file_changes`        | `STRUCT(...)[]` | File changes         |
+| Column                | Type            | Description                                        |
+| --------------------- | --------------- | -------------------------------------------------- |
+| `commit_id`           | `VARCHAR`       | Full commit hash                                   |
+| `author`              | `VARCHAR`       | Author name                                        |
+| `author_email`        | `VARCHAR`       | Author email                                       |
+| `author_timestamp`    | `TIMESTAMPTZ`   | Author timestamp                                   |
+| `committer`           | `VARCHAR`       | Committer name                                     |
+| `committer_email`     | `VARCHAR`       | Committer email                                    |
+| `committer_timestamp` | `TIMESTAMPTZ`   | Committer timestamp                                |
+| `message`             | `VARCHAR`       | Commit message                                     |
+| `parents`             | `VARCHAR[]`     | Parent commit hashes                               |
+| `decorate`            | `VARCHAR[]`     | Branch and tag short names pointing at this commit |
+| `file_changes`        | `STRUCT(...)[]` | File changes                                       |
 
 The `file_changes` struct contains:
 

@@ -1,23 +1,30 @@
 # duckdb-git
 
-DuckDB extension that exposes git repository data via SQL table functions. Written in Rust using `duckdb-rs` and `libgit2` (`git2` crate).
+DuckDB extension that exposes git repository data via SQL table functions. Written in Rust using `duckdb-rs`, with a default `libgit2` (`git2` crate) backend and an optional `gix` (gitoxide) backend.
 
 ## Commands
 
 ```bash
-make debug # Build (debug)
-make release # Build (release)
-make test # Run E2E tests (sqllogictest, default features = libgit-backend only)
-make bench # Run benchmarks (cargo bench, requires --features bundled)
+make debug # Build (debug, libgit-only binary)
+make debug_gix # Build (debug, libgit + gix)
+make release # Build (release, libgit-only binary)
+make release_gix # Build (release, libgit + gix)
+make test # E2E tests (sqllogictest, libgit-only binary)
+make test_gix # E2E tests (sqllogictest, libgit + gix)
+make bench # Run benchmarks (cargo bench, libgit-only binary)
 BENCH_REPO=/path/to/large/repo make bench # Run benchmarks on a specific repo
+make bench_gix # Run benchmarks (cargo bench, libgit + gix)
 ```
 
 ## Project structure
 
-- `src/lib.rs` — DuckDB VTab implementation
-- `src/git_log/mod.rs` — Shared types (`DiffMerges`, `FileChange`) + backend re-export
-- `src/git_log/libgit.rs` — libgit2 backend (default)
-- `src/git_log/gix.rs` — gix/gitoxide backend (experimental)
+- `src/lib.rs` — DuckDB VTab implementation (`git_log` table function)
+- `src/backend/mod.rs` — `GitBackend` trait, `BackendKind`/`Backend` dispatch, runtime backend selection
+- `src/backend/libgit.rs` — libgit2 backend (default)
+- `src/backend/gix.rs` — gix/gitoxide backend (experimental, feature-gated)
 - `src/vector.rs` — DuckDB vector write helpers
+- `src/wasm_lib.rs` — wasm entry point (swaps crate-type for emscripten builds)
 - `test/sql/git_log.test` — E2E tests (sqllogictest format)
+- `test/sql/git_log_ignore_all_space.test` — libgit-only regression test (`backend='libgit'`)
+- `test/sql/git_log_gix.test` — gix smoke tests (gated by `require-env GIX_BACKEND 1`)
 - `benches/git_log_with_duckdb.rs` — Benchmarks (`BENCH_REPO` env var selects the target repo)

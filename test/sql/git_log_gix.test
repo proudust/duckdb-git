@@ -1,0 +1,30 @@
+# name: test/sql/git_log_gix.test
+# description: smoke tests for gix backend (requires gix-backend feature in binary)
+# group: [git]
+
+require duckdb_git
+
+# Skipped unless GIX_BACKEND=1 (set by make test_gix / build-gix CI job)
+require-env GIX_BACKEND 1
+
+# Basic git_log functionality with gix backend
+query I
+SELECT COUNT(*) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e', backend='gix');
+----
+1
+
+# Access core columns
+query II
+SELECT commit_id, author FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e', backend='gix') ORDER BY author_timestamp DESC LIMIT 1;
+----
+b1e7e960fcbee2de7489b7dcca09a9223039521e	Proudust
+
+# Parents array on initial commit
+query I
+SELECT len(parents) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e', backend='gix') LIMIT 1;
+----
+0
+
+# Projection pushdown without file_changes
+statement ok
+SELECT commit_id, author FROM git_log('.', backend='gix') LIMIT 1;

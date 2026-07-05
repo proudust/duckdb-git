@@ -42,12 +42,15 @@ Returns commit history as a table.
 
 #### Parameters
 
-| Name               | Type      | Default       | Description                         |
-| ------------------ | --------- | ------------- | ----------------------------------- |
-| `repo_path`        | `VARCHAR` | *(required)*  | Path to the Git repository          |
-| `revision`         | `VARCHAR` | `NULL` (HEAD) | Branch, tag, or commit hash         |
-| `max_count`        | `INTEGER` | `NULL` (all)  | Maximum number of commits to return |
-| `ignore_all_space` | `BOOLEAN` | `false`       | Ignore whitespace changes in diffs  |
+| Name               | Type      | Default       | Description                               |
+| ------------------ | --------- | ------------- | ----------------------------------------- |
+| `repo_path`        | `VARCHAR` | *(required)*  | Path to the Git repository                |
+| `revision`         | `VARCHAR` | `NULL` (HEAD) | Branch, tag, or commit hash               |
+| `max_count`        | `INTEGER` | `NULL` (all)  | Maximum number of commits to return       |
+| `ignore_all_space` | `BOOLEAN` | `false`       | Ignore whitespace changes in diffs        |
+| `backend`          | `VARCHAR` | `'libgit'`    | Determines how history is retrieved. [^1] |
+
+[^1]: If you build with the `gix-backend` feature included, you can also specify `gix`.
 
 #### Output Columns
 
@@ -85,9 +88,13 @@ Require:
 - Git
 
 ```sh
-make debug # Build (debug)
-make release # Build (release)
-make test # Run E2E tests (sqllogictest)
-make bench # Run benchmarks on this repository
-BENCH_REPO=/here/any/repo make bench # Run benchmarks on /here/any/repo
+make debug # Build (debug, libgit-only binary)
+make debug_gix # Build (debug, libgit + gix)
+make release # Build (release, libgit-only binary)
+make release_gix # Build (release, libgit + gix)
+make test # E2E tests (sqllogictest, libgit-only binary)
+make test_gix # E2E tests (sqllogictest, libgit + gix)
+make bench # Run benchmarks (cargo bench, libgit-only binary)
+BENCH_REPO=/path/to/large/repo make bench # Run benchmarks on a specific repo
+make bench_gix # Run benchmarks (cargo bench, libgit + gix)
 ```

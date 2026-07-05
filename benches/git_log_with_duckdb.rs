@@ -5,6 +5,9 @@
 //! - metadata_only: core revwalk + metadata reading
 //! - with_diff: diff computation
 //! - limit_10: LIMIT query performance
+//!
+//! Each scenario is run for `backend='libgit'` and, when compiled with `gix-backend`,
+//! `backend='gix'`.
 
 use duckdb::Connection;
 
@@ -27,37 +30,96 @@ fn setup_duckdb(threads: usize) -> Connection {
     db
 }
 
-#[divan::bench(args = [1, 2, 4], sample_count = 10)]
-fn metadata_only(bencher: divan::Bencher, threads: usize) {
+fn git_log_sql(suffix: &str, backend: &str) -> String {
+    format!("SELECT {suffix} FROM git_log(?, backend='{backend}')")
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ThreadedConfig {
+    backend: &'static str,
+    threads: usize,
+}
+
+#[cfg(feature = "gix-backend")]
+const THREADED_CONFIGS: &[ThreadedConfig] = &[
+    ThreadedConfig {
+        backend: "libgit",
+        threads: 1,
+    },
+    ThreadedConfig {
+        backend: "libgit",
+        threads: 2,
+    },
+    ThreadedConfig {
+        backend: "libgit",
+        threads: 4,
+    },
+    ThreadedConfig {
+        backend: "gix",
+        threads: 1,
+    },
+    ThreadedConfig {
+        backend: "gix",
+        threads: 2,
+    },
+    ThreadedConfig {
+        backend: "gix",
+        threads: 4,
+    },
+];
+#[cfg(not(feature = "gix-backend"))]
+const THREADED_CONFIGS: &[ThreadedConfig] = &[
+    ThreadedConfig {
+        backend: "libgit",
+        threads: 1,
+    },
+    ThreadedConfig {
+        backend: "libgit",
+        threads: 2,
+    },
+    ThreadedConfig {
+        backend: "libgit",
+        threads: 4,
+    },
+];
+
+#[cfg(feature = "gix-backend")]
+const BACKENDS: &[&str] = &["libgit", "gix"];
+#[cfg(not(feature = "gix-backend"))]
+const BACKENDS: &[&str] = &["libgit"];
+
+#[divan::bench(args = THREADED_CONFIGS, sample_count = 10)]
+fn metadata_only(bencher: divan::Bencher, config: ThreadedConfig) {
     let path = repo_path();
-    let db = setup_duckdb(threads);
+    let db = setup_duckdb(config.threads);
+    let sql = git_log_sql("count(*)", config.backend);
     bencher.bench_local(|| {
-        let mut stmt = db.prepare("SELECT count(*) FROM git_log(?)").unwrap();
+        let mut stmt = db.prepare(&sql).unwrap();
         stmt.query_row([&path], |row| row.get::<_, i64>(0)).unwrap()
     });
 }
 
-#[divan::bench(args = [1, 2, 4], sample_count = 10)]
-fn with_diff(bencher: divan::Bencher, threads: usize) {
+#[divan::bench(args = THREADED_CONFIGS, sample_count = 10)]
+fn with_diff(bencher: divan::Bencher, config: ThreadedConfig) {
     let path = repo_path();
-    let db = setup_duckdb(threads);
+    let db = setup_duckdb(config.threads);
+    let sql = git_log_sql("count(file_changes)", config.backend);
     bencher.bench_local(|| {
-        let mut stmt = db
-            .prepare("SELECT count(file_changes) FROM git_log(?)")
-            .unwrap();
+        let mut stmt = db.prepare(&sql).unwrap();
         stmt.query_row([&path], |row| row.get::<_, i64>(0)).unwrap()
     });
 }
 
-#[divan::bench(sample_count = 10)]
-fn limit_10(bencher: divan::Bencher) {
+#[divan::bench(args = BACKENDS, sample_count = 10)]
+fn limit_10(bencher: divan::Bencher, backend: &str) {
     let path = repo_path();
     let db = setup_duckdb(1);
+    let sql = format!("SELECT * FROM git_log(?, backend='{backend}') LIMIT 10");
     bencher.bench_local(|| {
-        let mut stmt = db.prepare("SELECT * FROM git_log(?) LIMIT 10").unwrap();
+        let mut stmt = db.prepare(&sql).unwrap();
         let mut rows = stmt.query([&path]).unwrap();
         let mut count = 0;
-        while let Some(_) = rows.next().unwrap() {
+        while rows.next().unwrap().is_some() {
             count += 1;
         }
         count

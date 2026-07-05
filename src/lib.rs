@@ -24,6 +24,7 @@ struct GitLogBindData {
     revision: Option<String>,
     max_count: Option<usize>,
     ignore_all_space: bool,
+    backend: backend::BackendKind,
 }
 
 #[repr(C)]
@@ -106,11 +107,18 @@ impl VTab for GitLogVTab {
             .map(|value| value.to_string().to_lowercase() == "true")
             .unwrap_or(false);
 
+        let backend = bind
+            .get_named_parameter("backend")
+            .map(|value| backend::BackendKind::parse(&value.to_string()))
+            .transpose()?
+            .unwrap_or_else(backend::BackendKind::default);
+
         Ok(GitLogBindData {
             repo_path,
             revision,
             max_count,
             ignore_all_space,
+            backend,
         })
     }
 
@@ -120,7 +128,7 @@ impl VTab for GitLogVTab {
 
         let column_indices = info.get_column_indices();
 
-        let backend = backend::open(&bind_data.repo_path)?;
+        let backend = backend::open(&bind_data.repo_path, bind_data.backend)?;
 
         let commit_oids =
             backend.get_commit_oids(bind_data.revision.as_deref(), bind_data.max_count)?;
@@ -167,7 +175,7 @@ impl VTab for GitLogVTab {
 
         let end_index = std::cmp::min(start_index + batch_size, init_data.commit_ids.len());
 
-        let backend = backend::open(&bind_data.repo_path)?;
+        let backend = backend::open(&bind_data.repo_path, bind_data.backend)?;
 
         let mut writer = VectorInserter::new(output, &init_data.column_indices);
 
@@ -208,6 +216,10 @@ impl VTab for GitLogVTab {
             (
                 "ignore_all_space".to_string(),
                 LogicalTypeHandle::from(LogicalTypeId::Boolean),
+            ),
+            (
+                "backend".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Varchar),
             ),
         ])
     }

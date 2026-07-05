@@ -24,6 +24,7 @@ default = ["loadable-extension", "libgit-backend"]
 loadable-extension = ["duckdb/loadable-extension"]
 bundled = ["duckdb/bundled"]                       # For benchmark
 libgit-backend = ["dep:git2"]
+# Additive: can be combined with libgit-backend (default) for runtime backend selection.
 gix-backend = ["dep:gix"]
 
 [dependencies]

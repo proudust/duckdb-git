@@ -161,8 +161,8 @@ impl GitCliBackend {
                     (0, 0)
                 } else {
                     numstats
-                        .and_then(|ns| ns.iter().find(|(_, _, p)| p == path))
-                        .map(|(a, d, _)| (*a, *d))
+                        .and_then(|ns| ns.get(path))
+                        .copied()
                         .unwrap_or((0, 0))
                 };
                 file_changes.push(FileChange {
@@ -254,10 +254,10 @@ impl GitCliBackend {
         Ok(map)
     }
 
-    /// Parse `--numstat -z` output into per-commit entries: (add_lines, del_lines, path)
+    /// Parse `--numstat -z` output into per-commit path -> (add_lines, del_lines)
     fn parse_numstat_sections(
         stdout: &[u8],
-    ) -> Result<HashMap<String, Vec<(i32, i32, String)>>, Box<dyn std::error::Error>> {
+    ) -> Result<HashMap<String, HashMap<String, (i32, i32)>>, Box<dyn std::error::Error>> {
         let mut map = HashMap::new();
         for section in stdout.split(|&b| b == 0x01) {
             if section.is_empty() {
@@ -271,7 +271,7 @@ impl GitCliBackend {
             let diff_data = &section[nul_pos + 1..];
             let segments: Vec<&[u8]> = diff_data.split(|&b| b == 0x00).collect();
 
-            let mut entries = Vec::new();
+            let mut entries = HashMap::new();
             let mut i = 0;
             while i < segments.len() {
                 let trimmed = segments[i].strip_prefix(&[b'\n']).unwrap_or(segments[i]);
@@ -289,13 +289,19 @@ impl GitCliBackend {
                 let del: i32 = tab_parts[1].parse().unwrap_or(0);
                 let path_field = tab_parts.get(2).copied().unwrap_or("");
 
-                if path_field.is_empty() && i + 2 < segments.len() {
+                let path = if path_field.is_empty() && i + 2 < segments.len() {
                     // Rename/copy: path is split across next two NUL-separated segments
-                    let path = String::from_utf8_lossy(segments[i + 2]).to_string();
-                    entries.push((add, del, path));
+                    String::from_utf8_lossy(segments[i + 2]).to_string()
+                } else {
+                    path_field.to_string()
+                };
+
+                // Keep first occurrence per path (matches prior Vec::find behavior).
+                entries.entry(path).or_insert((add, del));
+
+                if path_field.is_empty() && i + 2 < segments.len() {
                     i += 3;
                 } else {
-                    entries.push((add, del, path_field.to_string()));
                     i += 1;
                 }
             }

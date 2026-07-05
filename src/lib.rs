@@ -1,4 +1,5 @@
 mod backend;
+mod schema;
 mod types;
 mod vector;
 
@@ -14,9 +15,6 @@ use std::{
     error::Error,
     sync::atomic::{AtomicUsize, Ordering},
 };
-
-const DECORATE_COLUMN_INDEX: u64 = 9;
-const FILE_CHANGES_COLUMN_INDEX: u64 = 10;
 
 #[repr(C)]
 struct GitLogBindData {
@@ -36,12 +34,6 @@ struct GitLogInitData {
     column_indices: Vec<u64>,
 }
 
-impl GitLogInitData {
-    fn need_file_changes(&self) -> bool {
-        self.column_indices.contains(&FILE_CHANGES_COLUMN_INDEX)
-    }
-}
-
 struct GitLogVTab;
 
 impl VTab for GitLogVTab {
@@ -49,48 +41,7 @@ impl VTab for GitLogVTab {
     type BindData = GitLogBindData;
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn std::error::Error>> {
-        bind.add_result_column("commit_id", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("author", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column(
-            "author_email",
-            LogicalTypeHandle::from(LogicalTypeId::Varchar),
-        );
-        bind.add_result_column(
-            "author_timestamp",
-            LogicalTypeHandle::from(LogicalTypeId::TimestampTZ),
-        );
-        bind.add_result_column("committer", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column(
-            "committer_email",
-            LogicalTypeHandle::from(LogicalTypeId::Varchar),
-        );
-        bind.add_result_column(
-            "committer_timestamp",
-            LogicalTypeHandle::from(LogicalTypeId::TimestampTZ),
-        );
-        bind.add_result_column("message", LogicalTypeHandle::from(LogicalTypeId::Varchar));
-
-        // parents: VARCHAR[]
-        let parents_array_type =
-            LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("parents", parents_array_type);
-
-        // decorate: VARCHAR[]
-        let decorate_array_type =
-            LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
-        bind.add_result_column("decorate", decorate_array_type);
-
-        // file_changes: STRUCT(path, status, blob_id, file_size, add_lines, del_lines)[]
-        let file_change_struct = LogicalTypeHandle::struct_type(&[
-            ("path", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-            ("status", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-            ("blob_id", LogicalTypeHandle::from(LogicalTypeId::Varchar)),
-            ("file_size", LogicalTypeHandle::from(LogicalTypeId::Bigint)),
-            ("add_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
-            ("del_lines", LogicalTypeHandle::from(LogicalTypeId::Integer)),
-        ]);
-        let file_changes_array_type = LogicalTypeHandle::list(&file_change_struct);
-        bind.add_result_column("file_changes", file_changes_array_type);
+        schema::bind_columns(bind)?;
 
         let repo_path = bind.get_parameter(0).to_string();
 
@@ -132,7 +83,7 @@ impl VTab for GitLogVTab {
 
         let commit_oids =
             backend.get_commit_oids(bind_data.revision.as_deref(), bind_data.max_count)?;
-        let decorations = if column_indices.contains(&DECORATE_COLUMN_INDEX) {
+        let decorations = if schema::needs_refs(&column_indices) {
             backend.get_refs()?
         } else {
             HashMap::new()
@@ -180,7 +131,7 @@ impl VTab for GitLogVTab {
         let mut writer = VectorInserter::new(output, &init_data.column_indices);
 
         let empty_refs: Vec<String> = Vec::new();
-        let skip_file_changes = !init_data.need_file_changes();
+        let skip_file_changes = !schema::needs_file_changes(&init_data.column_indices);
         let oids = &init_data.commit_ids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
             let commit = backend.get_commit(oid, bind_data.ignore_all_space, skip_file_changes)?;

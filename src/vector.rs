@@ -1,3 +1,4 @@
+use crate::schema::{FileChangeField, GitLogColumn};
 use crate::types::CommitData;
 use duckdb::core::{DataChunkHandle, FlatVector, Inserter, ListVector};
 
@@ -33,19 +34,27 @@ impl<'a> VectorInserter<'a> {
         let mut file_changes = None;
 
         for (chunk_pos, &orig_idx) in column_indices.iter().enumerate() {
-            match orig_idx {
-                0 => commit_id = Some(chunk.flat_vector(chunk_pos)),
-                1 => author = Some(chunk.flat_vector(chunk_pos)),
-                2 => author_email = Some(chunk.flat_vector(chunk_pos)),
-                3 => author_timestamp = Some(chunk.flat_vector(chunk_pos)),
-                4 => committer = Some(chunk.flat_vector(chunk_pos)),
-                5 => committer_email = Some(chunk.flat_vector(chunk_pos)),
-                6 => committer_timestamp = Some(chunk.flat_vector(chunk_pos)),
-                7 => message = Some(chunk.flat_vector(chunk_pos)),
-                8 => parents = Some(chunk.list_vector(chunk_pos)),
-                9 => decorate = Some(chunk.list_vector(chunk_pos)),
-                10 => file_changes = Some(chunk.list_vector(chunk_pos)),
-                _ => {}
+            match GitLogColumn::try_from(orig_idx) {
+                Ok(GitLogColumn::CommitId) => commit_id = Some(chunk.flat_vector(chunk_pos)),
+                Ok(GitLogColumn::Author) => author = Some(chunk.flat_vector(chunk_pos)),
+                Ok(GitLogColumn::AuthorEmail) => author_email = Some(chunk.flat_vector(chunk_pos)),
+                Ok(GitLogColumn::AuthorTimestamp) => {
+                    author_timestamp = Some(chunk.flat_vector(chunk_pos))
+                }
+                Ok(GitLogColumn::Committer) => committer = Some(chunk.flat_vector(chunk_pos)),
+                Ok(GitLogColumn::CommitterEmail) => {
+                    committer_email = Some(chunk.flat_vector(chunk_pos))
+                }
+                Ok(GitLogColumn::CommitterTimestamp) => {
+                    committer_timestamp = Some(chunk.flat_vector(chunk_pos))
+                }
+                Ok(GitLogColumn::Message) => message = Some(chunk.flat_vector(chunk_pos)),
+                Ok(GitLogColumn::Parents) => parents = Some(chunk.list_vector(chunk_pos)),
+                Ok(GitLogColumn::Decorate) => decorate = Some(chunk.list_vector(chunk_pos)),
+                Ok(GitLogColumn::FileChanges) => {
+                    file_changes = Some(chunk.list_vector(chunk_pos))
+                }
+                Err(()) => {}
             }
         }
 
@@ -121,12 +130,12 @@ impl<'a> VectorInserter<'a> {
             let len = file_changes.len();
             let total = self.file_changes_offset + len;
             let struct_child = fc_vec.struct_child(total);
-            let path = struct_child.child(0, total);
-            let status = struct_child.child(1, total);
-            let blob_id = struct_child.child(2, total);
-            let mut file_size = struct_child.child(3, total);
-            let mut add_lines = struct_child.child(4, total);
-            let mut del_lines = struct_child.child(5, total);
+            let path = struct_child.child(FileChangeField::Path.index(), total);
+            let status = struct_child.child(FileChangeField::Status.index(), total);
+            let blob_id = struct_child.child(FileChangeField::BlobId.index(), total);
+            let mut file_size = struct_child.child(FileChangeField::FileSize.index(), total);
+            let mut add_lines = struct_child.child(FileChangeField::AddLines.index(), total);
+            let mut del_lines = struct_child.child(FileChangeField::DelLines.index(), total);
             let off = self.file_changes_offset;
             for (i, fc) in file_changes.iter().enumerate() {
                 path.insert(off + i, fc.path.as_str());

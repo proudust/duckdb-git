@@ -1,3 +1,5 @@
+#[cfg(feature = "git-cli-backend")]
+mod git_cli;
 #[cfg(feature = "gix-backend")]
 mod gix;
 #[cfg(feature = "libgit-backend")]
@@ -14,14 +16,14 @@ pub trait GitBackend {
         max_count: Option<usize>,
     ) -> Result<Vec<String>, Box<dyn Error>>;
 
-    fn get_commit(
-        &self,
-        oid: &str,
-        ignore_all_space: bool,
-        skip_file_changes: bool,
-    ) -> Result<CommitData, Box<dyn Error>>;
-
     fn get_refs(&self) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>>;
+
+    fn get_commits(
+        &mut self,
+        oids: &[String],
+        ignore_all_space: bool,
+        need_file_changes: bool,
+    ) -> Result<Vec<CommitData>, Box<dyn Error>>;
 }
 
 #[cfg(feature = "libgit-backend")]
@@ -32,4 +34,9 @@ pub fn open(repo_path: &str) -> Result<impl GitBackend, Box<dyn Error>> {
 #[cfg(feature = "gix-backend")]
 pub fn open(repo_path: &str) -> Result<impl GitBackend, Box<dyn Error>> {
     gix::GixBackend::new(repo_path)
+}
+
+#[cfg(feature = "git-cli-backend")]
+pub fn open(repo_path: &str) -> Result<impl GitBackend, Box<dyn Error>> {
+    git_cli::GitCliBackend::new(repo_path)
 }

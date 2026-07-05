@@ -104,34 +104,8 @@ impl GixBackend {
 
         Ok(file_changes)
     }
-}
 
-impl GitBackend for GixBackend {
-    fn get_commit_oids(
-        &self,
-        revision: Option<&str>,
-        max_count: Option<usize>,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let tip = match revision {
-            Some(rev) => self.repo().rev_parse_single(rev)?.detach(),
-            None => self.repo().head_id()?.detach(),
-        };
-
-        let walk = self.repo().rev_walk([tip]);
-        let all = walk.all()?;
-
-        let oids: Result<Vec<String>, Box<dyn std::error::Error>> = match max_count {
-            Some(count) => all
-                .take(count)
-                .map(|info| Ok(info?.id.to_string()))
-                .collect(),
-            None => all.map(|info| Ok(info?.id.to_string())).collect(),
-        };
-
-        oids
-    }
-
-    fn get_commit(
+    fn get_commit_inner(
         &self,
         oid: &str,
         // TODO: gix does not yet support ignore_all_space option for diffs
@@ -189,6 +163,44 @@ impl GitBackend for GixBackend {
             file_changes,
         })
     }
+}
+
+impl GitBackend for GixBackend {
+    fn get_commit_oids(
+        &self,
+        revision: Option<&str>,
+        max_count: Option<usize>,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let tip = match revision {
+            Some(rev) => self.repo().rev_parse_single(rev)?.detach(),
+            None => self.repo().head_id()?.detach(),
+        };
+
+        let walk = self.repo().rev_walk([tip]);
+        let all = walk.all()?;
+
+        let oids: Result<Vec<String>, Box<dyn std::error::Error>> = match max_count {
+            Some(count) => all
+                .take(count)
+                .map(|info| Ok(info?.id.to_string()))
+                .collect(),
+            None => all.map(|info| Ok(info?.id.to_string())).collect(),
+        };
+
+        oids
+    }
+
+    fn get_commits(
+        &mut self,
+        oids: &[String],
+        ignore_all_space: bool,
+        need_file_changes: bool,
+    ) -> Result<Vec<CommitData>, Box<dyn std::error::Error>> {
+        oids.iter()
+            .map(|oid| self.get_commit_inner(oid, ignore_all_space, !need_file_changes))
+            .collect()
+    }
+
     fn get_refs(&self) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
         let mut refs_map: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -219,16 +231,20 @@ mod tests {
 
     #[test]
     fn skip_file_changes_returns_empty() {
-        let backend = GixBackend::new(".").unwrap();
-        let commit = backend.get_commit(SECOND_COMMIT, false, true).unwrap();
-        assert!(commit.file_changes.is_empty());
+        let mut backend = GixBackend::new(".").unwrap();
+        let commits = backend
+            .get_commits(&[SECOND_COMMIT.to_string()], false, false)
+            .unwrap();
+        assert!(commits[0].file_changes.is_empty());
     }
 
     #[test]
     fn no_skip_returns_file_changes() {
-        let backend = GixBackend::new(".").unwrap();
-        let commit = backend.get_commit(SECOND_COMMIT, false, false).unwrap();
-        assert!(!commit.file_changes.is_empty());
+        let mut backend = GixBackend::new(".").unwrap();
+        let commits = backend
+            .get_commits(&[SECOND_COMMIT.to_string()], false, true)
+            .unwrap();
+        assert!(!commits[0].file_changes.is_empty());
     }
 
     #[test]

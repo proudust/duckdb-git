@@ -151,6 +151,38 @@ impl LibGitBackend {
 
         Ok(file_changes)
     }
+
+    fn get_commit_inner(
+        &self,
+        oid: &str,
+        ignore_all_space: bool,
+        skip_file_changes: bool,
+    ) -> Result<CommitData, Box<dyn std::error::Error>> {
+        let oid = ::git2::Oid::from_str(oid)?;
+        let commit = self.repo().find_commit(oid)?;
+        let author = commit.author();
+        let committer = commit.committer();
+
+        let file_changes = if skip_file_changes {
+            Vec::new()
+        } else {
+            self.get_file_changes(&commit, ignore_all_space)?
+        };
+
+        Ok(CommitData {
+            author_name: author.name_bytes().to_vec(),
+            author_email: author.email_bytes().to_vec(),
+            author_timestamp: commit.time().seconds(),
+            committer_name: committer.name_bytes().to_vec(),
+            committer_email: committer.email_bytes().to_vec(),
+            committer_timestamp: committer.when().seconds(),
+            message: commit.message_bytes().to_vec(),
+            parents: (0..commit.parent_count())
+                .map(|i| commit.parent_id(i).unwrap().to_string())
+                .collect(),
+            file_changes,
+        })
+    }
 }
 
 impl GitBackend for LibGitBackend {
@@ -184,36 +216,15 @@ impl GitBackend for LibGitBackend {
         Ok(commit_oids)
     }
 
-    fn get_commit(
-        &self,
-        oid: &str,
+    fn get_commits(
+        &mut self,
+        oids: &[String],
         ignore_all_space: bool,
-        skip_file_changes: bool,
-    ) -> Result<CommitData, Box<dyn std::error::Error>> {
-        let oid = ::git2::Oid::from_str(oid)?;
-        let commit = self.repo().find_commit(oid)?;
-        let author = commit.author();
-        let committer = commit.committer();
-
-        let file_changes = if skip_file_changes {
-            Vec::new()
-        } else {
-            self.get_file_changes(&commit, ignore_all_space)?
-        };
-
-        Ok(CommitData {
-            author_name: author.name_bytes().to_vec(),
-            author_email: author.email_bytes().to_vec(),
-            author_timestamp: commit.time().seconds(),
-            committer_name: committer.name_bytes().to_vec(),
-            committer_email: committer.email_bytes().to_vec(),
-            committer_timestamp: committer.when().seconds(),
-            message: commit.message_bytes().to_vec(),
-            parents: (0..commit.parent_count())
-                .map(|i| commit.parent_id(i).unwrap().to_string())
-                .collect(),
-            file_changes,
-        })
+        need_file_changes: bool,
+    ) -> Result<Vec<CommitData>, Box<dyn std::error::Error>> {
+        oids.iter()
+            .map(|oid| self.get_commit_inner(oid, ignore_all_space, !need_file_changes))
+            .collect()
     }
 
     fn get_refs(&self) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
@@ -254,16 +265,20 @@ mod tests {
 
     #[test]
     fn skip_file_changes_returns_empty() {
-        let backend = LibGitBackend::new(".").unwrap();
-        let commit = backend.get_commit(SECOND_COMMIT, false, true).unwrap();
-        assert!(commit.file_changes.is_empty());
+        let mut backend = LibGitBackend::new(".").unwrap();
+        let commits = backend
+            .get_commits(&[SECOND_COMMIT.to_string()], false, false)
+            .unwrap();
+        assert!(commits[0].file_changes.is_empty());
     }
 
     #[test]
     fn no_skip_returns_file_changes() {
-        let backend = LibGitBackend::new(".").unwrap();
-        let commit = backend.get_commit(SECOND_COMMIT, false, false).unwrap();
-        assert!(!commit.file_changes.is_empty());
+        let mut backend = LibGitBackend::new(".").unwrap();
+        let commits = backend
+            .get_commits(&[SECOND_COMMIT.to_string()], false, true)
+            .unwrap();
+        assert!(!commits[0].file_changes.is_empty());
     }
 
     #[test]

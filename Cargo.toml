@@ -25,6 +25,7 @@ loadable-extension = ["duckdb/loadable-extension"]
 bundled = ["duckdb/bundled"]                       # For benchmark
 libgit-backend = ["dep:git2"]
 gix-backend = ["dep:gix"]
+git-cli-backend = []
 
 [dependencies]
 duckdb = { version = "~1.10504.0", features = ["vtab"] }

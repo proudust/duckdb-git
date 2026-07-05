@@ -167,17 +167,17 @@ impl VTab for GitLogVTab {
 
         let end_index = std::cmp::min(start_index + batch_size, init_data.commit_ids.len());
 
-        let backend = backend::open(&bind_data.repo_path)?;
+        let mut backend = backend::open(&bind_data.repo_path)?;
 
         let mut writer = VectorInserter::new(output, &init_data.column_indices);
 
         let empty_refs: Vec<String> = Vec::new();
-        let skip_file_changes = !init_data.need_file_changes();
+        let need_file_changes = init_data.need_file_changes();
         let oids = &init_data.commit_ids[start_index..end_index];
-        for (batch_idx, oid) in oids.iter().enumerate() {
-            let commit = backend.get_commit(oid, bind_data.ignore_all_space, skip_file_changes)?;
+        let commits = backend.get_commits(oids, bind_data.ignore_all_space, need_file_changes)?;
+        for (batch_idx, (oid, commit)) in oids.iter().zip(commits.iter()).enumerate() {
             let refs = init_data.decorations.get(oid).unwrap_or(&empty_refs);
-            writer.push(batch_idx, oid, &commit, refs);
+            writer.push(batch_idx, oid, commit, refs);
         }
 
         writer.finish();

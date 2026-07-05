@@ -1,4 +1,3 @@
-#[derive(Clone)]
 pub struct FileChange {
     pub path: String,
     pub status: &'static str,

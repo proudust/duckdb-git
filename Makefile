@@ -1,4 +1,4 @@
-.PHONY: clean clean_all debug_gix release_gix test_gix
+.PHONY: clean clean_all debug_gix release_gix test_gix test_default
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -30,8 +30,10 @@ release_gix: configure
 	$(MAKE) release CARGO_OVERRIDE_DUCKDB_RS_FLAG="--features gix-backend"
 
 test: test_debug
-test_debug: configure debug test_extension_debug
-test_release: configure release test_extension_release
+test_debug: test_extension_debug
+test_release: test_extension_release
+
+test_default: configure debug test_extension_debug
 
 test_gix: export GIX_BACKEND := 1
 test_gix: debug_gix test_extension_debug

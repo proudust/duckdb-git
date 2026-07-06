@@ -34,6 +34,28 @@ SELECT * FROM git_log('.');
 > Failed to load 'duckdb_git', The file is not a DuckDB extension. The metadata at the end of the file is invalid
 > ```
 
+## Example
+
+```sql
+-- git log
+select commit_id, author, author_email, author_timestamp, decorate, message from git_log('.');
+
+-- git log --numstat
+select * from git_log('.');
+
+-- git -C /path/to/repo log main -10
+select commit_id, message from git_log('/path/to/repo', revision='main', max_count=10);
+
+-- git log --decorate
+select commit_id, decorate from git_log('.') where len(decorate) > 0;
+
+-- git log --numstat -10
+select commit_id, change.path, change.add_lines, change.del_lines
+from (
+  select commit_id, unnest(file_changes) as change from git_log('.', max_count=10)
+);
+```
+
 ## Function Reference
 
 ### `git_log(repo_path, ...)`
@@ -54,31 +76,31 @@ Returns commit history as a table.
 
 #### Output Columns
 
-| Column                | Type            | Description                                        |
-| --------------------- | --------------- | -------------------------------------------------- |
-| `commit_id`           | `VARCHAR`       | Full commit hash                                   |
-| `author`              | `VARCHAR`       | Author name                                        |
-| `author_email`        | `VARCHAR`       | Author email                                       |
-| `author_timestamp`    | `TIMESTAMPTZ`   | Author timestamp                                   |
-| `committer`           | `VARCHAR`       | Committer name                                     |
-| `committer_email`     | `VARCHAR`       | Committer email                                    |
-| `committer_timestamp` | `TIMESTAMPTZ`   | Committer timestamp                                |
-| `message`             | `VARCHAR`       | Commit message                                     |
-| `parents`             | `VARCHAR[]`     | Parent commit hashes                               |
-| `decorate`            | `VARCHAR[]`     | Branch and tag short names pointing at this commit |
-| `file_changes`        | `STRUCT(...)[]` | File changes                                       |
+| Column                | Type                     | Description                                        |
+| --------------------- | ------------------------ | -------------------------------------------------- |
+| `commit_id`           | `VARCHAR NOT NULL`       | Full commit hash                                   |
+| `author`              | `VARCHAR NOT NULL`       | Author name                                        |
+| `author_email`        | `VARCHAR NOT NULL`       | Author email                                       |
+| `author_timestamp`    | `TIMESTAMPTZ NOT NULL`   | Author timestamp                                   |
+| `committer`           | `VARCHAR NOT NULL`       | Committer name                                     |
+| `committer_email`     | `VARCHAR NOT NULL`       | Committer email                                    |
+| `committer_timestamp` | `TIMESTAMPTZ NOT NULL`   | Committer timestamp                                |
+| `message`             | `VARCHAR NOT NULL`       | Commit message                                     |
+| `parents`             | `VARCHAR[] NOT NULL`     | Parent commit hashes                               |
+| `decorate`            | `VARCHAR[] NOT NULL`     | Branch and tag short names pointing at this commit |
+| `file_changes`        | `STRUCT(...)[] NOT NULL` | File changes                                       |
 
 The `file_changes` struct contains:
 
-| Field       | Type      | Description                                                 |
-| ----------- | --------- | ----------------------------------------------------------- |
-| `path`      | `VARCHAR` | File path (new path for renames/copies)                     |
-| `old_path`  | `VARCHAR` | Previous path for renames/copies; `NULL` otherwise          |
-| `status`    | `VARCHAR` | Change status (`A`dd, `D`elete, `M`odify, `R`ename, `C`opy) |
-| `blob_id`   | `VARCHAR` | Git blob object ID                                          |
-| `file_size` | `BIGINT`  | File size in bytes                                          |
-| `add_lines` | `INTEGER` | Lines added                                                 |
-| `del_lines` | `INTEGER` | Lines deleted                                               |
+| Field       | Type               | Description                                                 |
+| ----------- | ------------------ | ----------------------------------------------------------- |
+| `path`      | `VARCHAR NOT NULL` | File path (new path for renames/copies)                     |
+| `old_path`  | `VARCHAR NULL`     | Previous path for renames/copies; `NULL` otherwise          |
+| `status`    | `VARCHAR NOT NULL` | Change status (`A`dd, `D`elete, `M`odify, `R`ename, `C`opy) |
+| `blob_id`   | `VARCHAR NOT NULL` | Git blob object ID                                          |
+| `file_size` | `BIGINT NULL`      | File size in bytes                                          |
+| `add_lines` | `INTEGER NOT NULL` | Lines added                                                 |
+| `del_lines` | `INTEGER NOT NULL` | Lines deleted                                               |
 
 ## Building
 
@@ -90,6 +112,7 @@ Require:
 - Git
 
 ```sh
+make configure # First only (Needs init submodule)
 make debug # Build (debug, libgit-only binary)
 make debug_gix # Build (debug, libgit + gix)
 make release # Build (release, libgit-only binary)

@@ -1,30 +1,22 @@
 mod backend;
+mod params;
 mod schema;
 mod types;
 mod vector;
 
 use backend::GitBackend;
 use duckdb::{
-    core::{DataChunkHandle, LogicalTypeHandle, LogicalTypeId},
+    core::{DataChunkHandle, LogicalTypeHandle},
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection, Result,
 };
+use params::GitLogBindData;
 use vector::VectorInserter;
 use std::{
     collections::HashMap,
     error::Error,
     sync::atomic::{AtomicUsize, Ordering},
 };
-
-#[repr(C)]
-struct GitLogBindData {
-    repo_path: String,
-    revision: Option<String>,
-    max_count: Option<usize>,
-    ignore_all_space: bool,
-    backend: backend::BackendKind,
-    decorate: backend::DecorateFormat,
-}
 
 #[repr(C)]
 struct GitLogInitData {
@@ -43,42 +35,7 @@ impl VTab for GitLogVTab {
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn std::error::Error>> {
         schema::bind_columns(bind)?;
-
-        let repo_path = bind.get_parameter(0).to_string();
-
-        let revision = bind
-            .get_named_parameter("revision")
-            .map(|value| value.to_string());
-
-        let max_count = bind
-            .get_named_parameter("max_count")
-            .and_then(|value| value.to_string().parse::<usize>().ok());
-
-        let ignore_all_space = bind
-            .get_named_parameter("ignore_all_space")
-            .map(|value| value.to_string().to_lowercase() == "true")
-            .unwrap_or(false);
-
-        let backend = bind
-            .get_named_parameter("backend")
-            .map(|value| backend::BackendKind::parse(&value.to_string()))
-            .transpose()?
-            .unwrap_or_else(backend::BackendKind::default);
-
-        let decorate = bind
-            .get_named_parameter("decorate")
-            .map(|value| backend::DecorateFormat::parse(&value.to_string()))
-            .transpose()?
-            .unwrap_or_else(backend::DecorateFormat::default);
-
-        Ok(GitLogBindData {
-            repo_path,
-            revision,
-            max_count,
-            ignore_all_space,
-            backend,
-            decorate,
-        })
+        params::bind(bind)
     }
 
     fn init(info: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
@@ -157,34 +114,11 @@ impl VTab for GitLogVTab {
     }
 
     fn parameters() -> Option<Vec<LogicalTypeHandle>> {
-        Some(vec![
-            LogicalTypeHandle::from(LogicalTypeId::Varchar), // repo_path
-        ])
+        Some(params::parameters())
     }
 
     fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
-        Some(vec![
-            (
-                "revision".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Varchar),
-            ),
-            (
-                "max_count".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Integer),
-            ),
-            (
-                "ignore_all_space".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Boolean),
-            ),
-            (
-                "backend".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Varchar),
-            ),
-            (
-                "decorate".to_string(),
-                LogicalTypeHandle::from(LogicalTypeId::Varchar),
-            ),
-        ])
+        Some(params::named_parameters())
     }
 }
 

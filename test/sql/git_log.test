@@ -176,6 +176,18 @@ SELECT decorate FROM git_log('.', revision='295db8704f2b2e12fe71a1f433b8b17906fe
 statement ok
 SELECT commit_id FROM git_log('.') WHERE len(decorate) > 0 LIMIT 3;
 
+# Test decorate='full' returns full ref paths
+query I
+SELECT decorate FROM git_log('.', revision='295db8704f2b2e12fe71a1f433b8b17906fedf25', max_count=1, decorate='full');
+----
+[refs/tags/v0.1.1]
+
+# decorate='no' is rejected (use projection pushdown to omit the column)
+statement error
+SELECT decorate FROM git_log('.', decorate='no');
+----
+decorate='no' is not supported; omit the decorate column instead
+
 # Rename: single R entry with old_path (matches git show --name-status / --numstat)
 query IIIII
 SELECT change.path, change.old_path, change.status, change.add_lines, change.del_lines

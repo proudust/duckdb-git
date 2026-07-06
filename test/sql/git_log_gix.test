@@ -29,6 +29,12 @@ SELECT len(parents) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a922
 statement ok
 SELECT commit_id, author FROM git_log('.', backend='gix') LIMIT 1;
 
+# decorate='full' returns full ref paths
+query I
+SELECT decorate FROM git_log('.', revision='295db8704f2b2e12fe71a1f433b8b17906fedf25', max_count=1, backend='gix', decorate='full');
+----
+[refs/tags/v0.1.1]
+
 # Rename: same query as git_log.test, documents gix output
 query IIIII
 SELECT change.path, change.old_path, change.status, change.add_lines, change.del_lines

@@ -1,4 +1,4 @@
-use super::GitBackend;
+use super::{DecorateFormat, GitBackend};
 use crate::types::{gitlink_numstat, CommitData, FileChange};
 use ::git2::Repository;
 use std::cell::RefCell;
@@ -263,11 +263,17 @@ impl GitBackend for LibGitBackend {
         })
     }
 
-    fn get_refs(&self) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
+    fn get_refs(
+        &self,
+        format: DecorateFormat,
+    ) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
         let mut refs_map: HashMap<String, Vec<String>> = HashMap::new();
         for reference in self.repo().references()? {
             let reference = reference?;
-            let name = reference.shorthand().unwrap_or("").to_string();
+            let name = match format {
+                DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
+                DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
+            };
             if name.is_empty() {
                 continue;
             }
@@ -316,7 +322,7 @@ mod tests {
     #[test]
     fn get_refs_peels_annotated_tag_to_commit() {
         let backend = LibGitBackend::new(".").unwrap();
-        let refs = backend.get_refs().unwrap();
+        let refs = backend.get_refs(DecorateFormat::Short).unwrap();
         let names = refs
             .get(TAGGED_COMMIT)
             .expect("tagged commit should have refs");
@@ -324,9 +330,19 @@ mod tests {
     }
 
     #[test]
+    fn get_refs_full_returns_full_ref_path() {
+        let backend = LibGitBackend::new(".").unwrap();
+        let refs = backend.get_refs(DecorateFormat::Full).unwrap();
+        let names = refs
+            .get(TAGGED_COMMIT)
+            .expect("tagged commit should have refs");
+        assert!(names.iter().any(|n| n == "refs/tags/v0.1.1"));
+    }
+
+    #[test]
     fn get_refs_returns_empty_for_commit_without_refs() {
         let backend = LibGitBackend::new(".").unwrap();
-        let refs = backend.get_refs().unwrap();
+        let refs = backend.get_refs(DecorateFormat::Short).unwrap();
         assert!(!refs.contains_key(SECOND_COMMIT));
     }
 }

@@ -64,31 +64,32 @@ Returns commit history as a table.
 
 #### Parameters
 
-| Name               | Type      | Default       | Description                               |
-| ------------------ | --------- | ------------- | ----------------------------------------- |
-| `repo_path`        | `VARCHAR` | *(required)*  | Path to the Git repository                |
-| `revision`         | `VARCHAR` | `NULL` (HEAD) | Branch, tag, or commit hash               |
-| `max_count`        | `INTEGER` | `NULL` (all)  | Maximum number of commits to return       |
-| `ignore_all_space` | `BOOLEAN` | `false`       | Ignore whitespace changes in diffs        |
-| `backend`          | `VARCHAR` | `'libgit'`    | Determines how history is retrieved. [^1] |
+| Name               | Type      | Default       | Description                                                   |
+| ------------------ | --------- | ------------- | ------------------------------------------------------------- |
+| `repo_path`        | `VARCHAR` | *(required)*  | Path to the Git repository                                    |
+| `revision`         | `VARCHAR` | `NULL` (HEAD) | Branch, tag, or commit hash                                   |
+| `max_count`        | `INTEGER` | `NULL` (all)  | Maximum number of commits to return                           |
+| `ignore_all_space` | `BOOLEAN` | `false`       | Ignore whitespace changes in diffs                            |
+| `backend`          | `VARCHAR` | `'libgit'`    | Determines how history is retrieved. [^1]                     |
+| `decorate`         | `VARCHAR` | `'short'`     | Ref name format in the `decorate` column (`short` or `full`). |
 
 [^1]: If you build with the `gix-backend` feature included, you can also specify `gix`.
 
 #### Output Columns
 
-| Column                | Type                     | Description                                        |
-| --------------------- | ------------------------ | -------------------------------------------------- |
-| `commit_id`           | `VARCHAR NOT NULL`       | Full commit hash                                   |
-| `author`              | `VARCHAR NOT NULL`       | Author name                                        |
-| `author_email`        | `VARCHAR NOT NULL`       | Author email                                       |
-| `author_timestamp`    | `TIMESTAMPTZ NOT NULL`   | Author timestamp                                   |
-| `committer`           | `VARCHAR NOT NULL`       | Committer name                                     |
-| `committer_email`     | `VARCHAR NOT NULL`       | Committer email                                    |
-| `committer_timestamp` | `TIMESTAMPTZ NOT NULL`   | Committer timestamp                                |
-| `message`             | `VARCHAR NOT NULL`       | Commit message                                     |
-| `parents`             | `VARCHAR[] NOT NULL`     | Parent commit hashes                               |
-| `decorate`            | `VARCHAR[] NOT NULL`     | Branch and tag short names pointing at this commit |
-| `file_changes`        | `STRUCT(...)[] NOT NULL` | File changes                                       |
+| Column                | Type                     | Description                                  |
+| --------------------- | ------------------------ | -------------------------------------------- |
+| `commit_id`           | `VARCHAR NOT NULL`       | Full commit hash                             |
+| `author`              | `VARCHAR NOT NULL`       | Author name                                  |
+| `author_email`        | `VARCHAR NOT NULL`       | Author email                                 |
+| `author_timestamp`    | `TIMESTAMPTZ NOT NULL`   | Author timestamp                             |
+| `committer`           | `VARCHAR NOT NULL`       | Committer name                               |
+| `committer_email`     | `VARCHAR NOT NULL`       | Committer email                              |
+| `committer_timestamp` | `TIMESTAMPTZ NOT NULL`   | Committer timestamp                          |
+| `message`             | `VARCHAR NOT NULL`       | Commit message                               |
+| `parents`             | `VARCHAR[] NOT NULL`     | Parent commit hashes                         |
+| `decorate`            | `VARCHAR[] NOT NULL`     | Branch and tag names pointing at this commit |
+| `file_changes`        | `STRUCT(...)[] NOT NULL` | File changes                                 |
 
 The `file_changes` struct contains:
 

@@ -23,6 +23,7 @@ struct GitLogBindData {
     max_count: Option<usize>,
     ignore_all_space: bool,
     backend: backend::BackendKind,
+    decorate: backend::DecorateFormat,
 }
 
 #[repr(C)]
@@ -64,12 +65,19 @@ impl VTab for GitLogVTab {
             .transpose()?
             .unwrap_or_else(backend::BackendKind::default);
 
+        let decorate = bind
+            .get_named_parameter("decorate")
+            .map(|value| backend::DecorateFormat::parse(&value.to_string()))
+            .transpose()?
+            .unwrap_or_else(backend::DecorateFormat::default);
+
         Ok(GitLogBindData {
             repo_path,
             revision,
             max_count,
             ignore_all_space,
             backend,
+            decorate,
         })
     }
 
@@ -84,7 +92,7 @@ impl VTab for GitLogVTab {
         let commit_oids =
             backend.get_commit_oids(bind_data.revision.as_deref(), bind_data.max_count)?;
         let decorations = if schema::needs_refs(&column_indices) {
-            backend.get_refs()?
+            backend.get_refs(bind_data.decorate)?
         } else {
             HashMap::new()
         };
@@ -170,6 +178,10 @@ impl VTab for GitLogVTab {
             ),
             (
                 "backend".to_string(),
+                LogicalTypeHandle::from(LogicalTypeId::Varchar),
+            ),
+            (
+                "decorate".to_string(),
                 LogicalTypeHandle::from(LogicalTypeId::Varchar),
             ),
         ])

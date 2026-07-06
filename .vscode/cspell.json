@@ -1,6 +1,7 @@
 {
     "words": [
         "archs",
+        "bstr",
         "cdylib",
         "cstring",
         "dtolnay",

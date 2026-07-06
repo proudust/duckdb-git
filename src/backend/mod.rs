@@ -21,7 +21,34 @@ pub trait GitBackend {
         skip_file_changes: bool,
     ) -> Result<CommitData, Box<dyn Error>>;
 
-    fn get_refs(&self) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>>;
+    fn get_refs(
+        &self,
+        format: DecorateFormat,
+    ) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecorateFormat {
+    Short,
+    Full,
+}
+
+impl DecorateFormat {
+    pub fn default() -> Self {
+        Self::Short
+    }
+
+    pub fn parse(s: &str) -> Result<Self, Box<dyn Error>> {
+        match s.to_lowercase().as_str() {
+            "short" => Ok(Self::Short),
+            "full" => Ok(Self::Full),
+            "no" => Err("decorate='no' is not supported; omit the decorate column instead".into()),
+            other => Err(format!(
+                "unknown decorate format: '{other}' (expected 'short' or 'full')"
+            )
+            .into()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,12 +135,15 @@ impl GitBackend for Backend {
         }
     }
 
-    fn get_refs(&self) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>> {
+    fn get_refs(
+        &self,
+        format: DecorateFormat,
+    ) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>> {
         match self {
             #[cfg(feature = "libgit-backend")]
-            Backend::Libgit(backend) => backend.get_refs(),
+            Backend::Libgit(backend) => backend.get_refs(format),
             #[cfg(feature = "gix-backend")]
-            Backend::Gix(backend) => backend.get_refs(),
+            Backend::Gix(backend) => backend.get_refs(format),
         }
     }
 }
@@ -150,5 +180,29 @@ mod tests {
     #[test]
     fn default_is_libgit() {
         assert_eq!(BackendKind::default(), BackendKind::Libgit);
+    }
+
+    #[test]
+    fn parse_decorate() {
+        assert_eq!(
+            DecorateFormat::parse("short").unwrap(),
+            DecorateFormat::Short
+        );
+        assert_eq!(
+            DecorateFormat::parse("SHORT").unwrap(),
+            DecorateFormat::Short
+        );
+
+        assert_eq!(DecorateFormat::parse("full").unwrap(), DecorateFormat::Full);
+        assert_eq!(DecorateFormat::parse("FULL").unwrap(), DecorateFormat::Full);
+
+        assert!(DecorateFormat::parse("no")
+            .unwrap_err()
+            .to_string()
+            .contains("not supported"));
+
+        assert!(DecorateFormat::parse("unknown").is_err());
+
+        assert_eq!(DecorateFormat::default(), DecorateFormat::Short);
     }
 }

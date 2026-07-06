@@ -44,7 +44,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Unit test (gix-backend)
-        run: cargo test --lib --features bundled,gix-backend
+        run: cargo test --lib --features gix-backend
 
       - name: Test (gix-backend)
         run: make test_gix

@@ -3,8 +3,8 @@ mod gix;
 #[cfg(feature = "libgit-backend")]
 mod libgit;
 
+use crate::git_log::params::GitLogParameter;
 use crate::git_log::GitLogReadPlanner;
-use crate::params::GitLogParameter;
 use std::error::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

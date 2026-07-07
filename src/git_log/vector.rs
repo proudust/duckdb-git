@@ -1,5 +1,5 @@
-use crate::schema::{FileChangeField, GitLogColumn};
-use crate::types::CommitData;
+use crate::git_log::schema::{FileChangeField, GitLogColumn};
+use crate::git_log::types::CommitData;
 use duckdb::core::{DataChunkHandle, FlatVector, Inserter, ListVector};
 
 pub struct VectorInserter<'a> {
@@ -51,9 +51,7 @@ impl<'a> VectorInserter<'a> {
                 Ok(GitLogColumn::Message) => message = Some(chunk.flat_vector(chunk_pos)),
                 Ok(GitLogColumn::Parents) => parents = Some(chunk.list_vector(chunk_pos)),
                 Ok(GitLogColumn::Decorate) => decorate = Some(chunk.list_vector(chunk_pos)),
-                Ok(GitLogColumn::FileChanges) => {
-                    file_changes = Some(chunk.list_vector(chunk_pos))
-                }
+                Ok(GitLogColumn::FileChanges) => file_changes = Some(chunk.list_vector(chunk_pos)),
                 Err(()) => {}
             }
         }

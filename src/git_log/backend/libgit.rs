@@ -1,9 +1,9 @@
-use crate::git_log::{GitLogReadPlanner, GitLogReader};
 use super::DecorateFormat;
-use crate::params::GitLogParameter;
-use crate::schema;
-use crate::types::{gitlink_numstat, CommitData, FileChange};
-use crate::vector::VectorInserter;
+use crate::git_log::params::GitLogParameter;
+use crate::git_log::schema;
+use crate::git_log::types::{gitlink_numstat, CommitData, FileChange};
+use crate::git_log::vector::VectorInserter;
+use crate::git_log::{GitLogReadPlanner, GitLogReader};
 use ::git2::Repository;
 use duckdb::core::DataChunkHandle;
 use std::cell::RefCell;
@@ -380,8 +380,10 @@ impl GitLogReader for LibGitLogReader {
             return Ok(0);
         }
 
-        let end_index =
-            std::cmp::min(start_index + self.inner.batch_size, self.inner.commit_oids.len());
+        let end_index = std::cmp::min(
+            start_index + self.inner.batch_size,
+            self.inner.commit_oids.len(),
+        );
 
         let repo = LibGitRepo::open(&self.inner.repo_path)?;
 

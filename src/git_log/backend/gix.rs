@@ -1,9 +1,9 @@
-use crate::git_log::{GitLogReadPlanner, GitLogReader};
 use super::DecorateFormat;
-use crate::params::GitLogParameter;
-use crate::schema;
-use crate::types::{CommitData, FileChange};
-use crate::vector::VectorInserter;
+use crate::git_log::params::GitLogParameter;
+use crate::git_log::schema;
+use crate::git_log::types::{CommitData, FileChange};
+use crate::git_log::vector::VectorInserter;
+use crate::git_log::{GitLogReadPlanner, GitLogReader};
 use duckdb::core::DataChunkHandle;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -326,8 +326,10 @@ impl GitLogReader for GixLogReader {
             return Ok(0);
         }
 
-        let end_index =
-            std::cmp::min(start_index + self.inner.batch_size, self.inner.commit_oids.len());
+        let end_index = std::cmp::min(
+            start_index + self.inner.batch_size,
+            self.inner.commit_oids.len(),
+        );
 
         let repo = GixRepo::open(&self.inner.repo_path)?;
 

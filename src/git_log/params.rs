@@ -1,4 +1,4 @@
-use crate::backend::{BackendKind, DecorateFormat};
+use crate::git_log::backend::{BackendKind, DecorateFormat};
 use duckdb::{
     core::{LogicalTypeHandle, LogicalTypeId},
     vtab::BindInfo,

@@ -1,9 +1,4 @@
-mod backend;
 mod git_log;
-mod params;
-mod schema;
-mod types;
-mod vector;
 
 use duckdb::{Connection, Result};
 use std::error::Error;

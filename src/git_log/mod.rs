@@ -1,11 +1,15 @@
-use crate::backend;
-use crate::params::GitLogParameter;
-use crate::schema;
+mod backend;
+mod params;
+mod schema;
+mod types;
+mod vector;
+
 use duckdb::{
     core::{DataChunkHandle, LogicalTypeHandle},
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection, Result,
 };
+use params::GitLogParameter;
 use std::error::Error;
 use std::sync::Arc;
 
@@ -36,7 +40,7 @@ impl VTab for GitLogVTab {
 
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn std::error::Error>> {
         schema::bind_columns(bind)?;
-        crate::params::bind(bind)
+        params::bind(bind)
     }
 
     fn init(info: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
@@ -77,11 +81,11 @@ impl VTab for GitLogVTab {
     }
 
     fn parameters() -> Option<Vec<LogicalTypeHandle>> {
-        Some(crate::params::parameters())
+        Some(params::parameters())
     }
 
     fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
-        Some(crate::params::named_parameters())
+        Some(params::named_parameters())
     }
 }
 

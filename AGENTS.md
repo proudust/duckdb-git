@@ -19,11 +19,13 @@ make bench_gix # Run benchmarks (cargo bench, libgit + gix)
 ## Project structure
 
 - `src/lib.rs` — extension entry point (`register`, `extension_entrypoint`)
-- `src/git_log.rs` — `git_log` VTab, `GitLogReadPlanner`/`GitLogReader` traits
-- `src/backend/mod.rs` — `BackendKind` dispatch, `open_planner`, `DecorateFormat`
-- `src/backend/libgit.rs` — `LibGitLogReadPlanner`/`LibGitLogReader` (default)
-- `src/backend/gix.rs` — `GixLogReadPlanner`/`GixLogReader` (experimental, feature-gated)
-- `src/vector.rs` — DuckDB vector write helpers
+- `src/git_log/mod.rs` — `git_log` VTab, `open_planner` backend dispatch
+- `src/git_log/types.rs` — `CommitData`, `GitLogReadPlanner`/`GitLogReader` traits
+- `src/git_log/params.rs` — `GitLogParameter`, `BackendKind`, `DecorateFormat`
+- `src/git_log/schema.rs` — column definitions and projection helpers
+- `src/git_log/vector.rs` — DuckDB vector write helpers
+- `src/git_log/libgit.rs` — `LibGitLogReadPlanner`/`LibGitLogReader` (default)
+- `src/git_log/gix.rs` — `GixLogReadPlanner`/`GixLogReader` (experimental, feature-gated)
 - `src/wasm_lib.rs` — wasm entry point (swaps crate-type for emscripten builds)
 - `test/sql/git_log.test` — E2E tests (sqllogictest format)
 - `test/sql/git_log_ignore_all_space.test` — libgit-only regression test (`backend='libgit'`)

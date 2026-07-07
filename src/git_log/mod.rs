@@ -1,30 +1,51 @@
-mod backend;
+#[cfg(feature = "gix-backend")]
+mod gix;
+#[cfg(feature = "libgit-backend")]
+mod libgit;
 mod params;
 mod schema;
 mod types;
 mod vector;
+
+use params::{BackendKind, GitLogParameter};
+use types::{GitLogReadPlanner, GitLogReader};
 
 use duckdb::{
     core::{DataChunkHandle, LogicalTypeHandle},
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
     Connection, Result,
 };
-use params::GitLogParameter;
 use std::error::Error;
 use std::sync::Arc;
 
-/// Created at VTab init, shared across parallel workers.
-pub trait GitLogReadPlanner: Send + Sync {
-    fn max_threads(&self) -> u64;
-    fn new_reader(&self, params: &GitLogParameter) -> Box<dyn GitLogReader>;
-}
-
-pub trait GitLogReader {
-    fn read<'a>(
-        &mut self,
-        output: &'a mut DataChunkHandle,
-        column_indices: &[u64],
-    ) -> Result<u32, Box<dyn Error>>;
+pub fn open_planner(
+    repo_path: &str,
+    kind: BackendKind,
+    params: &GitLogParameter,
+    column_indices: &[u64],
+) -> Result<Box<dyn GitLogReadPlanner>, Box<dyn Error>> {
+    match kind {
+        BackendKind::Libgit => {
+            #[cfg(feature = "libgit-backend")]
+            {
+                Ok(Box::new(libgit::LibGitLogReadPlanner::open(
+                    repo_path,
+                    params,
+                    column_indices,
+                )?))
+            }
+            #[cfg(not(feature = "libgit-backend"))]
+            {
+                Err("'libgit' backend not enabled in this build".into())
+            }
+        }
+        #[cfg(feature = "gix-backend")]
+        BackendKind::Gix => Ok(Box::new(gix::GixLogReadPlanner::open(
+            repo_path,
+            params,
+            column_indices,
+        )?)),
+    }
 }
 
 struct GitLogInitData {
@@ -49,7 +70,7 @@ impl VTab for GitLogVTab {
 
         let column_indices = info.get_column_indices();
 
-        let planner: Arc<dyn GitLogReadPlanner> = Arc::from(backend::open_planner(
+        let planner: Arc<dyn GitLogReadPlanner> = Arc::from(open_planner(
             &params.repo_path,
             params.backend,
             params,

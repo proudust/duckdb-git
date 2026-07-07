@@ -1,3 +1,8 @@
+use crate::git_log::params::GitLogParameter;
+
+use duckdb::core::DataChunkHandle;
+use std::error::Error;
+
 /// git diff --numstat convention for gitlink (submodule) entries.
 pub fn gitlink_numstat(status: &str) -> (i32, i32) {
     match status {
@@ -30,4 +35,18 @@ pub struct CommitData {
     pub message: Vec<u8>,
     pub parents: Vec<String>,
     pub file_changes: Vec<FileChange>,
+}
+
+pub trait GitLogReader {
+    fn read<'a>(
+        &mut self,
+        output: &'a mut DataChunkHandle,
+        column_indices: &[u64],
+    ) -> Result<u32, Box<dyn Error>>;
+}
+
+/// Created at VTab init, shared across parallel workers.
+pub trait GitLogReadPlanner: Send + Sync {
+    fn max_threads(&self) -> u64;
+    fn new_reader(&self, params: &GitLogParameter) -> Box<dyn GitLogReader>;
 }

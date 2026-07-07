@@ -1,5 +1,4 @@
-use super::DecorateFormat;
-use crate::git_log::params::GitLogParameter;
+use crate::git_log::params::{DecorateFormat, GitLogParameter};
 use crate::git_log::schema;
 use crate::git_log::types::{gitlink_numstat, CommitData, FileChange};
 use crate::git_log::vector::VectorInserter;

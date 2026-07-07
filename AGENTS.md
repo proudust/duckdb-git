@@ -18,10 +18,11 @@ make bench_gix # Run benchmarks (cargo bench, libgit + gix)
 
 ## Project structure
 
-- `src/lib.rs` — DuckDB VTab implementation (`git_log` table function)
-- `src/backend/mod.rs` — `GitBackend` trait, `BackendKind`/`Backend` dispatch, runtime backend selection
-- `src/backend/libgit.rs` — libgit2 backend (default)
-- `src/backend/gix.rs` — gix/gitoxide backend (experimental, feature-gated)
+- `src/lib.rs` — extension entry point (`register`, `extension_entrypoint`)
+- `src/git_log.rs` — `git_log` VTab, `GitLogReadPlanner`/`GitLogReader` traits
+- `src/backend/mod.rs` — `BackendKind` dispatch, `open_planner`, `DecorateFormat`
+- `src/backend/libgit.rs` — `LibGitLogReadPlanner`/`LibGitLogReader` (default)
+- `src/backend/gix.rs` — `GixLogReadPlanner`/`GixLogReader` (experimental, feature-gated)
 - `src/vector.rs` — DuckDB vector write helpers
 - `src/wasm_lib.rs` — wasm entry point (swaps crate-type for emscripten builds)
 - `test/sql/git_log.test` — E2E tests (sqllogictest format)

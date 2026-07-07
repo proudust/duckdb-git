@@ -1,84 +1,15 @@
 mod backend;
+mod git_log;
 mod params;
 mod schema;
 mod types;
 mod vector;
 
-use backend::GitLogReadPlanner;
-use duckdb::{
-    core::LogicalTypeHandle,
-    vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab},
-    Connection, Result,
-};
-use params::GitLogParameter;
-use std::{error::Error, sync::Arc};
-
-struct GitLogInitData {
-    planner: Arc<dyn GitLogReadPlanner>,
-    column_indices: Vec<u64>,
-}
-
-struct GitLogVTab;
-
-impl VTab for GitLogVTab {
-    type InitData = GitLogInitData;
-    type BindData = GitLogParameter;
-
-    fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn std::error::Error>> {
-        schema::bind_columns(bind)?;
-        params::bind(bind)
-    }
-
-    fn init(info: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
-        let params = info.get_bind_data::<GitLogParameter>();
-        let params = unsafe { &*params };
-
-        let column_indices = info.get_column_indices();
-
-        let planner: Arc<dyn GitLogReadPlanner> =
-            Arc::from(backend::open_planner(
-                &params.repo_path,
-                params.backend,
-                params,
-                &column_indices,
-            )?);
-        info.set_max_threads(planner.max_threads());
-
-        Ok(GitLogInitData {
-            planner,
-            column_indices,
-        })
-    }
-
-    fn func(
-        func: &TableFunctionInfo<Self>,
-        output: &mut duckdb::core::DataChunkHandle,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let init_data = func.get_init_data();
-        let bind_data = func.get_bind_data();
-
-        let mut reader = init_data.planner.new_reader(bind_data);
-        let row_count = reader.read(output, &init_data.column_indices)?;
-        output.set_len(row_count as usize);
-        Ok(())
-    }
-
-    fn supports_pushdown() -> bool {
-        true
-    }
-
-    fn parameters() -> Option<Vec<LogicalTypeHandle>> {
-        Some(params::parameters())
-    }
-
-    fn named_parameters() -> Option<Vec<(String, LogicalTypeHandle)>> {
-        Some(params::named_parameters())
-    }
-}
+use duckdb::{Connection, Result};
+use std::error::Error;
 
 pub fn register(con: &Connection) -> Result<(), Box<dyn Error>> {
-    con.register_table_function::<GitLogVTab>("git_log")?;
-    Ok(())
+    git_log::register(con)
 }
 
 #[cfg(feature = "loadable-extension")]

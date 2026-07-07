@@ -1,25 +1,33 @@
-use super::{DecorateFormat, GitBackend};
+use crate::git_log::{GitLogReadPlanner, GitLogReader};
+use super::DecorateFormat;
+use crate::params::GitLogParameter;
+use crate::schema;
 use crate::types::{gitlink_numstat, CommitData, FileChange};
+use crate::vector::VectorInserter;
 use ::git2::Repository;
+use duckdb::core::DataChunkHandle;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::error::Error;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 thread_local! {
     static CACHED_REPO: RefCell<Option<(String, Repository)>> = const { RefCell::new(None) };
 }
 
-pub struct LibGitBackend {
+struct LibGitRepo {
     repo: Option<Repository>,
     repo_path: String,
 }
 
-impl LibGitBackend {
-    pub fn new(repo_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+impl LibGitRepo {
+    fn open(repo_path: &str) -> Result<Self, Box<dyn Error>> {
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
             Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1),
             _ => Repository::open(repo_path),
         })?;
-        Ok(LibGitBackend {
+        Ok(LibGitRepo {
             repo: Some(repo),
             repo_path: repo_path.to_string(),
         })
@@ -27,6 +35,92 @@ impl LibGitBackend {
 
     fn repo(&self) -> &Repository {
         self.repo.as_ref().unwrap()
+    }
+
+    fn get_commit_oids(
+        &self,
+        revision: Option<&str>,
+        max_count: Option<usize>,
+    ) -> Result<Vec<String>, Box<dyn Error>> {
+        let mut revwalk = self.repo().revwalk()?;
+
+        match revision {
+            Some(rev) => {
+                let obj = self.repo().revparse_single(rev)?;
+                revwalk.push(obj.id())?;
+            }
+            None => {
+                revwalk.push_head()?;
+            }
+        }
+
+        let revwalk_iter: Box<dyn Iterator<Item = _>> = match max_count {
+            Some(count) => Box::new(revwalk.take(count)),
+            None => Box::new(revwalk),
+        };
+
+        let mut commit_oids = Vec::new();
+        for oid in revwalk_iter {
+            commit_oids.push(oid?.to_string());
+        }
+
+        Ok(commit_oids)
+    }
+
+    fn get_commit(
+        &self,
+        oid: &str,
+        ignore_all_space: bool,
+        skip_file_changes: bool,
+    ) -> Result<CommitData, Box<dyn Error>> {
+        let oid = ::git2::Oid::from_str(oid)?;
+        let commit = self.repo().find_commit(oid)?;
+        let author = commit.author();
+        let committer = commit.committer();
+
+        let file_changes = if skip_file_changes {
+            Vec::new()
+        } else {
+            self.get_file_changes(&commit, ignore_all_space)?
+        };
+
+        Ok(CommitData {
+            author_name: author.name_bytes().to_vec(),
+            author_email: author.email_bytes().to_vec(),
+            author_timestamp: author.when().seconds(),
+            committer_name: committer.name_bytes().to_vec(),
+            committer_email: committer.email_bytes().to_vec(),
+            committer_timestamp: committer.when().seconds(),
+            message: commit.message_bytes().to_vec(),
+            parents: (0..commit.parent_count())
+                .map(|i| commit.parent_id(i).unwrap().to_string())
+                .collect(),
+            file_changes,
+        })
+    }
+
+    fn get_refs(
+        &self,
+        format: DecorateFormat,
+    ) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>> {
+        let mut refs_map: HashMap<String, Vec<String>> = HashMap::new();
+        for reference in self.repo().references()? {
+            let reference = reference?;
+            let name = match format {
+                DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
+                DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            if let Ok(commit) = reference.peel_to_commit() {
+                refs_map
+                    .entry(commit.id().to_string())
+                    .or_default()
+                    .push(name);
+            }
+        }
+        Ok(refs_map)
     }
 
     fn get_file_changes(
@@ -200,95 +294,7 @@ impl LibGitBackend {
     }
 }
 
-impl GitBackend for LibGitBackend {
-    fn get_commit_oids(
-        &self,
-        revision: Option<&str>,
-        max_count: Option<usize>,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let mut revwalk = self.repo().revwalk()?;
-
-        match revision {
-            Some(rev) => {
-                let obj = self.repo().revparse_single(rev)?;
-                revwalk.push(obj.id())?;
-            }
-            None => {
-                revwalk.push_head()?;
-            }
-        }
-
-        let revwalk_iter: Box<dyn Iterator<Item = _>> = match max_count {
-            Some(count) => Box::new(revwalk.take(count)),
-            None => Box::new(revwalk),
-        };
-
-        let mut commit_oids = Vec::new();
-        for oid in revwalk_iter {
-            commit_oids.push(oid?.to_string());
-        }
-
-        Ok(commit_oids)
-    }
-
-    fn get_commit(
-        &self,
-        oid: &str,
-        ignore_all_space: bool,
-        skip_file_changes: bool,
-    ) -> Result<CommitData, Box<dyn std::error::Error>> {
-        let oid = ::git2::Oid::from_str(oid)?;
-        let commit = self.repo().find_commit(oid)?;
-        let author = commit.author();
-        let committer = commit.committer();
-
-        let file_changes = if skip_file_changes {
-            Vec::new()
-        } else {
-            self.get_file_changes(&commit, ignore_all_space)?
-        };
-
-        Ok(CommitData {
-            author_name: author.name_bytes().to_vec(),
-            author_email: author.email_bytes().to_vec(),
-            author_timestamp: author.when().seconds(),
-            committer_name: committer.name_bytes().to_vec(),
-            committer_email: committer.email_bytes().to_vec(),
-            committer_timestamp: committer.when().seconds(),
-            message: commit.message_bytes().to_vec(),
-            parents: (0..commit.parent_count())
-                .map(|i| commit.parent_id(i).unwrap().to_string())
-                .collect(),
-            file_changes,
-        })
-    }
-
-    fn get_refs(
-        &self,
-        format: DecorateFormat,
-    ) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
-        let mut refs_map: HashMap<String, Vec<String>> = HashMap::new();
-        for reference in self.repo().references()? {
-            let reference = reference?;
-            let name = match format {
-                DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
-                DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
-            };
-            if name.is_empty() {
-                continue;
-            }
-            if let Ok(commit) = reference.peel_to_commit() {
-                refs_map
-                    .entry(commit.id().to_string())
-                    .or_default()
-                    .push(name);
-            }
-        }
-        Ok(refs_map)
-    }
-}
-
-impl Drop for LibGitBackend {
+impl Drop for LibGitRepo {
     fn drop(&mut self) {
         if let Some(repo) = self.repo.take() {
             CACHED_REPO.with_borrow_mut(|cached| {
@@ -296,6 +302,112 @@ impl Drop for LibGitBackend {
             });
         }
     }
+}
+
+struct LibGitLogReadPlannerInner {
+    commit_oids: Vec<String>,
+    decorations: HashMap<String, Vec<String>>,
+    current_index: AtomicUsize,
+    batch_size: usize,
+    max_threads: u64,
+    repo_path: String,
+}
+
+pub struct LibGitLogReadPlanner {
+    inner: Arc<LibGitLogReadPlannerInner>,
+}
+
+impl LibGitLogReadPlanner {
+    pub fn open(
+        repo_path: &str,
+        params: &GitLogParameter,
+        column_indices: &[u64],
+    ) -> Result<Self, Box<dyn Error>> {
+        let repo = LibGitRepo::open(repo_path)?;
+
+        let commit_oids = repo.get_commit_oids(params.revision.as_deref(), params.max_count)?;
+        let decorations = if schema::needs_refs(column_indices) {
+            repo.get_refs(params.decorate)?
+        } else {
+            HashMap::new()
+        };
+
+        let (max_threads, batch_size) = compute_parallelism(commit_oids.len());
+
+        Ok(LibGitLogReadPlanner {
+            inner: Arc::new(LibGitLogReadPlannerInner {
+                commit_oids,
+                decorations,
+                current_index: AtomicUsize::new(0),
+                batch_size,
+                max_threads,
+                repo_path: repo_path.to_string(),
+            }),
+        })
+    }
+}
+
+impl GitLogReadPlanner for LibGitLogReadPlanner {
+    fn max_threads(&self) -> u64 {
+        self.inner.max_threads
+    }
+
+    fn new_reader(&self, params: &GitLogParameter) -> Box<dyn GitLogReader> {
+        Box::new(LibGitLogReader {
+            inner: Arc::clone(&self.inner),
+            ignore_all_space: params.ignore_all_space,
+        })
+    }
+}
+
+struct LibGitLogReader {
+    inner: Arc<LibGitLogReadPlannerInner>,
+    ignore_all_space: bool,
+}
+
+impl GitLogReader for LibGitLogReader {
+    fn read<'a>(
+        &mut self,
+        output: &'a mut DataChunkHandle,
+        column_indices: &[u64],
+    ) -> Result<u32, Box<dyn Error>> {
+        let start_index = self
+            .inner
+            .current_index
+            .fetch_add(self.inner.batch_size, Ordering::Relaxed);
+
+        if start_index >= self.inner.commit_oids.len() {
+            return Ok(0);
+        }
+
+        let end_index =
+            std::cmp::min(start_index + self.inner.batch_size, self.inner.commit_oids.len());
+
+        let repo = LibGitRepo::open(&self.inner.repo_path)?;
+
+        let mut writer = VectorInserter::new(output, column_indices);
+
+        let empty_refs: Vec<String> = Vec::new();
+        let skip_file_changes = !schema::needs_file_changes(column_indices);
+        let oids = &self.inner.commit_oids[start_index..end_index];
+        for (batch_idx, oid) in oids.iter().enumerate() {
+            let commit = repo.get_commit(oid, self.ignore_all_space, skip_file_changes)?;
+            let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
+            writer.push(batch_idx, oid, &commit, refs);
+        }
+
+        writer.finish();
+        Ok(oids.len() as u32)
+    }
+}
+
+fn compute_parallelism(commit_count: usize) -> (u64, usize) {
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let max_threads = std::cmp::min(commit_count, cpu_cores) as u64;
+    let batch_size = (commit_count / cpu_cores).clamp(1, 2048);
+    (max_threads, batch_size)
 }
 
 #[cfg(test)]
@@ -307,22 +419,22 @@ mod tests {
 
     #[test]
     fn skip_file_changes_returns_empty() {
-        let backend = LibGitBackend::new(".").unwrap();
-        let commit = backend.get_commit(SECOND_COMMIT, false, true).unwrap();
+        let repo = LibGitRepo::open(".").unwrap();
+        let commit = repo.get_commit(SECOND_COMMIT, false, true).unwrap();
         assert!(commit.file_changes.is_empty());
     }
 
     #[test]
     fn no_skip_returns_file_changes() {
-        let backend = LibGitBackend::new(".").unwrap();
-        let commit = backend.get_commit(SECOND_COMMIT, false, false).unwrap();
+        let repo = LibGitRepo::open(".").unwrap();
+        let commit = repo.get_commit(SECOND_COMMIT, false, false).unwrap();
         assert!(!commit.file_changes.is_empty());
     }
 
     #[test]
     fn get_refs_peels_annotated_tag_to_commit() {
-        let backend = LibGitBackend::new(".").unwrap();
-        let refs = backend.get_refs(DecorateFormat::Short).unwrap();
+        let repo = LibGitRepo::open(".").unwrap();
+        let refs = repo.get_refs(DecorateFormat::Short).unwrap();
         let names = refs
             .get(TAGGED_COMMIT)
             .expect("tagged commit should have refs");
@@ -331,8 +443,8 @@ mod tests {
 
     #[test]
     fn get_refs_full_returns_full_ref_path() {
-        let backend = LibGitBackend::new(".").unwrap();
-        let refs = backend.get_refs(DecorateFormat::Full).unwrap();
+        let repo = LibGitRepo::open(".").unwrap();
+        let refs = repo.get_refs(DecorateFormat::Full).unwrap();
         let names = refs
             .get(TAGGED_COMMIT)
             .expect("tagged commit should have refs");
@@ -341,8 +453,8 @@ mod tests {
 
     #[test]
     fn get_refs_returns_empty_for_commit_without_refs() {
-        let backend = LibGitBackend::new(".").unwrap();
-        let refs = backend.get_refs(DecorateFormat::Short).unwrap();
+        let repo = LibGitRepo::open(".").unwrap();
+        let refs = repo.get_refs(DecorateFormat::Short).unwrap();
         assert!(!refs.contains_key(SECOND_COMMIT));
     }
 }

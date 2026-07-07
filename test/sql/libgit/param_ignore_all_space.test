@@ -1,5 +1,5 @@
-# name: test/sql/git_log_ignore_all_space.test
-# description: ignore_all_space diff line-count regression test (libgit-backend only)
+# name: test/sql/libgit/param_ignore_all_space.test
+# description: ignore_all_space parameter diff line counts (libgit backend)
 # group: [git]
 
 require duckdb_git
@@ -9,7 +9,7 @@ require duckdb_git
 query II
 SELECT change.add_lines, change.del_lines FROM (
   SELECT unnest(file_changes) as change
-  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=false, backend='libgit')
+  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=false)
 ) WHERE change.path = 'src/lib.rs';
 ----
 112	83
@@ -17,7 +17,7 @@ SELECT change.add_lines, change.del_lines FROM (
 query II
 SELECT change.add_lines, change.del_lines FROM (
   SELECT unnest(file_changes) as change
-  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=true, backend='libgit')
+  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=true)
 ) WHERE change.path = 'src/lib.rs';
 ----
 64	35

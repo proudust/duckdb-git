@@ -1,0 +1,23 @@
+# name: test/sql/libgit/output_parents.test
+# description: parents column (libgit backend)
+# group: [git]
+
+require duckdb_git
+
+# Test that parents array works correctly for initial commit (should be empty)
+query I
+SELECT len(parents) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;
+----
+0
+
+# Test that parents values are correct per row (regression: offsets were always 0)
+query II
+SELECT commit_id, parents
+FROM git_log('.', revision='86b5cb415f95c10b06f7623e5cbecb5f92f612ba')
+ORDER BY author_timestamp ASC;
+----
+b1e7e960fcbee2de7489b7dcca09a9223039521e	[]
+2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5	[b1e7e960fcbee2de7489b7dcca09a9223039521e]
+78ae3ce3e7cb6ee193569710b3213352ed1c857f	[2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5]
+5873dd77bb3d3734a23dab4dc195a2a734e45d03	[78ae3ce3e7cb6ee193569710b3213352ed1c857f]
+86b5cb415f95c10b06f7623e5cbecb5f92f612ba	[5873dd77bb3d3734a23dab4dc195a2a734e45d03]

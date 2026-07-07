@@ -1,0 +1,29 @@
+# name: test/sql/libgit/param_decorate.test
+# description: decorate column and decorate parameter (libgit backend)
+# group: [git]
+
+require duckdb_git
+
+# Test that decorate is an empty array for a commit with no branch/tag pointing to it
+query I
+SELECT decorate FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1);
+----
+[]
+
+# Test that decorate includes an annotated tag pointing to the commit (exercises tag peeling)
+query I
+SELECT decorate FROM git_log('.', revision='295db8704f2b2e12fe71a1f433b8b17906fedf25', max_count=1);
+----
+[v0.1.1]
+
+# decorate='full' returns full ref paths
+query I
+SELECT decorate FROM git_log('.', revision='295db8704f2b2e12fe71a1f433b8b17906fedf25', max_count=1, decorate='full');
+----
+[refs/tags/v0.1.1]
+
+# decorate='no' is rejected (use projection pushdown to omit the column)
+statement error
+SELECT decorate FROM git_log('.', decorate='no');
+----
+decorate='no' is not supported; omit the decorate column instead

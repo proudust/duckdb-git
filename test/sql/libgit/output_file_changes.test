@@ -1,0 +1,70 @@
+# name: test/sql/libgit/output_file_changes.test
+# description: file_changes column and diff stats (libgit backend)
+# group: [git]
+
+require duckdb_git
+
+# Test that initial commit file_changes lists all files with full paths (no directory entries)
+query I
+SELECT change.path FROM (
+  SELECT unnest(file_changes) as change
+  FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e')
+) ORDER BY change.path;
+----
+.cargo/config.toml
+.github/workflows/MainDistributionPipeline.yml
+.gitignore
+.gitmodules
+Cargo.lock
+Cargo.toml
+Makefile
+README.md
+extension-ci-tools
+src/lib.rs
+src/wasm_lib.rs
+test/sql/rusty_quack.test
+
+# Test that file_changes values are correct per row
+# NOTE: File order may vary depending on the backend.
+query II
+SELECT commit_id, list_sort(list_transform(file_changes, x -> x.path))
+FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5')
+ORDER BY author_timestamp ASC;
+----
+b1e7e960fcbee2de7489b7dcca09a9223039521e	[.cargo/config.toml, .github/workflows/MainDistributionPipeline.yml, .gitignore, .gitmodules, Cargo.lock, Cargo.toml, Makefile, README.md, extension-ci-tools, src/lib.rs, src/wasm_lib.rs, test/sql/rusty_quack.test]
+2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5	[.vscode/cspell.json, Cargo.lock, Cargo.toml, src/lib.rs, test/sql/rusty_quack.test]
+
+# Rename: single R entry with old_path (matches git show --name-status / --numstat)
+query IIIII
+SELECT change.path, change.old_path, change.status, change.add_lines, change.del_lines
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('.', revision='5fcebaf735065c06e1d8962216b14a99d5bc0401', max_count=1))
+WHERE change.path = 'src/backend/libgit.rs';
+----
+src/backend/libgit.rs	src/backend/git2.rs	R	9	9
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT unnest(file_changes) AS change
+  FROM git_log('.', revision='5fcebaf735065c06e1d8962216b14a99d5bc0401', max_count=1)
+) WHERE change.path = 'src/backend/git2.rs';
+----
+0
+
+# Submodule gitlink (A): numstat 1/0, file_size NULL
+query IIII
+SELECT change.status, change.add_lines, change.del_lines, change.file_size
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e', max_count=1))
+WHERE change.path = 'extension-ci-tools';
+----
+A	1	0	NULL
+
+# Submodule gitlink (M): numstat 1/1, file_size NULL (commit bumps extension-ci-tools submodule)
+query IIII
+SELECT change.status, change.add_lines, change.del_lines, change.file_size
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('.', revision='81e3dcae30d1b953227e49c0ce69d5747abcf6ab', max_count=1))
+WHERE change.path = 'extension-ci-tools';
+----
+M	1	1	NULL

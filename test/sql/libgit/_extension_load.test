@@ -1,0 +1,12 @@
+# name: test/sql/libgit/_extension_load.test
+# description: extension load and require duckdb_git
+# group: [git]
+
+# Before we load the extension, this will fail
+statement error
+SELECT * FROM git_log('.');
+----
+Catalog Error: Table Function with name git_log does not exist!
+
+# Require statement will ensure the extension is loaded from now on
+require duckdb_git

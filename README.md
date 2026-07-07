@@ -27,7 +27,7 @@ SELECT * FROM git_log('.');
 
 > [!NOTE]
 > If you see the following error when running `LOAD`, your local extension cache might be corrupted.
-> Try running `FORCE INSTALL` to reinstall the extension.
+> Try running `FORCE INSTALL` to reinstall, and then restart duckdb.
 > 
 > ```
 > Invalid Input Error:
@@ -70,8 +70,8 @@ Returns commit history as a table.
 | `revision`         | `VARCHAR` | `NULL` (HEAD) | Branch, tag, or commit hash                                   |
 | `max_count`        | `INTEGER` | `NULL` (all)  | Maximum number of commits to return                           |
 | `ignore_all_space` | `BOOLEAN` | `false`       | Ignore whitespace changes in diffs                            |
-| `backend`          | `VARCHAR` | `'libgit'`    | Determines how history is retrieved. [^1]                     |
 | `decorate`         | `VARCHAR` | `'short'`     | Ref name format in the `decorate` column (`short` or `full`). |
+| `backend`          | `VARCHAR` | `'libgit'`    | Determines how history is retrieved. [^1]                     |
 
 [^1]: If you build with the `gix-backend` feature included, you can also specify `gix`.
 
@@ -124,3 +124,7 @@ make bench # Run benchmarks (cargo bench, libgit-only binary)
 BENCH_REPO=/path/to/large/repo make bench # Run benchmarks on a specific repo
 make bench_gix # Run benchmarks (cargo bench, libgit + gix)
 ```
+
+---
+
+This extension was developed using Claude Code and Cursor.

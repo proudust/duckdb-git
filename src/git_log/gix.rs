@@ -228,7 +228,6 @@ impl GixRepo {
                     file_size: Some(file_size),
                     add_lines,
                     del_lines,
-                    is_gitlink: false,
                 });
 
                 Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)

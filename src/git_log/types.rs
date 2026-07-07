@@ -22,7 +22,6 @@ pub struct FileChange {
     pub file_size: Option<i64>,
     pub add_lines: i32,
     pub del_lines: i32,
-    pub is_gitlink: bool,
 }
 
 pub struct CommitData {

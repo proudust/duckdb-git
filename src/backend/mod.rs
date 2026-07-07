@@ -2,6 +2,9 @@
 mod gix;
 #[cfg(feature = "libgit-backend")]
 mod libgit;
+mod planner;
+
+pub use planner::{open_planner, GitLogReadPlanner};
 
 use crate::types::CommitData;
 use std::collections::HashMap;

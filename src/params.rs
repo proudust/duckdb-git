@@ -11,8 +11,7 @@ const IGNORE_ALL_SPACE: &str = "ignore_all_space";
 const BACKEND: &str = "backend";
 const DECORATE: &str = "decorate";
 
-#[repr(C)]
-pub(crate) struct GitLogBindData {
+pub(crate) struct GitLogParameter {
     pub repo_path: String,
     pub revision: Option<String>,
     pub max_count: Option<usize>,
@@ -52,7 +51,7 @@ pub fn named_parameters() -> Vec<(String, LogicalTypeHandle)> {
     ]
 }
 
-pub fn bind(bind: &BindInfo) -> Result<GitLogBindData, Box<dyn std::error::Error>> {
+pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Error>> {
     let repo_path = bind.get_parameter(0).to_string();
 
     let revision = bind
@@ -80,7 +79,7 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogBindData, Box<dyn std::error::Error
         .transpose()?
         .unwrap_or_else(DecorateFormat::default);
 
-    Ok(GitLogBindData {
+    Ok(GitLogParameter {
         repo_path,
         revision,
         max_count,

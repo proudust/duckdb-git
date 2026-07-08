@@ -194,6 +194,8 @@ impl LibGitRepo {
 
         diff.find_similar(Some(&mut find_opts))?;
 
+        file_changes.reserve(diff.deltas().len());
+
         for i in 0..diff.deltas().len() {
             let delta = diff.get_delta(i).unwrap();
 

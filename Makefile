@@ -38,11 +38,19 @@ test_default: configure debug test_extension_debug
 test_gix: export GIX_BACKEND := 1
 test_gix: debug_gix test_extension_debug
 
+BENCH_RESULTS_DIR ?= target/bench-results
+BENCH_RESULTS_FILE ?= $(BENCH_RESULTS_DIR)/latest.md
+BENCH_RESULTS_RAW_FILE ?= $(BENCH_RESULTS_DIR)/latest-raw.txt
+
 bench:
-	cargo bench
+	@mkdir -p $(BENCH_RESULTS_DIR)
+	cargo bench -q --no-default-features --features bundled,libgit-backend 2>&1 \
+		| tee $(BENCH_RESULTS_RAW_FILE) | python3 scripts/format_divan_table.py | tee $(BENCH_RESULTS_FILE)
 
 bench_gix:
-	cargo bench --no-default-features --features bundled,libgit-backend,gix-backend
+	@mkdir -p $(BENCH_RESULTS_DIR)
+	cargo bench -q --no-default-features --features bundled,libgit-backend,gix-backend 2>&1 \
+		| tee $(BENCH_RESULTS_RAW_FILE) | python3 scripts/format_divan_table.py | tee $(BENCH_RESULTS_FILE)
 
 clean: clean_build clean_rust
 clean_all: clean_configure clean

@@ -5,6 +5,7 @@ configure
 duckdb_unittest_tempdir
 /test/bin
 venv
+__pycache__
 
 *.override.md
 *.local.md

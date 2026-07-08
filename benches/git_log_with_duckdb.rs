@@ -40,6 +40,12 @@ struct ThreadedConfig {
     threads: usize,
 }
 
+impl std::fmt::Display for ThreadedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}_t{}", self.backend, self.threads)
+    }
+}
+
 #[cfg(feature = "gix-backend")]
 const THREADED_CONFIGS: &[ThreadedConfig] = &[
     ThreadedConfig {

@@ -15,6 +15,7 @@
         "oids",
         "overriden",
         "pushdown",
+        "pycache",
         "pytz",
         "repr",
         "revparse",

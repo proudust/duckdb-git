@@ -2,15 +2,20 @@
     "words": [
         "archs",
         "bstr",
+        "bufs",
         "cdylib",
         "cstring",
+        "ctxlen",
         "dtolnay",
         "duckdb",
         "emcc",
         "gitlink",
         "gitoxide",
+        "interhunkctxlen",
         "libduckdb",
         "libgit",
+        "mmbuffer",
+        "mmfile",
         "numstat",
         "oids",
         "overriden",
@@ -28,6 +33,11 @@
         "varchar",
         "variegata",
         "venv",
-        "vtab"
+        "vtab",
+        "xdemitcb",
+        "xdemitconf",
+        "xdiff",
+        "xecfg",
+        "xpparam"
     ]
 }

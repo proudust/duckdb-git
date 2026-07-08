@@ -253,12 +253,29 @@ impl LibGitRepo {
                     ("unknown".to_string(), Some(0))
                 };
 
-                let (add, del) = match ::git2::Patch::from_diff(&diff, i)? {
-                    Some(patch) => {
-                        let (_, additions, deletions) = patch.line_stats()?;
-                        (additions as i32, deletions as i32)
-                    }
-                    None => (0, 0),
+                let (add, del) = {
+                    let old_id = delta.old_file().id();
+                    let new_id = delta.new_file().id();
+                    let old_blob;
+                    let old_content: &[u8] = if old_id.is_zero() {
+                        &[]
+                    } else {
+                        old_blob = self.repo().find_blob(old_id)?;
+                        old_blob.content()
+                    };
+                    let new_blob;
+                    let new_content: &[u8] = if new_id.is_zero() {
+                        &[]
+                    } else {
+                        new_blob = self.repo().find_blob(new_id)?;
+                        new_blob.content()
+                    };
+                    super::xdiff::diff_line_counts(
+                        old_content,
+                        new_content,
+                        ignore_all_space,
+                    )
+                    .map_err(|e| ::git2::Error::from_str(&e.to_string()))?
                 };
 
                 (blob_id, file_size, add, del)

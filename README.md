@@ -125,6 +125,14 @@ BENCH_REPO=/path/to/large/repo make bench # Run benchmarks on a specific repo
 make bench_gix # Run benchmarks (cargo bench, libgit + gix)
 ```
 
+## License
+
+[MIT License](LICENSE).
+
+The [libgit2](https://github.com/libgit2/libgit2) library is statically linked,
+but remains under its [linking exception](https://github.com/libgit2/libgit2/blob/main/COPYING),
+meaning GPLv2 requirements do not apply to this project.
+
 ---
 
 This extension was developed using Claude Code and Cursor.

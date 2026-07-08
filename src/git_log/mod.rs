@@ -3,6 +3,8 @@ mod gix;
 #[cfg(feature = "libgit-backend")]
 mod libgit;
 mod params;
+#[cfg(feature = "libgit-backend")]
+mod xdiff;
 mod schema;
 mod types;
 mod vector;

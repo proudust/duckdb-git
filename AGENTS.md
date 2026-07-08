@@ -25,6 +25,7 @@ make bench_gix # Run benchmarks (cargo bench, libgit + gix)
 - `src/git_log/schema.rs` — column definitions and projection helpers
 - `src/git_log/vector.rs` — DuckDB vector write helpers
 - `src/git_log/libgit.rs` — `LibGitLogReadPlanner`/`LibGitLogReader` (default)
+- `src/git_log/xdiff.rs` — `xdl_diff` FFI bindings for fast add/del line counting (libgit-backend only)
 - `src/git_log/gix.rs` — `GixLogReadPlanner`/`GixLogReader` (experimental, feature-gated)
 - `src/wasm_lib.rs` — wasm entry point (swaps crate-type for emscripten builds)
 - `test/sql/libgit/` — libgit backend E2E tests (sqllogictest format)

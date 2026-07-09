@@ -121,9 +121,8 @@ make release # Build (release, libgit-only binary)
 make release_gix # Build (release, libgit + gix)
 make test # E2E tests (sqllogictest, libgit-only binary)
 make test_gix # E2E tests (sqllogictest, libgit + gix)
-make bench # Run benchmarks (cargo bench, libgit-only binary)
+make bench # Run benchmarks (libgit + gix backends)
 BENCH_REPO=/path/to/large/repo make bench # Run benchmarks on a specific repo
-make bench_gix # Run benchmarks (cargo bench, libgit + gix)
 ```
 
 ## License

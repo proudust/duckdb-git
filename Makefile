@@ -44,11 +44,6 @@ BENCH_RESULTS_RAW_FILE ?= $(BENCH_RESULTS_DIR)/latest-raw.txt
 
 bench:
 	@mkdir -p $(BENCH_RESULTS_DIR)
-	cargo bench -q --no-default-features --features bundled,libgit-backend 2>&1 \
-		| tee $(BENCH_RESULTS_RAW_FILE) | python3 scripts/format_divan_table.py | tee $(BENCH_RESULTS_FILE)
-
-bench_gix:
-	@mkdir -p $(BENCH_RESULTS_DIR)
 	cargo bench -q --no-default-features --features bundled,libgit-backend,gix-backend 2>&1 \
 		| tee $(BENCH_RESULTS_RAW_FILE) | python3 scripts/format_divan_table.py | tee $(BENCH_RESULTS_FILE)
 

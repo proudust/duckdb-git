@@ -31,6 +31,29 @@ impl DecorateFormat {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffMerges {
+    Off,
+    FirstParent,
+}
+
+impl DiffMerges {
+    pub fn default() -> Self {
+        Self::Off
+    }
+
+    pub fn parse(s: &str) -> Result<Self, Box<dyn Error>> {
+        match s.to_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "first_parent" | "first-parent" => Ok(Self::FirstParent),
+            other => Err(format!(
+                "unknown diff_merges format: '{other}' (expected 'off', 'first_parent', or 'first-parent')"
+            )
+            .into()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendKind {
     Libgit,
     #[cfg(feature = "gix-backend")]
@@ -65,6 +88,7 @@ const MAX_COUNT: &str = "max_count";
 const IGNORE_ALL_SPACE: &str = "ignore_all_space";
 const BACKEND: &str = "backend";
 const DECORATE: &str = "decorate";
+const DIFF_MERGES: &str = "diff_merges";
 
 pub(crate) struct GitLogParameter {
     pub repo_path: String,
@@ -73,6 +97,7 @@ pub(crate) struct GitLogParameter {
     pub ignore_all_space: bool,
     pub backend: BackendKind,
     pub decorate: DecorateFormat,
+    pub diff_merges: DiffMerges,
 }
 
 pub fn parameters() -> Vec<LogicalTypeHandle> {
@@ -101,6 +126,10 @@ pub fn named_parameters() -> Vec<(String, LogicalTypeHandle)> {
         ),
         (
             DECORATE.to_string(),
+            LogicalTypeHandle::from(LogicalTypeId::Varchar),
+        ),
+        (
+            DIFF_MERGES.to_string(),
             LogicalTypeHandle::from(LogicalTypeId::Varchar),
         ),
     ]
@@ -134,6 +163,12 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Erro
         .transpose()?
         .unwrap_or_else(DecorateFormat::default);
 
+    let diff_merges = bind
+        .get_named_parameter(DIFF_MERGES)
+        .map(|value| DiffMerges::parse(&value.to_string()))
+        .transpose()?
+        .unwrap_or_else(DiffMerges::default);
+
     Ok(GitLogParameter {
         repo_path,
         revision,
@@ -141,6 +176,7 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Erro
         ignore_all_space,
         backend,
         decorate,
+        diff_merges,
     })
 }
 
@@ -208,6 +244,33 @@ mod tests {
         assert!(DecorateFormat::parse("unknown").is_err());
 
         assert_eq!(DecorateFormat::default(), DecorateFormat::Short);
+    }
+
+    #[test]
+    fn parse_diff_merges() {
+        assert_eq!(DiffMerges::parse("off").unwrap(), DiffMerges::Off);
+        assert_eq!(DiffMerges::parse("OFF").unwrap(), DiffMerges::Off);
+
+        assert_eq!(
+            DiffMerges::parse("first_parent").unwrap(),
+            DiffMerges::FirstParent
+        );
+        assert_eq!(
+            DiffMerges::parse("FIRST_PARENT").unwrap(),
+            DiffMerges::FirstParent
+        );
+        assert_eq!(
+            DiffMerges::parse("first-parent").unwrap(),
+            DiffMerges::FirstParent
+        );
+        assert_eq!(
+            DiffMerges::parse("FIRST-PARENT").unwrap(),
+            DiffMerges::FirstParent
+        );
+
+        assert!(DiffMerges::parse("unknown").is_err());
+
+        assert_eq!(DiffMerges::default(), DiffMerges::Off);
     }
 
     #[test]

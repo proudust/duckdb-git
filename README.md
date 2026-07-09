@@ -40,7 +40,7 @@ SELECT * FROM git_log('.');
 -- git log
 select commit_id, author, author_email, author_timestamp, decorate, message from git_log('.');
 
--- git log --numstat
+-- git log --numstat (merge commits omit file_changes by default; same as --diff-merges=off)
 select * from git_log('.');
 
 -- git -C /path/to/repo log main -10
@@ -49,10 +49,10 @@ select commit_id, message from git_log('/path/to/repo', revision='main', max_cou
 -- git log --decorate
 select commit_id, decorate from git_log('.') where len(decorate) > 0;
 
--- git log --numstat -10
+-- git log --numstat -10 --diff-merges=first-parent
 select commit_id, change.path, change.add_lines, change.del_lines
 from (
-  select commit_id, unnest(file_changes) as change from git_log('.', max_count=10)
+  select commit_id, unnest(file_changes) as change from git_log('.', max_count=10, diff_merges='first_parent')
 );
 ```
 
@@ -70,6 +70,7 @@ Returns commit history as a table.
 | `revision`         | `VARCHAR` | `NULL` (HEAD) | Branch, tag, or commit hash                                   |
 | `max_count`        | `INTEGER` | `NULL` (all)  | Maximum number of commits to return                           |
 | `ignore_all_space` | `BOOLEAN` | `false`       | Ignore whitespace changes in diffs                            |
+| `diff_merges`      | `VARCHAR` | `'off'`       | How to show diffs for merge commits (`off`, `first-parent`).  |
 | `decorate`         | `VARCHAR` | `'short'`     | Ref name format in the `decorate` column (`short` or `full`). |
 | `backend`          | `VARCHAR` | `'libgit'`    | Determines how history is retrieved. [^1]                     |
 

@@ -1,0 +1,37 @@
+# name: test/sql/gix/param_diff_merges.test
+# description: diff_merges parameter (gix backend)
+# group: [git]
+
+require duckdb_git
+
+require-env GIX_BACKEND 1
+
+# Non-merge commit still returns file_changes with diff_merges='off' (default)
+query I
+SELECT count(file_changes) FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, backend='gix');
+----
+1
+
+# Non-merge commit returns file_changes with explicit diff_merges='off'
+query I
+SELECT count(file_changes) FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, backend='gix', diff_merges='off');
+----
+1
+
+# Non-merge commit returns file_changes with diff_merges='first_parent'
+query I
+SELECT count(file_changes) FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, backend='gix', diff_merges='first_parent');
+----
+1
+
+# Git CLI spelling (first-parent) is also accepted
+query I
+SELECT count(file_changes) FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, backend='gix', diff_merges='first-parent');
+----
+1
+
+# Invalid diff_merges value returns error
+statement error
+SELECT * FROM git_log('.', backend='gix', diff_merges='invalid');
+----
+unknown diff_merges format: 'invalid' (expected 'off', 'first_parent', or 'first-parent')

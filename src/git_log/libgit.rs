@@ -1,4 +1,4 @@
-use crate::git_log::params::{DecorateFormat, GitLogParameter};
+use crate::git_log::params::{DecorateFormat, DiffMerges, GitLogParameter};
 use crate::git_log::schema;
 use crate::git_log::types::{gitlink_numstat, CommitData, FileChange};
 use crate::git_log::vector::VectorInserter;
@@ -71,13 +71,16 @@ impl LibGitRepo {
         oid: &str,
         ignore_all_space: bool,
         skip_file_changes: bool,
+        diff_merges: DiffMerges,
     ) -> Result<CommitData, Box<dyn Error>> {
         let oid = ::git2::Oid::from_str(oid)?;
         let commit = self.repo().find_commit(oid)?;
         let author = commit.author();
         let committer = commit.committer();
 
-        let file_changes = if skip_file_changes {
+        let skip = skip_file_changes
+            || (diff_merges == DiffMerges::Off && commit.parent_count() > 1);
+        let file_changes = if skip {
             Vec::new()
         } else {
             self.get_file_changes(&commit, ignore_all_space)?
@@ -360,6 +363,7 @@ impl GitLogReadPlanner for LibGitLogReadPlanner {
         Box::new(LibGitLogReader {
             inner: Arc::clone(&self.inner),
             ignore_all_space: params.ignore_all_space,
+            diff_merges: params.diff_merges,
         })
     }
 }
@@ -367,6 +371,7 @@ impl GitLogReadPlanner for LibGitLogReadPlanner {
 struct LibGitLogReader {
     inner: Arc<LibGitLogReadPlannerInner>,
     ignore_all_space: bool,
+    diff_merges: DiffMerges,
 }
 
 impl GitLogReader for LibGitLogReader {
@@ -397,7 +402,8 @@ impl GitLogReader for LibGitLogReader {
         let skip_file_changes = !schema::needs_file_changes(column_indices);
         let oids = &self.inner.commit_oids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
-            let commit = repo.get_commit(oid, self.ignore_all_space, skip_file_changes)?;
+            let commit =
+                repo.get_commit(oid, self.ignore_all_space, skip_file_changes, self.diff_merges)?;
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
             writer.push(batch_idx, oid, &commit, refs);
         }
@@ -426,14 +432,18 @@ mod tests {
     #[test]
     fn skip_file_changes_returns_empty() {
         let repo = LibGitRepo::open(".").unwrap();
-        let commit = repo.get_commit(SECOND_COMMIT, false, true).unwrap();
+        let commit = repo
+            .get_commit(SECOND_COMMIT, false, true, DiffMerges::FirstParent)
+            .unwrap();
         assert!(commit.file_changes.is_empty());
     }
 
     #[test]
     fn no_skip_returns_file_changes() {
         let repo = LibGitRepo::open(".").unwrap();
-        let commit = repo.get_commit(SECOND_COMMIT, false, false).unwrap();
+        let commit = repo
+            .get_commit(SECOND_COMMIT, false, false, DiffMerges::FirstParent)
+            .unwrap();
         assert!(!commit.file_changes.is_empty());
     }
 

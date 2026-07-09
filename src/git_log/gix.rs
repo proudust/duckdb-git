@@ -1,4 +1,4 @@
-use crate::git_log::params::{DecorateFormat, GitLogParameter};
+use crate::git_log::params::{DecorateFormat, DiffMerges, GitLogParameter};
 use crate::git_log::schema;
 use crate::git_log::types::{CommitData, FileChange};
 use crate::git_log::vector::VectorInserter;
@@ -65,6 +65,7 @@ impl GixRepo {
         // TODO: gix does not yet support ignore_all_space option for diffs
         _ignore_all_space: bool,
         skip_file_changes: bool,
+        diff_merges: DiffMerges,
     ) -> Result<CommitData, Box<dyn Error>> {
         let oid = gix::ObjectId::from_hex(oid.as_bytes())?;
         let commit = self.repo().find_commit(oid)?;
@@ -99,7 +100,9 @@ impl GixRepo {
         let message = commit.message_raw_sloppy().to_vec();
         let parents = commit.parent_ids().map(|id| id.to_string()).collect();
 
-        let file_changes = if skip_file_changes {
+        let skip = skip_file_changes
+            || (diff_merges == DiffMerges::Off && commit.parent_ids().count() > 1);
+        let file_changes = if skip {
             Vec::new()
         } else {
             self.get_file_changes(&commit)?
@@ -300,6 +303,7 @@ impl GitLogReadPlanner for GixLogReadPlanner {
         Box::new(GixLogReader {
             inner: Arc::clone(&self.inner),
             ignore_all_space: params.ignore_all_space,
+            diff_merges: params.diff_merges,
         })
     }
 }
@@ -307,6 +311,7 @@ impl GitLogReadPlanner for GixLogReadPlanner {
 struct GixLogReader {
     inner: Arc<GixLogReadPlannerInner>,
     ignore_all_space: bool,
+    diff_merges: DiffMerges,
 }
 
 impl GitLogReader for GixLogReader {
@@ -337,7 +342,8 @@ impl GitLogReader for GixLogReader {
         let skip_file_changes = !schema::needs_file_changes(column_indices);
         let oids = &self.inner.commit_oids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
-            let commit = repo.get_commit(oid, self.ignore_all_space, skip_file_changes)?;
+            let commit =
+                repo.get_commit(oid, self.ignore_all_space, skip_file_changes, self.diff_merges)?;
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
             writer.push(batch_idx, oid, &commit, refs);
         }
@@ -366,14 +372,18 @@ mod tests {
     #[test]
     fn skip_file_changes_returns_empty() {
         let repo = GixRepo::open(".").unwrap();
-        let commit = repo.get_commit(SECOND_COMMIT, false, true).unwrap();
+        let commit = repo
+            .get_commit(SECOND_COMMIT, false, true, DiffMerges::FirstParent)
+            .unwrap();
         assert!(commit.file_changes.is_empty());
     }
 
     #[test]
     fn no_skip_returns_file_changes() {
         let repo = GixRepo::open(".").unwrap();
-        let commit = repo.get_commit(SECOND_COMMIT, false, false).unwrap();
+        let commit = repo
+            .get_commit(SECOND_COMMIT, false, false, DiffMerges::FirstParent)
+            .unwrap();
         assert!(!commit.file_changes.is_empty());
     }
 

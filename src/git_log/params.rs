@@ -144,7 +144,8 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Erro
 
     let max_count = bind
         .get_named_parameter(MAX_COUNT)
-        .and_then(|value| parse_max_count(&value.to_string()));
+        .map(|value| parse_max_count(&value.to_string()))
+        .transpose()?;
 
     let ignore_all_space = bind
         .get_named_parameter(IGNORE_ALL_SPACE)
@@ -180,8 +181,10 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Erro
     })
 }
 
-fn parse_max_count(value: &str) -> Option<usize> {
-    value.parse::<usize>().ok()
+fn parse_max_count(value: &str) -> Result<usize, Box<dyn Error>> {
+    value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid max_count: '{value}' (expected a non-negative integer)").into())
 }
 
 fn parse_ignore_all_space(value: &str) -> bool {
@@ -275,8 +278,9 @@ mod tests {
 
     #[test]
     fn parse_max_count_test() {
-        assert_eq!(parse_max_count("10"), Some(10));
-        assert_eq!(parse_max_count("not-a-number"), None);
+        assert_eq!(parse_max_count("10").unwrap(), 10);
+        assert!(parse_max_count("not-a-number").is_err());
+        assert!(parse_max_count("-1").is_err());
     }
 
     #[test]

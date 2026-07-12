@@ -39,7 +39,7 @@ impl GixRepo {
         &self,
         revision: Option<&str>,
         max_count: Option<usize>,
-    ) -> Result<Vec<String>, Box<dyn Error>> {
+    ) -> Result<Vec<gix::ObjectId>, Box<dyn Error>> {
         let tip = match revision {
             Some(rev) => self.repo().rev_parse_single(rev)?.detach(),
             None => self.repo().head_id()?.detach(),
@@ -48,12 +48,9 @@ impl GixRepo {
         let walk = self.repo().rev_walk([tip]);
         let all = walk.all()?;
 
-        let oids: Result<Vec<String>, Box<dyn Error>> = match max_count {
-            Some(count) => all
-                .take(count)
-                .map(|info| Ok(info?.id.to_string()))
-                .collect(),
-            None => all.map(|info| Ok(info?.id.to_string())).collect(),
+        let oids: Result<Vec<gix::ObjectId>, Box<dyn Error>> = match max_count {
+            Some(count) => all.take(count).map(|info| Ok(info?.id)).collect(),
+            None => all.map(|info| Ok(info?.id)).collect(),
         };
 
         oids
@@ -61,13 +58,12 @@ impl GixRepo {
 
     fn get_commit(
         &self,
-        oid: &str,
+        oid: gix::ObjectId,
         // TODO: gix does not yet support ignore_all_space option for diffs
         _ignore_all_space: bool,
         skip_file_changes: bool,
         diff_merges: DiffMerges,
     ) -> Result<CommitData, Box<dyn Error>> {
-        let oid = gix::ObjectId::from_hex(oid.as_bytes())?;
         let commit = self.repo().find_commit(oid)?;
 
         let author_name = commit.author().map(|a| a.name.to_vec()).unwrap_or_default();
@@ -124,8 +120,8 @@ impl GixRepo {
     fn get_refs(
         &self,
         format: DecorateFormat,
-    ) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>> {
-        let mut refs_map: HashMap<String, Vec<String>> = HashMap::new();
+    ) -> Result<HashMap<gix::ObjectId, Vec<String>>, Box<dyn Error>> {
+        let mut refs_map: HashMap<gix::ObjectId, Vec<String>> = HashMap::new();
 
         let platform = self.repo().references()?;
         for reference in platform.all()? {
@@ -138,10 +134,7 @@ impl GixRepo {
                 continue;
             }
             if let Ok(commit) = reference.peel_to_commit() {
-                refs_map
-                    .entry(commit.id.to_string())
-                    .or_default()
-                    .push(name);
+                refs_map.entry(commit.id).or_default().push(name);
             }
         }
         Ok(refs_map)
@@ -252,8 +245,8 @@ impl Drop for GixRepo {
 }
 
 struct GixLogReadPlannerInner {
-    commit_oids: Vec<String>,
-    decorations: HashMap<String, Vec<String>>,
+    commit_oids: Vec<gix::ObjectId>,
+    decorations: HashMap<gix::ObjectId, Vec<String>>,
     current_index: AtomicUsize,
     batch_size: usize,
     max_threads: u64,
@@ -342,10 +335,14 @@ impl GitLogReader for GixLogReader {
         let skip_file_changes = !schema::needs_file_changes(column_indices);
         let oids = &self.inner.commit_oids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
-            let commit =
-                repo.get_commit(oid, self.ignore_all_space, skip_file_changes, self.diff_merges)?;
+            let commit = repo.get_commit(
+                *oid,
+                self.ignore_all_space,
+                skip_file_changes,
+                self.diff_merges,
+            )?;
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
-            writer.push(batch_idx, oid, &commit, refs);
+            writer.push(batch_idx, &oid.to_string(), &commit, refs);
         }
 
         writer.finish();
@@ -372,8 +369,9 @@ mod tests {
     #[test]
     fn skip_file_changes_returns_empty() {
         let repo = GixRepo::open(".").unwrap();
+        let oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
         let commit = repo
-            .get_commit(SECOND_COMMIT, false, true, DiffMerges::FirstParent)
+            .get_commit(oid, false, true, DiffMerges::FirstParent)
             .unwrap();
         assert!(commit.file_changes.is_empty());
     }
@@ -381,8 +379,9 @@ mod tests {
     #[test]
     fn no_skip_returns_file_changes() {
         let repo = GixRepo::open(".").unwrap();
+        let oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
         let commit = repo
-            .get_commit(SECOND_COMMIT, false, false, DiffMerges::FirstParent)
+            .get_commit(oid, false, false, DiffMerges::FirstParent)
             .unwrap();
         assert!(!commit.file_changes.is_empty());
     }
@@ -391,8 +390,9 @@ mod tests {
     fn get_refs_peels_annotated_tag_to_commit() {
         let repo = GixRepo::open(".").unwrap();
         let refs = repo.get_refs(DecorateFormat::Short).unwrap();
+        let tagged_oid = gix::ObjectId::from_hex(TAGGED_COMMIT.as_bytes()).unwrap();
         let names = refs
-            .get(TAGGED_COMMIT)
+            .get(&tagged_oid)
             .expect("tagged commit should have refs");
         assert!(names.iter().any(|n| n == "v0.1.1"));
     }
@@ -401,8 +401,9 @@ mod tests {
     fn get_refs_full_returns_full_ref_path() {
         let repo = GixRepo::open(".").unwrap();
         let refs = repo.get_refs(DecorateFormat::Full).unwrap();
+        let tagged_oid = gix::ObjectId::from_hex(TAGGED_COMMIT.as_bytes()).unwrap();
         let names = refs
-            .get(TAGGED_COMMIT)
+            .get(&tagged_oid)
             .expect("tagged commit should have refs");
         assert!(names.iter().any(|n| n == "refs/tags/v0.1.1"));
     }
@@ -411,6 +412,7 @@ mod tests {
     fn get_refs_returns_empty_for_commit_without_refs() {
         let repo = GixRepo::open(".").unwrap();
         let refs = repo.get_refs(DecorateFormat::Short).unwrap();
-        assert!(!refs.contains_key(SECOND_COMMIT));
+        let second_oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
+        assert!(!refs.contains_key(&second_oid));
     }
 }

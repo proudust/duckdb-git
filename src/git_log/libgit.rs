@@ -3,8 +3,8 @@ use crate::git_log::schema;
 use crate::git_log::types::{gitlink_numstat, CommitData, FileChange};
 use crate::git_log::vector::VectorInserter;
 use crate::git_log::{GitLogReadPlanner, GitLogReader};
-use ::git2::Repository;
 use duckdb::core::DataChunkHandle;
+use git2::Repository;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
@@ -40,7 +40,7 @@ impl LibGitRepo {
         &self,
         revision: Option<&str>,
         max_count: Option<usize>,
-    ) -> Result<Vec<String>, Box<dyn Error>> {
+    ) -> Result<Vec<git2::Oid>, Box<dyn Error>> {
         let mut revwalk = self.repo().revwalk()?;
 
         match revision {
@@ -60,7 +60,7 @@ impl LibGitRepo {
 
         let mut commit_oids = Vec::new();
         for oid in revwalk_iter {
-            commit_oids.push(oid?.to_string());
+            commit_oids.push(oid?);
         }
 
         Ok(commit_oids)
@@ -68,18 +68,17 @@ impl LibGitRepo {
 
     fn get_commit(
         &self,
-        oid: &str,
+        oid: git2::Oid,
         ignore_all_space: bool,
         skip_file_changes: bool,
         diff_merges: DiffMerges,
     ) -> Result<CommitData, Box<dyn Error>> {
-        let oid = ::git2::Oid::from_str(oid)?;
         let commit = self.repo().find_commit(oid)?;
         let author = commit.author();
         let committer = commit.committer();
 
-        let skip = skip_file_changes
-            || (diff_merges == DiffMerges::Off && commit.parent_count() > 1);
+        let skip =
+            skip_file_changes || (diff_merges == DiffMerges::Off && commit.parent_count() > 1);
         let file_changes = if skip {
             Vec::new()
         } else {
@@ -104,8 +103,8 @@ impl LibGitRepo {
     fn get_refs(
         &self,
         format: DecorateFormat,
-    ) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>> {
-        let mut refs_map: HashMap<String, Vec<String>> = HashMap::new();
+    ) -> Result<HashMap<git2::Oid, Vec<String>>, Box<dyn Error>> {
+        let mut refs_map: HashMap<git2::Oid, Vec<String>> = HashMap::new();
         for reference in self.repo().references()? {
             let reference = reference?;
             let name = match format {
@@ -116,10 +115,7 @@ impl LibGitRepo {
                 continue;
             }
             if let Ok(commit) = reference.peel_to_commit() {
-                refs_map
-                    .entry(commit.id().to_string())
-                    .or_default()
-                    .push(name);
+                refs_map.entry(commit.id()).or_default().push(name);
             }
         }
         Ok(refs_map)
@@ -127,20 +123,20 @@ impl LibGitRepo {
 
     fn get_file_changes(
         &self,
-        commit: &::git2::Commit,
+        commit: &git2::Commit,
         ignore_all_space: bool,
-    ) -> Result<Vec<FileChange>, ::git2::Error> {
+    ) -> Result<Vec<FileChange>, git2::Error> {
         let mut file_changes = Vec::new();
 
         if commit.parent_count() == 0 {
             let tree = commit.tree()?;
-            tree.walk(::git2::TreeWalkMode::PreOrder, |root, entry| {
-                if entry.kind() == Some(::git2::ObjectType::Tree) {
-                    return ::git2::TreeWalkResult::Ok;
+            tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+                if entry.kind() == Some(git2::ObjectType::Tree) {
+                    return git2::TreeWalkResult::Ok;
                 }
                 if let Some(name) = entry.name() {
                     let oid = entry.id();
-                    if entry.kind() == Some(::git2::ObjectType::Commit) {
+                    if entry.kind() == Some(git2::ObjectType::Commit) {
                         let (add_lines, del_lines) = gitlink_numstat("A");
                         file_changes.push(FileChange {
                             path: format!("{}{}", root, name),
@@ -169,7 +165,7 @@ impl LibGitRepo {
                         });
                     }
                 }
-                ::git2::TreeWalkResult::Ok
+                git2::TreeWalkResult::Ok
             })?;
             return Ok(file_changes);
         }
@@ -178,7 +174,7 @@ impl LibGitRepo {
         let parent_tree = parent.tree()?;
         let current_tree = commit.tree()?;
 
-        let mut diff_options = ::git2::DiffOptions::new();
+        let mut diff_options = git2::DiffOptions::new();
         if ignore_all_space {
             diff_options.ignore_whitespace(true);
         }
@@ -189,7 +185,7 @@ impl LibGitRepo {
             Some(&mut diff_options),
         )?;
 
-        let mut find_opts = ::git2::DiffFindOptions::new();
+        let mut find_opts = git2::DiffFindOptions::new();
         find_opts
             .renames(true)
             .rename_threshold(50)
@@ -203,14 +199,14 @@ impl LibGitRepo {
             let delta = diff.get_delta(i).unwrap();
 
             let status = match delta.status() {
-                ::git2::Delta::Added => "A",
-                ::git2::Delta::Deleted => "D",
-                ::git2::Delta::Modified => "M",
-                ::git2::Delta::Renamed => "R",
-                ::git2::Delta::Copied => "C",
-                ::git2::Delta::Ignored => "I",
-                ::git2::Delta::Untracked => "?",
-                ::git2::Delta::Typechange => "T",
+                git2::Delta::Added => "A",
+                git2::Delta::Deleted => "D",
+                git2::Delta::Modified => "M",
+                git2::Delta::Renamed => "R",
+                git2::Delta::Copied => "C",
+                git2::Delta::Ignored => "I",
+                git2::Delta::Untracked => "?",
+                git2::Delta::Typechange => "T",
                 _ => "U",
             };
 
@@ -223,15 +219,15 @@ impl LibGitRepo {
             };
 
             let old_path = match delta.status() {
-                ::git2::Delta::Renamed | ::git2::Delta::Copied => delta
+                git2::Delta::Renamed | git2::Delta::Copied => delta
                     .old_file()
                     .path()
                     .map(|p| p.to_string_lossy().to_string()),
                 _ => None,
             };
 
-            let is_gitlink = delta.new_file().mode() == ::git2::FileMode::Commit
-                || delta.old_file().mode() == ::git2::FileMode::Commit;
+            let is_gitlink = delta.new_file().mode() == git2::FileMode::Commit
+                || delta.old_file().mode() == git2::FileMode::Commit;
 
             let (blob_id, file_size, add_lines, del_lines) = if is_gitlink {
                 let id = if delta.new_file().path().is_some() {
@@ -275,12 +271,8 @@ impl LibGitRepo {
                         new_blob = self.repo().find_blob(new_id)?;
                         new_blob.content()
                     };
-                    super::xdiff::diff_line_counts(
-                        old_content,
-                        new_content,
-                        ignore_all_space,
-                    )
-                    .map_err(|e| ::git2::Error::from_str(&e.to_string()))?
+                    super::xdiff::diff_line_counts(old_content, new_content, ignore_all_space)
+                        .map_err(|e| git2::Error::from_str(&e.to_string()))?
                 };
 
                 (blob_id, file_size, add, del)
@@ -312,8 +304,8 @@ impl Drop for LibGitRepo {
 }
 
 struct LibGitLogReadPlannerInner {
-    commit_oids: Vec<String>,
-    decorations: HashMap<String, Vec<String>>,
+    commit_oids: Vec<git2::Oid>,
+    decorations: HashMap<git2::Oid, Vec<String>>,
     current_index: AtomicUsize,
     batch_size: usize,
     max_threads: u64,
@@ -402,10 +394,14 @@ impl GitLogReader for LibGitLogReader {
         let skip_file_changes = !schema::needs_file_changes(column_indices);
         let oids = &self.inner.commit_oids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
-            let commit =
-                repo.get_commit(oid, self.ignore_all_space, skip_file_changes, self.diff_merges)?;
+            let commit = repo.get_commit(
+                *oid,
+                self.ignore_all_space,
+                skip_file_changes,
+                self.diff_merges,
+            )?;
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
-            writer.push(batch_idx, oid, &commit, refs);
+            writer.push(batch_idx, &oid.to_string(), &commit, refs);
         }
 
         writer.finish();
@@ -432,8 +428,9 @@ mod tests {
     #[test]
     fn skip_file_changes_returns_empty() {
         let repo = LibGitRepo::open(".").unwrap();
+        let oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
         let commit = repo
-            .get_commit(SECOND_COMMIT, false, true, DiffMerges::FirstParent)
+            .get_commit(oid, false, true, DiffMerges::FirstParent)
             .unwrap();
         assert!(commit.file_changes.is_empty());
     }
@@ -441,8 +438,9 @@ mod tests {
     #[test]
     fn no_skip_returns_file_changes() {
         let repo = LibGitRepo::open(".").unwrap();
+        let oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
         let commit = repo
-            .get_commit(SECOND_COMMIT, false, false, DiffMerges::FirstParent)
+            .get_commit(oid, false, false, DiffMerges::FirstParent)
             .unwrap();
         assert!(!commit.file_changes.is_empty());
     }
@@ -451,8 +449,9 @@ mod tests {
     fn get_refs_peels_annotated_tag_to_commit() {
         let repo = LibGitRepo::open(".").unwrap();
         let refs = repo.get_refs(DecorateFormat::Short).unwrap();
+        let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
         let names = refs
-            .get(TAGGED_COMMIT)
+            .get(&tagged_oid)
             .expect("tagged commit should have refs");
         assert!(names.iter().any(|n| n == "v0.1.1"));
     }
@@ -461,8 +460,9 @@ mod tests {
     fn get_refs_full_returns_full_ref_path() {
         let repo = LibGitRepo::open(".").unwrap();
         let refs = repo.get_refs(DecorateFormat::Full).unwrap();
+        let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
         let names = refs
-            .get(TAGGED_COMMIT)
+            .get(&tagged_oid)
             .expect("tagged commit should have refs");
         assert!(names.iter().any(|n| n == "refs/tags/v0.1.1"));
     }
@@ -471,6 +471,7 @@ mod tests {
     fn get_refs_returns_empty_for_commit_without_refs() {
         let repo = LibGitRepo::open(".").unwrap();
         let refs = repo.get_refs(DecorateFormat::Short).unwrap();
-        assert!(!refs.contains_key(SECOND_COMMIT));
+        let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
+        assert!(!refs.contains_key(&second_oid));
     }
 }

@@ -13,6 +13,8 @@ make test # E2E tests (sqllogictest, libgit-only binary)
 make test_gix # E2E tests (sqllogictest, libgit + gix)
 make bench # Run benchmarks (libgit + gix backends)
 BENCH_REPO=/path/to/large/repo make bench # Run benchmarks on a specific repo
+make bench_baseline # Run benchmarks and save results as baseline
+make bench_compare # Re-run benchmarks and print before/after comparison table
 ```
 
 ## Project structure

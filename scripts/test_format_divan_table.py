@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from format_divan_table import convert, parse_divan_output
+from format_divan_table import convert, duration_to_ns, parse_divan_output, size_to_bytes
 
 
 SAMPLE_OUTPUT = """\
@@ -59,6 +59,22 @@ class FormatDivanTableTest(unittest.TestCase):
     def test_passthrough_when_no_rows(self) -> None:
         text = "compiling crate v0.1.0\n"
         self.assertEqual(convert(text), text)
+
+    def test_duration_to_ns(self) -> None:
+        self.assertEqual(duration_to_ns("76.99 ms"), 76.99e6)
+        self.assertEqual(duration_to_ns("1.061 s"), 1.061e9)
+        self.assertEqual(duration_to_ns("21 ns"), 21.0)
+        self.assertEqual(duration_to_ns("3.5 µs"), 3.5e3)
+        self.assertIsNone(duration_to_ns("-"))
+        self.assertIsNone(duration_to_ns(""))
+
+    def test_size_to_bytes(self) -> None:
+        self.assertEqual(size_to_bytes("449.7 KB"), 449.7e3)
+        self.assertEqual(size_to_bytes("63.54 MB"), 63.54e6)
+        self.assertEqual(size_to_bytes("5.119 GB"), 5.119e9)
+        self.assertEqual(size_to_bytes("8 B"), 8.0)
+        self.assertIsNone(size_to_bytes("-"))
+        self.assertIsNone(size_to_bytes(""))
 
 
 if __name__ == "__main__":

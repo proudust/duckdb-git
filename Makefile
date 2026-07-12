@@ -1,4 +1,4 @@
-.PHONY: clean clean_all debug_gix release_gix test_gix test_default
+.PHONY: clean clean_all debug_gix release_gix test_gix test_default bench bench_baseline bench_compare check_bench_baseline
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -41,11 +41,23 @@ test_gix: debug_gix test_extension_debug
 BENCH_RESULTS_DIR ?= target/bench-results
 BENCH_RESULTS_FILE ?= $(BENCH_RESULTS_DIR)/latest.md
 BENCH_RESULTS_RAW_FILE ?= $(BENCH_RESULTS_DIR)/latest-raw.txt
+BENCH_BASELINE_RAW_FILE ?= $(BENCH_RESULTS_DIR)/baseline-raw.txt
+BENCH_COMPARE_FILE ?= $(BENCH_RESULTS_DIR)/compare.md
 
 bench:
 	@mkdir -p $(BENCH_RESULTS_DIR)
 	cargo bench -q --no-default-features --features bundled,libgit-backend,gix-backend 2>&1 \
 		| tee $(BENCH_RESULTS_RAW_FILE) | python3 scripts/format_divan_table.py | tee $(BENCH_RESULTS_FILE)
+
+bench_baseline: bench
+	cp $(BENCH_RESULTS_RAW_FILE) $(BENCH_BASELINE_RAW_FILE)
+
+check_bench_baseline:
+	@test -f $(BENCH_BASELINE_RAW_FILE) \
+		|| { echo "No baseline found at $(BENCH_BASELINE_RAW_FILE). Run 'make bench_baseline' first."; exit 1; }
+
+bench_compare: check_bench_baseline bench
+	python3 scripts/compare_divan_table.py $(BENCH_BASELINE_RAW_FILE) $(BENCH_RESULTS_RAW_FILE) | tee $(BENCH_COMPARE_FILE)
 
 clean: clean_build clean_rust
 clean_all: clean_configure clean

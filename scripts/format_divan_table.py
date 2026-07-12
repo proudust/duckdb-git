@@ -8,8 +8,26 @@ import sys
 from dataclasses import dataclass, field
 
 DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ns|µs|us|ms|s)\s*$")
+SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)\s*$")
 BRANCH_RE = re.compile(r"^[├╰│\s─]+")
 COLUMN_SPLIT_RE = re.compile(r"\s+│\s+")
+
+DURATION_UNITS_NS = {"ns": 1.0, "µs": 1e3, "us": 1e3, "ms": 1e6, "s": 1e9}
+SIZE_UNITS_BYTES = {"B": 1.0, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12}
+
+
+def duration_to_ns(text: str) -> float | None:
+    match = DURATION_RE.search(text.strip())
+    if not match:
+        return None
+    return float(match.group(1)) * DURATION_UNITS_NS[match.group(2)]
+
+
+def size_to_bytes(text: str) -> float | None:
+    match = SIZE_RE.search(text.strip())
+    if not match:
+        return None
+    return float(match.group(1)) * SIZE_UNITS_BYTES[match.group(2)]
 
 
 @dataclass
@@ -189,6 +207,34 @@ def parse_divan_output(text: str) -> list[BenchRow]:
     return state.rows
 
 
+def render_markdown_table(
+    headers: list[str], rows: list[list[str]], aligns: list[str]
+) -> str:
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def fmt_row(cells: list[str]) -> str:
+        parts: list[str] = []
+        for i, cell in enumerate(cells):
+            if aligns[i] == "r":
+                parts.append(cell.rjust(widths[i]))
+            else:
+                parts.append(cell.ljust(widths[i]))
+        return "| " + " | ".join(parts) + " |"
+
+    separator_parts: list[str] = []
+    for i, width in enumerate(widths):
+        dash = "-" * max(width, 3)
+        separator_parts.append(f"{dash}:" if aligns[i] == "r" else f":{dash}")
+    separator_line = "|" + "|".join(separator_parts) + "|"
+
+    lines = [fmt_row(headers), separator_line]
+    lines.extend(fmt_row(row) for row in rows)
+    return "\n".join(lines)
+
+
 def format_table(rows: list[BenchRow]) -> str:
     headers = ["Method", "Mean", "StdDev", "Allocs", "Allocated"]
     table_rows = [
@@ -201,32 +247,7 @@ def format_table(rows: list[BenchRow]) -> str:
         ]
         for row in rows
     ]
-
-    widths = [len(header) for header in headers]
-    for row in table_rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(cell))
-
-    def fmt_row(cells: list[str], aligns: list[str]) -> str:
-        parts: list[str] = []
-        for i, cell in enumerate(cells):
-            if aligns[i] == "r":
-                parts.append(cell.rjust(widths[i]))
-            else:
-                parts.append(cell.ljust(widths[i]))
-        return "| " + " | ".join(parts) + " |"
-
-    aligns = ["l", "r", "r", "r", "r"]
-    header_line = fmt_row(headers, aligns)
-    separator_parts: list[str] = []
-    for i, width in enumerate(widths):
-        dash = "-" * max(width, 3)
-        separator_parts.append(f"{dash}:" if aligns[i] == "r" else f":{dash}")
-    separator_line = "|" + "|".join(separator_parts) + "|"
-
-    lines = [header_line, separator_line]
-    lines.extend(fmt_row(row, aligns) for row in table_rows)
-    return "\n".join(lines)
+    return render_markdown_table(headers, table_rows, ["l", "r", "r", "r", "r"])
 
 
 def convert(text: str) -> str:

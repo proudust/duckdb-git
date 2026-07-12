@@ -32,7 +32,10 @@ duckdb = { version = "~1.10504.0", features = ["vtab"] }
 git2 = { version = "0.20.2", default-features = false, features = [
     "vendored-libgit2",
 ], optional = true }
-gix = { version = "0.72", optional = true }
+gix = { version = "0.72", optional = true, default-features = false, features = [
+    "max-performance-safe",
+    "basic",
+] }
 
 [dev-dependencies]
 divan = "0.1"

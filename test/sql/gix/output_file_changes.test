@@ -53,20 +53,20 @@ SELECT COUNT(*) FROM (
 ----
 0
 
-# Submodule gitlink (A): gix does not yet match libgit/git numstat
+# Submodule gitlink (A): numstat 1/0, file_size NULL
 query IIII
 SELECT change.status, change.add_lines, change.del_lines, change.file_size
 FROM (SELECT unnest(file_changes) AS change
       FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e', max_count=1, backend='gix'))
 WHERE change.path = 'extension-ci-tools';
 ----
-A	0	0	0
+A	1	0	NULL
 
-# Submodule gitlink (M): gix does not yet match libgit/git numstat
+# Submodule gitlink (M): numstat 1/1, file_size NULL (commit bumps extension-ci-tools submodule)
 query IIII
 SELECT change.status, change.add_lines, change.del_lines, change.file_size
 FROM (SELECT unnest(file_changes) AS change
       FROM git_log('.', revision='81e3dcae30d1b953227e49c0ce69d5747abcf6ab', max_count=1, backend='gix'))
 WHERE change.path = 'extension-ci-tools';
 ----
-M	0	0	0
+M	1	1	NULL

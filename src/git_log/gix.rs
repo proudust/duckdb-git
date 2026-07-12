@@ -1,6 +1,6 @@
 use crate::git_log::params::{DecorateFormat, DiffMerges, GitLogParameter};
 use crate::git_log::schema;
-use crate::git_log::types::{CommitData, FileChange};
+use crate::git_log::types::{gitlink_numstat, CommitData, FileChange};
 use crate::git_log::vector::VectorInserter;
 use crate::git_log::{GitLogReadPlanner, GitLogReader};
 use duckdb::core::DataChunkHandle;
@@ -200,19 +200,28 @@ impl GixRepo {
                 };
 
                 let id = change.id();
-                let file_size = self
-                    .repo()
-                    .find_object(id)
-                    .map(|o| o.data.len() as i64)
-                    .unwrap_or(0);
+                let is_gitlink = entry_mode.is_commit();
 
-                let (add_lines, del_lines) = change
-                    .diff(&mut resource_cache)
-                    .ok()
-                    .and_then(|mut platform| platform.line_counts().ok())
-                    .flatten()
-                    .map(|counts| (counts.insertions as i32, counts.removals as i32))
-                    .unwrap_or((0, 0));
+                let file_size = if is_gitlink {
+                    None
+                } else {
+                    id.try_header()
+                        .ok()
+                        .flatten()
+                        .map(|h| h.size() as i64)
+                };
+
+                let (add_lines, del_lines) = if is_gitlink {
+                    gitlink_numstat(status)
+                } else {
+                    change
+                        .diff(&mut resource_cache)
+                        .ok()
+                        .and_then(|mut platform| platform.line_counts().ok())
+                        .flatten()
+                        .map(|counts| (counts.insertions as i32, counts.removals as i32))
+                        .unwrap_or((0, 0))
+                };
 
                 resource_cache.clear_resource_cache_keep_allocation();
 
@@ -221,7 +230,7 @@ impl GixRepo {
                     old_path,
                     status,
                     blob_id: id.to_string(),
-                    file_size: Some(file_size),
+                    file_size,
                     add_lines,
                     del_lines,
                 });

@@ -172,7 +172,7 @@ impl GixRepo {
                 };
                 if entry_mode.is_tree() {
                     return Ok::<_, std::convert::Infallible>(
-                        gix::object::tree::diff::Action::Continue,
+                        gix::object::tree::diff::Action::Continue(()),
                     );
                 }
 
@@ -235,7 +235,7 @@ impl GixRepo {
                     del_lines,
                 });
 
-                Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
+                Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue(()))
             })?;
 
         Ok(file_changes)

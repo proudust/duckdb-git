@@ -1,4 +1,6 @@
-use crate::git_log::params::{DecorateFormat, DiffMerges, GitLogParameter};
+use crate::git_log::params::{
+    unresolved_revision_error, DecorateFormat, DiffMerges, GitLogParameter, RevisionTerm,
+};
 use crate::git_log::schema;
 use crate::git_log::types::{gitlink_numstat, CommitData, FileChange};
 use crate::git_log::vector::VectorInserter;
@@ -38,15 +40,26 @@ impl LibGitRepo {
 
     fn get_commit_oids(
         &self,
-        revision: Option<&str>,
+        revision: Option<&[RevisionTerm]>,
         max_count: Option<usize>,
     ) -> Result<Vec<git2::Oid>, Box<dyn Error>> {
         let mut revwalk = self.repo().revwalk()?;
 
         match revision {
-            Some(rev) => {
-                let obj = self.repo().revparse_single(rev)?;
-                revwalk.push(obj.id())?;
+            Some(terms) => {
+                for term in terms {
+                    let obj = self
+                        .repo()
+                        .revparse_single(&term.spec)
+                        .map_err(|_| -> Box<dyn Error> {
+                            unresolved_revision_error(&term.origin).into()
+                        })?;
+                    if term.negate {
+                        revwalk.hide(obj.id())?;
+                    } else {
+                        revwalk.push(obj.id())?;
+                    }
+                }
             }
             None => {
                 revwalk.push_head()?;

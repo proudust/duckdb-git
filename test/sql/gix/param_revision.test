@@ -1,0 +1,33 @@
+# name: test/sql/gix/param_revision.test
+# description: revision parameter with multiple revspecs (gix backend)
+# group: [git]
+
+require duckdb_git
+
+require-env GIX_BACKEND 1
+
+# range: A..B returns commits reachable from B but not A
+query I
+SELECT commit_id FROM git_log('.', revision='4314d2e85b2789604122c0972fb54630fd918844..3f9eb76282f6ca05b343858c6adbd081d06a4143', backend='gix') ORDER BY commit_id;
+----
+3f9eb76282f6ca05b343858c6adbd081d06a4143
+
+# LIST form: a positive tip plus a ^excluded revspec is equivalent to the range above
+query I
+SELECT commit_id FROM git_log('.', revision=['3f9eb76282f6ca05b343858c6adbd081d06a4143', '^4314d2e85b2789604122c0972fb54630fd918844'], backend='gix') ORDER BY commit_id;
+----
+3f9eb76282f6ca05b343858c6adbd081d06a4143
+
+# Symmetric difference (a...b) is explicitly unsupported
+statement error
+SELECT * FROM git_log('.', revision='4314d2e85b2789604122c0972fb54630fd918844...3f9eb76282f6ca05b343858c6adbd081d06a4143', backend='gix');
+----
+symmetric difference ('4314d2e85b2789604122c0972fb54630fd918844...3f9eb76282f6ca05b343858c6adbd081d06a4143') is not supported in revision; see git-log(1)
+
+# Excluding everything with no positive tip has no starting point to walk from,
+# so it returns an empty result (matching `git log ^HEAD~3`, which exits 0 with
+# no output rather than erroring).
+query I
+SELECT count(*) FROM git_log('.', revision=['^4314d2e85b2789604122c0972fb54630fd918844'], backend='gix');
+----
+0

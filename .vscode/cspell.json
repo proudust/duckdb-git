@@ -24,6 +24,7 @@
         "pytz",
         "repr",
         "revparse",
+        "revspecs",
         "revwalk",
         "rlib",
         "sqllogictest",

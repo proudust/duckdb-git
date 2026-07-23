@@ -1,4 +1,6 @@
-use crate::git_log::params::{DecorateFormat, DiffMerges, GitLogParameter};
+use crate::git_log::params::{
+    unresolved_revision_error, DecorateFormat, DiffMerges, GitLogParameter, RevisionTerm,
+};
 use crate::git_log::schema;
 use crate::git_log::types::{gitlink_numstat, CommitData, FileChange};
 use crate::git_log::vector::VectorInserter;
@@ -37,15 +39,33 @@ impl GixRepo {
 
     fn get_commit_oids(
         &self,
-        revision: Option<&str>,
+        revision: Option<&[RevisionTerm]>,
         max_count: Option<usize>,
     ) -> Result<Vec<gix::ObjectId>, Box<dyn Error>> {
-        let tip = match revision {
-            Some(rev) => self.repo().rev_parse_single(rev)?.detach(),
-            None => self.repo().head_id()?.detach(),
+        let (tips, hidden) = match revision {
+            Some(terms) => {
+                let mut tips = Vec::new();
+                let mut hidden = Vec::new();
+                for term in terms {
+                    let id = self
+                        .repo()
+                        .rev_parse_single(term.spec.as_str())
+                        .map_err(|_| -> Box<dyn Error> {
+                            unresolved_revision_error(&term.origin).into()
+                        })?
+                        .detach();
+                    if term.negate {
+                        hidden.push(id);
+                    } else {
+                        tips.push(id);
+                    }
+                }
+                (tips, hidden)
+            }
+            None => (vec![self.repo().head_id()?.detach()], Vec::new()),
         };
 
-        let walk = self.repo().rev_walk([tip]);
+        let walk = self.repo().rev_walk(tips).with_hidden(hidden);
         let all = walk.all()?;
 
         let oids: Result<Vec<gix::ObjectId>, Box<dyn Error>> = match max_count {

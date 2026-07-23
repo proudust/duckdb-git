@@ -46,6 +46,9 @@ select * from git_log('.');
 -- git -C /path/to/repo log main -10
 select commit_id, message from git_log('/path/to/repo', revision='main', max_count=10);
 
+-- git log dev ^main
+select commit_id, message from git_log('.', revision=['dev', '^main']);
+
 -- git log --decorate
 select commit_id, decorate from git_log('.') where len(decorate) > 0;
 
@@ -64,17 +67,18 @@ Returns commit history as a table.
 
 #### Parameters
 
-| Name               | Type      | Default       | Description                                                   |
-| ------------------ | --------- | ------------- | ------------------------------------------------------------- |
-| `repo_path`        | `VARCHAR` | *(required)*  | Path to the Git repository                                    |
-| `revision`         | `VARCHAR` | `NULL` (HEAD) | Branch, tag, or commit hash                                   |
-| `max_count`        | `INTEGER` | `NULL` (all)  | Maximum number of commits to return                           |
-| `ignore_all_space` | `BOOLEAN` | `false`       | Ignore whitespace changes in diffs                            |
-| `diff_merges`      | `VARCHAR` | `'off'`       | How to show diffs for merge commits (`off`, `first-parent`).  |
-| `decorate`         | `VARCHAR` | `'short'`     | Ref name format in the `decorate` column (`short` or `full`). |
-| `backend`          | `VARCHAR` | `'libgit'`    | Determines how history is retrieved. [^1]                     |
+| Name               | Type                         | Default       | Description                                                   |
+| ------------------ | ---------------------------- | ------------- | ------------------------------------------------------------- |
+| `repo_path`        | `VARCHAR`                    | *(required)*  | Path to the Git repository                                    |
+| `revision`         | `VARCHAR` or `LIST(VARCHAR)` | `NULL` (HEAD) | One or more revspecs, same syntax as `git log`. [^1]          |
+| `max_count`        | `INTEGER`                    | `NULL` (all)  | Maximum number of commits to return                           |
+| `ignore_all_space` | `BOOLEAN`                    | `false`       | Ignore whitespace changes in diffs                            |
+| `diff_merges`      | `VARCHAR`                    | `'off'`       | How to show diffs for merge commits (`off`, `first-parent`).  |
+| `decorate`         | `VARCHAR`                    | `'short'`     | Ref name format in the `decorate` column (`short` or `full`). |
+| `backend`          | `VARCHAR`                    | `'libgit'`    | Determines how history is retrieved. [^2]                     |
 
-[^1]: If you build with the `gix-backend` feature included, you can also specify `gix`.
+[^1]: Symmetric differences (`a...b`) are not supported.
+[^2]: If you build with the `gix-backend` feature included, you can also specify `gix`.
 
 #### Output Columns
 

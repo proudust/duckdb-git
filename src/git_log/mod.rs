@@ -3,6 +3,8 @@ mod gix;
 #[cfg(feature = "libgit-backend")]
 mod libgit;
 mod params;
+#[cfg(feature = "gix-backend")]
+mod remote;
 #[cfg(feature = "libgit-backend")]
 mod xdiff;
 mod schema;
@@ -72,8 +74,22 @@ impl VTab for GitLogVTab {
 
         let column_indices = info.get_column_indices();
 
+        let repo_path: std::borrow::Cow<str> = if params::is_remote_url(&params.repo_path) {
+            #[cfg(feature = "gix-backend")]
+            {
+                let local = remote::ensure_local_clone(&params.repo_path)?;
+                std::borrow::Cow::Owned(local.to_string_lossy().into_owned())
+            }
+            #[cfg(not(feature = "gix-backend"))]
+            {
+                return Err("remote URLs require the 'gix-backend' feature".into());
+            }
+        } else {
+            std::borrow::Cow::Borrowed(&params.repo_path)
+        };
+
         let planner: Arc<dyn GitLogReadPlanner> = Arc::from(open_planner(
-            &params.repo_path,
+            &repo_path,
             params.backend,
             params,
             &column_indices,

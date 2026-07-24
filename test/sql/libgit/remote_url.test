@@ -1,0 +1,17 @@
+# name: test/sql/libgit/remote_url.test
+# description: git_log with remote HTTP(S) URL
+# group: [git]
+
+require duckdb_git
+
+require-env GIX_BACKEND 1
+
+# Default backend (libgit) reads from a gix-fetched bare clone
+query I
+SELECT count(*) FROM git_log('https://github.com/proudust/duckdb-git.git', max_count=3);
+----
+3
+
+# decorate column works on remote repos
+statement ok
+SELECT commit_id, decorate FROM git_log('https://github.com/proudust/duckdb-git.git', max_count=1);

@@ -1,0 +1,13 @@
+# name: test/sql/gix/remote_url.test
+# description: git_log with remote HTTP(S) URL (gix backend)
+# group: [git]
+
+require duckdb_git
+
+require-env GIX_BACKEND 1
+
+# gix backend reads from the cached bare clone
+query I
+SELECT count(*) FROM git_log('https://github.com/proudust/duckdb-git.git', max_count=3, backend='gix');
+----
+3

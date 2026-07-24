@@ -52,6 +52,9 @@ select commit_id, message from git_log('.', revision=['dev', '^main']);
 -- git log --decorate
 select commit_id, decorate from git_log('.') where len(decorate) > 0;
 
+-- Query a remote repository
+select commit_id, message from git_log('https://github.com/proudust/duckdb-git.git', max_count=5);
+
 -- git log --numstat -10 --diff-merges=first-parent
 select commit_id, change.path, change.add_lines, change.del_lines
 from (
@@ -69,7 +72,7 @@ Returns commit history as a table.
 
 | Name               | Type                         | Default       | Description                                                   |
 | ------------------ | ---------------------------- | ------------- | ------------------------------------------------------------- |
-| `repo_path`        | `VARCHAR`                    | *(required)*  | Path to the Git repository                                    |
+| `repo_path`        | `VARCHAR`                    | *(required)*  | Path to the Git repository, or an `http(s)://` URL [^3]       |
 | `revision`         | `VARCHAR` or `LIST(VARCHAR)` | `NULL` (HEAD) | One or more revspecs, same syntax as `git log`. [^1]          |
 | `max_count`        | `INTEGER`                    | `NULL` (all)  | Maximum number of commits to return                           |
 | `ignore_all_space` | `BOOLEAN`                    | `false`       | Ignore whitespace changes in diffs                            |
@@ -79,6 +82,7 @@ Returns commit history as a table.
 
 [^1]: Symmetric differences (`a...b`) are not supported.
 [^2]: If you build with the `gix-backend` feature included, you can also specify `gix`.
+[^3]: The repository is cached as a bare clone in the OS temp directory and refreshed on each query. Only anonymous HTTPS is supported.
 
 #### Output Columns
 

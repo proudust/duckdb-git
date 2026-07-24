@@ -26,16 +26,20 @@ loadable-extension = ["duckdb/loadable-extension"]
 bundled = ["duckdb/bundled"]                       # For benchmark
 libgit-backend = ["dep:git2"]
 # Additive: can be combined with libgit-backend (default) for runtime backend selection.
-gix-backend = ["dep:gix"]
+gix-backend = [
+    "dep:gix",
+    "gix/max-performance-safe",
+    "gix/basic",
+]
 
 [dependencies]
 duckdb = { version = "~1.10505.0", features = ["vtab"] }
 git2 = { version = "0.20.2", default-features = false, features = [
     "vendored-libgit2",
 ], optional = true }
-gix = { version = "0.85", optional = true, default-features = false, features = [
-    "max-performance-safe",
-    "basic",
+gix = { version = "0.85", default-features = false, optional = true, features = [
+    "blocking-network-client",
+    "blocking-http-transport-reqwest-rust-tls",
     "sha1",
 ] }
 

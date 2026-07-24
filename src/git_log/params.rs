@@ -208,6 +208,12 @@ pub fn named_parameters() -> Vec<(String, LogicalTypeHandle)> {
     ]
 }
 
+pub(crate) fn is_remote_url(s: &str) -> bool {
+    s.split_once("://").map_or(false, |(scheme, _)| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    })
+}
+
 pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Error>> {
     let repo_path = bind.get_parameter(0).to_string();
 
@@ -468,6 +474,27 @@ mod tests {
             unresolved_revision_error("main..typo"),
             "ambiguous argument 'main..typo': unknown revision or path not in the working tree."
         );
+    }
+
+    #[test]
+    fn is_remote_url_accepts_http() {
+        assert!(is_remote_url("http://example.com/repo.git"));
+        assert!(is_remote_url("https://github.com/foo/bar"));
+        assert!(is_remote_url("HTTP://EXAMPLE.COM/repo"));
+        assert!(is_remote_url("HTTPS://example.com/repo"));
+        assert!(is_remote_url("Http://example.com/repo"));
+    }
+
+    #[test]
+    fn is_remote_url_rejects_local_and_other_schemes() {
+        assert!(!is_remote_url("."));
+        assert!(!is_remote_url("/path/to/repo"));
+        assert!(!is_remote_url("relative/path"));
+        assert!(!is_remote_url("C:\\path\\to\\repo"));
+        assert!(!is_remote_url(""));
+        assert!(!is_remote_url("ssh://git@github.com/foo/bar"));
+        assert!(!is_remote_url("git://github.com/foo/bar"));
+        assert!(!is_remote_url("file:///path/to/repo"));
     }
 
     #[test]

@@ -225,10 +225,7 @@ impl GixRepo {
                 let file_size = if is_gitlink {
                     None
                 } else {
-                    id.try_header()
-                        .ok()
-                        .flatten()
-                        .map(|h| h.size() as i64)
+                    id.try_header().ok().flatten().map(|h| h.size() as i64)
                 };
 
                 let (add_lines, del_lines) = if is_gitlink {
@@ -371,7 +368,15 @@ impl GitLogReader for GixLogReader {
                 self.diff_merges,
             )?;
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
-            writer.push(batch_idx, &oid.to_string(), &commit, refs);
+            // TODO(gix): implement contained_branches / contained_tags
+            writer.push(
+                batch_idx,
+                &oid.to_string(),
+                &commit,
+                refs,
+                &empty_refs,
+                &empty_refs,
+            );
         }
 
         writer.finish();

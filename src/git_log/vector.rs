@@ -15,6 +15,10 @@ pub struct VectorInserter<'a> {
     parents_offset: usize,
     decorate: Option<ListVector<'a>>,
     decorate_offset: usize,
+    contained_branches: Option<ListVector<'a>>,
+    contained_branches_offset: usize,
+    contained_tags: Option<ListVector<'a>>,
+    contained_tags_offset: usize,
     file_changes: Option<ListVector<'a>>,
     file_changes_offset: usize,
 }
@@ -31,6 +35,8 @@ impl<'a> VectorInserter<'a> {
         let mut message = None;
         let mut parents = None;
         let mut decorate = None;
+        let mut contained_branches = None;
+        let mut contained_tags = None;
         let mut file_changes = None;
 
         for (chunk_pos, &orig_idx) in column_indices.iter().enumerate() {
@@ -51,6 +57,12 @@ impl<'a> VectorInserter<'a> {
                 Ok(GitLogColumn::Message) => message = Some(chunk.flat_vector(chunk_pos)),
                 Ok(GitLogColumn::Parents) => parents = Some(chunk.list_vector(chunk_pos)),
                 Ok(GitLogColumn::Decorate) => decorate = Some(chunk.list_vector(chunk_pos)),
+                Ok(GitLogColumn::ContainedBranches) => {
+                    contained_branches = Some(chunk.list_vector(chunk_pos))
+                }
+                Ok(GitLogColumn::ContainedTags) => {
+                    contained_tags = Some(chunk.list_vector(chunk_pos))
+                }
                 Ok(GitLogColumn::FileChanges) => file_changes = Some(chunk.list_vector(chunk_pos)),
                 Err(()) => {}
             }
@@ -69,12 +81,24 @@ impl<'a> VectorInserter<'a> {
             parents_offset: 0,
             decorate,
             decorate_offset: 0,
+            contained_branches,
+            contained_branches_offset: 0,
+            contained_tags,
+            contained_tags_offset: 0,
             file_changes,
             file_changes_offset: 0,
         }
     }
 
-    pub fn push(&mut self, idx: usize, oid: &str, commit: &CommitData, refs: &[String]) {
+    pub fn push(
+        &mut self,
+        idx: usize,
+        oid: &str,
+        commit: &CommitData,
+        refs: &[String],
+        contained_branches: &[String],
+        contained_tags: &[String],
+    ) {
         if let Some(v) = self.commit_id.as_mut() {
             v.insert(idx, oid);
         }
@@ -123,6 +147,30 @@ impl<'a> VectorInserter<'a> {
             self.decorate_offset += refs.len();
         }
 
+        if let Some(contained_branches_vec) = self.contained_branches.as_mut() {
+            let contained_branches_child = contained_branches_vec
+                .child(self.contained_branches_offset + contained_branches.len());
+            for (i, name) in contained_branches.iter().enumerate() {
+                contained_branches_child.insert(self.contained_branches_offset + i, name.as_str());
+            }
+            contained_branches_vec.set_entry(
+                idx,
+                self.contained_branches_offset,
+                contained_branches.len(),
+            );
+            self.contained_branches_offset += contained_branches.len();
+        }
+
+        if let Some(contained_tags_vec) = self.contained_tags.as_mut() {
+            let contained_tags_child =
+                contained_tags_vec.child(self.contained_tags_offset + contained_tags.len());
+            for (i, name) in contained_tags.iter().enumerate() {
+                contained_tags_child.insert(self.contained_tags_offset + i, name.as_str());
+            }
+            contained_tags_vec.set_entry(idx, self.contained_tags_offset, contained_tags.len());
+            self.contained_tags_offset += contained_tags.len();
+        }
+
         if let Some(fc_vec) = self.file_changes.as_mut() {
             let file_changes = &commit.file_changes;
             let len = file_changes.len();
@@ -168,6 +216,12 @@ impl<'a> VectorInserter<'a> {
         }
         if let Some(decorate_vec) = self.decorate.as_mut() {
             decorate_vec.set_len(self.decorate_offset);
+        }
+        if let Some(contained_branches_vec) = self.contained_branches.as_mut() {
+            contained_branches_vec.set_len(self.contained_branches_offset);
+        }
+        if let Some(contained_tags_vec) = self.contained_tags.as_mut() {
+            contained_tags_vec.set_len(self.contained_tags_offset);
         }
         if let Some(fc_vec) = self.file_changes.as_mut() {
             fc_vec.set_len(self.file_changes_offset);

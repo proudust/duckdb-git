@@ -48,12 +48,12 @@ impl LibGitRepo {
         match revision {
             Some(terms) => {
                 for term in terms {
-                    let obj = self
-                        .repo()
-                        .revparse_single(&term.spec)
-                        .map_err(|_| -> Box<dyn Error> {
-                            unresolved_revision_error(&term.origin).into()
-                        })?;
+                    let obj =
+                        self.repo()
+                            .revparse_single(&term.spec)
+                            .map_err(|_| -> Box<dyn Error> {
+                                unresolved_revision_error(&term.origin).into()
+                            })?;
                     if term.negate {
                         revwalk.hide(obj.id())?;
                     } else {
@@ -132,6 +132,82 @@ impl LibGitRepo {
             }
         }
         Ok(refs_map)
+    }
+
+    fn get_contained_branches(
+        &self,
+        format: DecorateFormat,
+        include_remotes: bool,
+    ) -> Result<HashMap<git2::Oid, Vec<String>>, Box<dyn Error>> {
+        let filter = if include_remotes {
+            None
+        } else {
+            Some(git2::BranchType::Local)
+        };
+        let mut map: HashMap<git2::Oid, Vec<String>> = HashMap::new();
+        for branch in self.repo().branches(filter)? {
+            let (branch, _branch_type) = branch?;
+            let reference = branch.get();
+            if reference.kind() != Some(git2::ReferenceType::Direct) {
+                continue;
+            }
+            let name = match format {
+                DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
+                DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            if let Ok(tip) = reference.peel_to_commit() {
+                self.mark_ancestry(tip.id(), &name, &mut map)?;
+            }
+        }
+        for names in map.values_mut() {
+            names.sort_unstable();
+        }
+        Ok(map)
+    }
+
+    fn get_contained_tags(
+        &self,
+        format: DecorateFormat,
+    ) -> Result<HashMap<git2::Oid, Vec<String>>, Box<dyn Error>> {
+        let mut map: HashMap<git2::Oid, Vec<String>> = HashMap::new();
+        for reference in self.repo().references()? {
+            let reference = reference?;
+            if !reference.is_tag() {
+                continue;
+            }
+            let name = match format {
+                DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
+                DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            if let Ok(tip) = reference.peel_to_commit() {
+                self.mark_ancestry(tip.id(), &name, &mut map)?;
+            }
+        }
+        for names in map.values_mut() {
+            names.sort_unstable();
+        }
+        Ok(map)
+    }
+
+    /// Walks every ancestor of `tip` (inclusive) and stamps it with `name`.
+    fn mark_ancestry(
+        &self,
+        tip: git2::Oid,
+        name: &str,
+        map: &mut HashMap<git2::Oid, Vec<String>>,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut revwalk = self.repo().revwalk()?;
+        revwalk.push(tip)?;
+        for oid in revwalk {
+            map.entry(oid?).or_default().push(name.to_string());
+        }
+        Ok(())
     }
 
     fn get_file_changes(
@@ -319,6 +395,8 @@ impl Drop for LibGitRepo {
 struct LibGitLogReadPlannerInner {
     commit_oids: Vec<git2::Oid>,
     decorations: HashMap<git2::Oid, Vec<String>>,
+    contained_branches: HashMap<git2::Oid, Vec<String>>,
+    contained_tags: HashMap<git2::Oid, Vec<String>>,
     current_index: AtomicUsize,
     batch_size: usize,
     max_threads: u64,
@@ -343,6 +421,16 @@ impl LibGitLogReadPlanner {
         } else {
             HashMap::new()
         };
+        let contained_branches = if schema::needs_contained_branches(column_indices) {
+            repo.get_contained_branches(params.decorate, params.include_remotes)?
+        } else {
+            HashMap::new()
+        };
+        let contained_tags = if schema::needs_contained_tags(column_indices) {
+            repo.get_contained_tags(params.decorate)?
+        } else {
+            HashMap::new()
+        };
 
         let (max_threads, batch_size) = compute_parallelism(commit_oids.len());
 
@@ -350,6 +438,8 @@ impl LibGitLogReadPlanner {
             inner: Arc::new(LibGitLogReadPlannerInner {
                 commit_oids,
                 decorations,
+                contained_branches,
+                contained_tags,
                 current_index: AtomicUsize::new(0),
                 batch_size,
                 max_threads,
@@ -414,7 +504,13 @@ impl GitLogReader for LibGitLogReader {
                 self.diff_merges,
             )?;
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
-            writer.push(batch_idx, &oid.to_string(), &commit, refs);
+            let branches = self
+                .inner
+                .contained_branches
+                .get(oid)
+                .unwrap_or(&empty_refs);
+            let tags = self.inner.contained_tags.get(oid).unwrap_or(&empty_refs);
+            writer.push(batch_idx, &oid.to_string(), &commit, refs, branches, tags);
         }
 
         writer.finish();
@@ -486,5 +582,106 @@ mod tests {
         let refs = repo.get_refs(DecorateFormat::Short).unwrap();
         let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
         assert!(!refs.contains_key(&second_oid));
+    }
+
+    #[test]
+    fn get_contained_tags_marks_all_descendant_tags() {
+        let repo = LibGitRepo::open(".").unwrap();
+        let tags = repo.get_contained_tags(DecorateFormat::Short).unwrap();
+        let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
+        let names = tags
+            .get(&tagged_oid)
+            .expect("tagged commit should have contained tags");
+        assert_eq!(
+            names,
+            &vec!["v0.1.1", "v0.1.2", "v0.2.0", "v0.3.0", "v0.4.0"]
+        );
+    }
+
+    #[test]
+    fn get_contained_tags_full_format() {
+        let repo = LibGitRepo::open(".").unwrap();
+        let tags = repo.get_contained_tags(DecorateFormat::Full).unwrap();
+        let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
+        let names = tags
+            .get(&tagged_oid)
+            .expect("tagged commit should have contained tags");
+        assert!(names.iter().any(|n| n == "refs/tags/v0.1.1"));
+    }
+
+    #[test]
+    fn get_contained_branches_marks_ancestor() {
+        let repo = LibGitRepo::open(".").unwrap();
+        let head = repo.repo().head().unwrap();
+        let head_name = head.shorthand().unwrap().to_string();
+        let branches = repo
+            .get_contained_branches(DecorateFormat::Short, false)
+            .unwrap();
+        let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
+        let names = branches
+            .get(&second_oid)
+            .expect("second commit should be contained in branches");
+        assert!(names.iter().any(|n| n == &head_name));
+    }
+
+    #[test]
+    fn get_contained_branches_excludes_remotes_by_default() {
+        let repo = LibGitRepo::open(".").unwrap();
+        let branches = repo
+            .get_contained_branches(DecorateFormat::Short, false)
+            .unwrap();
+        let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
+        let names = branches
+            .get(&second_oid)
+            .expect("second commit should be contained in branches");
+        assert!(!names.iter().any(|n| n.starts_with("origin/")));
+    }
+
+    #[test]
+    fn get_contained_branches_includes_remotes_when_requested() {
+        let repo = LibGitRepo::open(".").unwrap();
+        let branches = repo
+            .get_contained_branches(DecorateFormat::Short, true)
+            .unwrap();
+        let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
+        let names = branches
+            .get(&second_oid)
+            .expect("second commit should be contained in branches");
+        assert!(names.iter().any(|n| n == "origin/main"));
+    }
+
+    #[test]
+    fn get_contained_branches_skips_symbolic_head_alias() {
+        let repo = LibGitRepo::open(".").unwrap();
+        let branches = repo
+            .get_contained_branches(DecorateFormat::Short, true)
+            .unwrap();
+        assert!(!branches
+            .values()
+            .any(|names| names.iter().any(|n| n == "origin/HEAD")));
+    }
+
+    #[test]
+    fn get_contained_branches_self_inclusive() {
+        let repo = LibGitRepo::open(".").unwrap();
+        let head = repo.repo().head().unwrap();
+        let head_oid = head.peel_to_commit().unwrap().id();
+        let head_name = head.shorthand().unwrap().to_string();
+        let branches = repo
+            .get_contained_branches(DecorateFormat::Short, false)
+            .unwrap();
+        let names = branches
+            .get(&head_oid)
+            .expect("HEAD commit should contain its own branch");
+        assert!(names.iter().any(|n| n == &head_name));
+    }
+
+    #[test]
+    fn contained_tags_are_sorted() {
+        let repo = LibGitRepo::open(".").unwrap();
+        let tags = repo.get_contained_tags(DecorateFormat::Short).unwrap();
+        let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
+        let names = tags.get(&tagged_oid).unwrap();
+        assert!(names.windows(2).all(|w| w[0] <= w[1]));
     }
 }

@@ -17,7 +17,9 @@ pub enum GitLogColumn {
     Message = 7,
     Parents = 8,
     Decorate = 9,
-    FileChanges = 10,
+    ContainedBranches = 10,
+    ContainedTags = 11,
+    FileChanges = 12,
 }
 
 impl GitLogColumn {
@@ -41,7 +43,9 @@ impl TryFrom<u64> for GitLogColumn {
             7 => Ok(Self::Message),
             8 => Ok(Self::Parents),
             9 => Ok(Self::Decorate),
-            10 => Ok(Self::FileChanges),
+            10 => Ok(Self::ContainedBranches),
+            11 => Ok(Self::ContainedTags),
+            12 => Ok(Self::FileChanges),
             _ => Err(()),
         }
     }
@@ -107,6 +111,14 @@ pub fn bind_columns(bind: &BindInfo) -> Result<(), Box<dyn std::error::Error>> {
         LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
     bind.add_result_column("decorate", decorate_array_type);
 
+    let contained_branches_array_type =
+        LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
+    bind.add_result_column("contained_branches", contained_branches_array_type);
+
+    let contained_tags_array_type =
+        LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
+    bind.add_result_column("contained_tags", contained_tags_array_type);
+
     let file_changes_array_type = LogicalTypeHandle::list(&file_change_struct_type());
     bind.add_result_column("file_changes", file_changes_array_type);
 
@@ -115,6 +127,14 @@ pub fn bind_columns(bind: &BindInfo) -> Result<(), Box<dyn std::error::Error>> {
 
 pub fn needs_refs(column_indices: &[u64]) -> bool {
     column_indices.contains(&GitLogColumn::Decorate.index())
+}
+
+pub fn needs_contained_branches(column_indices: &[u64]) -> bool {
+    column_indices.contains(&GitLogColumn::ContainedBranches.index())
+}
+
+pub fn needs_contained_tags(column_indices: &[u64]) -> bool {
+    column_indices.contains(&GitLogColumn::ContainedTags.index())
 }
 
 pub fn needs_file_changes(column_indices: &[u64]) -> bool {
@@ -127,20 +147,32 @@ mod tests {
 
     #[test]
     fn column_indices_are_contiguous() {
-        for i in 0..=10 {
+        for i in 0..=12 {
             assert!(
                 GitLogColumn::try_from(i).is_ok(),
                 "missing column index {i}"
             );
         }
-        assert!(GitLogColumn::try_from(11).is_err());
+        assert!(GitLogColumn::try_from(13).is_err());
     }
 
     #[test]
     fn projection_helpers() {
         assert!(needs_refs(&[GitLogColumn::Decorate.index()]));
+        assert!(needs_contained_branches(&[
+            GitLogColumn::ContainedBranches.index()
+        ]));
+        assert!(needs_contained_tags(&[GitLogColumn::ContainedTags.index()]));
         assert!(needs_file_changes(&[GitLogColumn::FileChanges.index()]));
         assert!(!needs_refs(&[
+            GitLogColumn::CommitId.index(),
+            GitLogColumn::Author.index(),
+        ]));
+        assert!(!needs_contained_branches(&[
+            GitLogColumn::CommitId.index(),
+            GitLogColumn::Author.index(),
+        ]));
+        assert!(!needs_contained_tags(&[
             GitLogColumn::CommitId.index(),
             GitLogColumn::Author.index(),
         ]));

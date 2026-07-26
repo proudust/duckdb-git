@@ -4,6 +4,7 @@
 //! Measures execution time and memory allocation across different query scenarios:
 //! - metadata_only: core revwalk + metadata reading
 //! - with_diff: diff computation
+//! - with_contains: contained_branches / contained_tags computation
 //! - limit_10: LIMIT query performance
 //!
 //! Each scenario is run for `backend='libgit'` and, when compiled with `gix-backend`,
@@ -110,6 +111,24 @@ fn with_diff(bencher: divan::Bencher, config: ThreadedConfig) {
     let path = repo_path();
     let db = setup_duckdb(config.threads);
     let sql = git_log_sql("count(file_changes)", config.backend);
+    bencher.bench_local(|| {
+        let mut stmt = db.prepare(&sql).unwrap();
+        stmt.query_row([&path], |row| row.get::<_, i64>(0)).unwrap()
+    });
+}
+
+// NOTE: until the gix backend implements real contains logic (tracked separately),
+// its `contained_branches`/`contained_tags` are an empty-list stub, so the `gix`
+// arm here measures a no-op, not real work. Only the `libgit` numbers are
+// meaningful for judging the per-ref-revwalk cost of this feature.
+#[divan::bench(args = THREADED_CONFIGS, sample_count = 10)]
+fn with_contains(bencher: divan::Bencher, config: ThreadedConfig) {
+    let path = repo_path();
+    let db = setup_duckdb(config.threads);
+    let sql = git_log_sql(
+        "count(contained_branches) + count(contained_tags)",
+        config.backend,
+    );
     bencher.bench_local(|| {
         let mut stmt = db.prepare(&sql).unwrap();
         stmt.query_row([&path], |row| row.get::<_, i64>(0)).unwrap()

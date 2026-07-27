@@ -17,6 +17,46 @@ thread_local! {
     static CACHED_REPO: RefCell<Option<(String, Repository)>> = const { RefCell::new(None) };
 }
 
+struct RefBits {
+    words: Vec<u64>,
+}
+
+impl RefBits {
+    fn new(bit_count: usize) -> Self {
+        RefBits {
+            words: vec![0u64; (bit_count + 63) / 64],
+        }
+    }
+
+    fn set(&mut self, bit: usize) {
+        self.words[bit / 64] |= 1u64 << (bit % 64);
+    }
+
+    fn or_assign(&mut self, other: &RefBits) {
+        for (a, b) in self.words.iter_mut().zip(&other.words) {
+            *a |= b;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.words.iter().all(|&w| w == 0)
+    }
+
+    fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
+        self.words.iter().enumerate().flat_map(|(wi, &word)| {
+            let mut remaining = word;
+            std::iter::from_fn(move || {
+                if remaining == 0 {
+                    return None;
+                }
+                let bit = remaining.trailing_zeros() as usize;
+                remaining &= remaining - 1;
+                Some(wi * 64 + bit)
+            })
+        })
+    }
+}
+
 struct LibGitRepo {
     repo: Option<Repository>,
     repo_path: String,
@@ -144,7 +184,7 @@ impl LibGitRepo {
         } else {
             Some(git2::BranchType::Local)
         };
-        let mut map: HashMap<git2::Oid, Vec<String>> = HashMap::new();
+        let mut refs = Vec::new();
         for branch in self.repo().branches(filter)? {
             let (branch, _branch_type) = branch?;
             let reference = branch.get();
@@ -159,20 +199,17 @@ impl LibGitRepo {
                 continue;
             }
             if let Ok(tip) = reference.peel_to_commit() {
-                self.mark_ancestry(tip.id(), &name, &mut map)?;
+                refs.push((tip.id(), name));
             }
         }
-        for names in map.values_mut() {
-            names.sort_unstable();
-        }
-        Ok(map)
+        self.build_contained_map(&refs)
     }
 
     fn get_contained_tags(
         &self,
         format: DecorateFormat,
     ) -> Result<HashMap<git2::Oid, Vec<String>>, Box<dyn Error>> {
-        let mut map: HashMap<git2::Oid, Vec<String>> = HashMap::new();
+        let mut refs = Vec::new();
         for reference in self.repo().references()? {
             let reference = reference?;
             if !reference.is_tag() {
@@ -186,28 +223,56 @@ impl LibGitRepo {
                 continue;
             }
             if let Ok(tip) = reference.peel_to_commit() {
-                self.mark_ancestry(tip.id(), &name, &mut map)?;
+                refs.push((tip.id(), name));
             }
         }
-        for names in map.values_mut() {
-            names.sort_unstable();
-        }
-        Ok(map)
+        self.build_contained_map(&refs)
     }
 
-    /// Walks every ancestor of `tip` (inclusive) and stamps it with `name`.
-    fn mark_ancestry(
+    fn build_contained_map(
         &self,
-        tip: git2::Oid,
-        name: &str,
-        map: &mut HashMap<git2::Oid, Vec<String>>,
-    ) -> Result<(), Box<dyn Error>> {
-        let mut revwalk = self.repo().revwalk()?;
-        revwalk.push(tip)?;
-        for oid in revwalk {
-            map.entry(oid?).or_default().push(name.to_string());
+        refs: &[(git2::Oid, String)],
+    ) -> Result<HashMap<git2::Oid, Vec<String>>, Box<dyn Error>> {
+        if refs.is_empty() {
+            return Ok(HashMap::new());
         }
-        Ok(())
+
+        let mut names: Vec<String> = refs.iter().map(|(_, name)| name.clone()).collect();
+        names.sort_unstable();
+        names.dedup();
+
+        let mut revwalk = self.repo().revwalk()?;
+        revwalk.set_sorting(git2::Sort::TOPOLOGICAL)?;
+
+        let mut pending: HashMap<git2::Oid, RefBits> = HashMap::new();
+        for (tip, name) in refs {
+            let bit = names.binary_search(name).expect("name collected above");
+            pending
+                .entry(*tip)
+                .or_insert_with(|| RefBits::new(names.len()))
+                .set(bit);
+            revwalk.push(*tip)?;
+        }
+
+        let mut result: HashMap<git2::Oid, Vec<String>> = HashMap::new();
+        for oid in revwalk {
+            let oid = oid?;
+            let Some(bits) = pending.remove(&oid) else {
+                continue;
+            };
+            if !bits.is_empty() {
+                result.insert(oid, bits.iter_ones().map(|i| names[i].clone()).collect());
+            }
+            let commit = self.repo().find_commit(oid)?;
+            for parent in commit.parent_ids() {
+                pending
+                    .entry(parent)
+                    .or_insert_with(|| RefBits::new(names.len()))
+                    .or_assign(&bits);
+            }
+        }
+
+        Ok(result)
     }
 
     fn get_file_changes(
@@ -683,5 +748,61 @@ mod tests {
         let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
         let names = tags.get(&tagged_oid).unwrap();
         assert!(names.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[test]
+    fn build_contained_map_handles_merge_fan_in() {
+        let dir = std::env::temp_dir().join(format!(
+            "duckdb-git-test-merge-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repo = git2::Repository::init(&dir).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+
+        let a_id = repo.commit(None, &sig, &sig, "A", &tree, &[]).unwrap();
+        let a = repo.find_commit(a_id).unwrap();
+        let b_id = repo.commit(None, &sig, &sig, "B", &tree, &[&a]).unwrap();
+        let b = repo.find_commit(b_id).unwrap();
+        let c_id = repo.commit(None, &sig, &sig, "C", &tree, &[&a]).unwrap();
+        let c = repo.find_commit(c_id).unwrap();
+        let d_id = repo
+            .commit(None, &sig, &sig, "D", &tree, &[&b, &c])
+            .unwrap();
+        let d = repo.find_commit(d_id).unwrap();
+
+        repo.tag_lightweight("left", b.as_object(), false).unwrap();
+        repo.tag_lightweight("right", c.as_object(), false).unwrap();
+        repo.tag_lightweight("merged", d.as_object(), false)
+            .unwrap();
+
+        let lgr = LibGitRepo::open(dir.to_str().unwrap()).unwrap();
+        let tags = lgr.get_contained_tags(DecorateFormat::Short).unwrap();
+
+        assert_eq!(tags.get(&d_id).unwrap(), &vec!["merged".to_string()]);
+        assert_eq!(
+            tags.get(&b_id).unwrap(),
+            &vec!["left".to_string(), "merged".to_string()]
+        );
+        assert_eq!(
+            tags.get(&c_id).unwrap(),
+            &vec!["merged".to_string(), "right".to_string()]
+        );
+        assert_eq!(
+            tags.get(&a_id).unwrap(),
+            &vec![
+                "left".to_string(),
+                "merged".to_string(),
+                "right".to_string()
+            ]
+        );
+
+        drop(lgr);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

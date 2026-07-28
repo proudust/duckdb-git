@@ -17,44 +17,57 @@ thread_local! {
     static CACHED_REPO: RefCell<Option<(String, Repository)>> = const { RefCell::new(None) };
 }
 
-struct RefBits {
-    words: Vec<u64>,
+enum RefBits {
+    Inline(u64),
+    Words(Box<[u64]>),
 }
 
 impl RefBits {
-    fn new(bit_count: usize) -> Self {
-        RefBits {
-            words: vec![0u64; (bit_count + 63) / 64],
+    fn new(word_count: usize) -> Self {
+        if word_count <= 1 {
+            RefBits::Inline(0)
+        } else {
+            RefBits::Words(vec![0u64; word_count].into_boxed_slice())
+        }
+    }
+
+    fn as_slice(&self) -> &[u64] {
+        match self {
+            RefBits::Inline(word) => std::slice::from_ref(word),
+            RefBits::Words(words) => words,
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u64] {
+        match self {
+            RefBits::Inline(word) => std::slice::from_mut(word),
+            RefBits::Words(words) => words,
         }
     }
 
     fn set(&mut self, bit: usize) {
-        self.words[bit / 64] |= 1u64 << (bit % 64);
+        self.as_mut_slice()[bit / 64] |= 1u64 << (bit % 64);
     }
 
     fn or_assign(&mut self, other: &RefBits) {
-        for (a, b) in self.words.iter_mut().zip(&other.words) {
+        for (a, b) in self.as_mut_slice().iter_mut().zip(other.as_slice()) {
             *a |= b;
         }
     }
+}
 
-    fn is_empty(&self) -> bool {
-        self.words.iter().all(|&w| w == 0)
-    }
-
-    fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
-        self.words.iter().enumerate().flat_map(|(wi, &word)| {
-            let mut remaining = word;
-            std::iter::from_fn(move || {
-                if remaining == 0 {
-                    return None;
-                }
-                let bit = remaining.trailing_zeros() as usize;
-                remaining &= remaining - 1;
-                Some(wi * 64 + bit)
-            })
+fn iter_ones(words: &[u64]) -> impl Iterator<Item = usize> + '_ {
+    words.iter().enumerate().flat_map(|(wi, &word)| {
+        let mut remaining = word;
+        std::iter::from_fn(move || {
+            if remaining == 0 {
+                return None;
+            }
+            let bit = remaining.trailing_zeros() as usize;
+            remaining &= remaining - 1;
+            Some(wi * 64 + bit)
         })
-    }
+    })
 }
 
 struct LibGitRepo {
@@ -244,12 +257,14 @@ impl LibGitRepo {
         let mut revwalk = self.repo().revwalk()?;
         revwalk.set_sorting(git2::Sort::TOPOLOGICAL)?;
 
+        let word_count = names.len().div_ceil(64);
+
         let mut pending: HashMap<git2::Oid, RefBits> = HashMap::new();
         for (tip, name) in refs {
             let bit = names.binary_search(name).expect("name collected above");
             pending
                 .entry(*tip)
-                .or_insert_with(|| RefBits::new(names.len()))
+                .or_insert_with(|| RefBits::new(word_count))
                 .set(bit);
             revwalk.push(*tip)?;
         }
@@ -260,14 +275,17 @@ impl LibGitRepo {
             let Some(bits) = pending.remove(&oid) else {
                 continue;
             };
-            if !bits.is_empty() {
-                result.insert(oid, bits.iter_ones().map(|i| names[i].clone()).collect());
-            }
+            result.insert(
+                oid,
+                iter_ones(bits.as_slice())
+                    .map(|i| names[i].clone())
+                    .collect(),
+            );
             let commit = self.repo().find_commit(oid)?;
             for parent in commit.parent_ids() {
                 pending
                     .entry(parent)
-                    .or_insert_with(|| RefBits::new(names.len()))
+                    .or_insert_with(|| RefBits::new(word_count))
                     .or_assign(&bits);
             }
         }

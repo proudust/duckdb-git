@@ -7,13 +7,98 @@ use crate::git_log::vector::VectorInserter;
 use crate::git_log::{GitLogReadPlanner, GitLogReader};
 use duckdb::core::DataChunkHandle;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 thread_local! {
     static CACHED_REPO: RefCell<Option<(String, gix::ThreadSafeRepository)>> = const { RefCell::new(None) };
+}
+
+enum RefBits {
+    Inline(u64),
+    Words(Box<[u64]>),
+}
+
+impl RefBits {
+    fn new(word_count: usize) -> Self {
+        if word_count <= 1 {
+            RefBits::Inline(0)
+        } else {
+            RefBits::Words(vec![0u64; word_count].into_boxed_slice())
+        }
+    }
+
+    fn as_slice(&self) -> &[u64] {
+        match self {
+            RefBits::Inline(word) => std::slice::from_ref(word),
+            RefBits::Words(words) => words,
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u64] {
+        match self {
+            RefBits::Inline(word) => std::slice::from_mut(word),
+            RefBits::Words(words) => words,
+        }
+    }
+
+    fn set(&mut self, bit: usize) {
+        self.as_mut_slice()[bit / 64] |= 1u64 << (bit % 64);
+    }
+
+    fn or_assign(&mut self, other: &RefBits) {
+        for (a, b) in self.as_mut_slice().iter_mut().zip(other.as_slice()) {
+            *a |= b;
+        }
+    }
+}
+
+fn iter_ones(words: &[u64]) -> impl Iterator<Item = usize> + '_ {
+    words.iter().enumerate().flat_map(|(wi, &word)| {
+        let mut remaining = word;
+        std::iter::from_fn(move || {
+            if remaining == 0 {
+                return None;
+            }
+            let bit = remaining.trailing_zeros() as usize;
+            remaining &= remaining - 1;
+            Some(wi * 64 + bit)
+        })
+    })
+}
+
+struct ContainedIndex {
+    branch_names: Vec<String>,
+    tag_names: Vec<String>,
+    branch_words: usize,
+    bits: HashMap<gix::ObjectId, RefBits>,
+}
+
+impl ContainedIndex {
+    fn empty() -> Self {
+        ContainedIndex {
+            branch_names: Vec::new(),
+            tag_names: Vec::new(),
+            branch_words: 0,
+            bits: HashMap::new(),
+        }
+    }
+
+    fn branches_of(&self, oid: &gix::ObjectId) -> impl Iterator<Item = &str> {
+        let branch_words = self.branch_words;
+        self.bits.get(oid).into_iter().flat_map(move |bits| {
+            iter_ones(&bits.as_slice()[..branch_words]).map(|i| self.branch_names[i].as_str())
+        })
+    }
+
+    fn tags_of(&self, oid: &gix::ObjectId) -> impl Iterator<Item = &str> {
+        let branch_words = self.branch_words;
+        self.bits.get(oid).into_iter().flat_map(move |bits| {
+            iter_ones(&bits.as_slice()[branch_words..]).map(|i| self.tag_names[i].as_str())
+        })
+    }
 }
 
 struct GixRepo {
@@ -160,6 +245,132 @@ impl GixRepo {
         Ok(refs_map)
     }
 
+    fn get_contained(
+        &self,
+        format: DecorateFormat,
+        need_branches: bool,
+        need_tags: bool,
+        wanted: &HashSet<gix::ObjectId>,
+    ) -> Result<ContainedIndex, Box<dyn Error>> {
+        let platform = self.repo().references()?;
+
+        let collect = |iter: gix::reference::iter::Iter<'_, '_>,
+                       out: &mut Vec<(gix::ObjectId, String)>|
+         -> Result<(), Box<dyn Error>> {
+            for reference in iter {
+                let mut reference = reference.map_err(|e| e.to_string())?;
+                if matches!(reference.inner.target, gix::refs::Target::Symbolic(_)) {
+                    continue;
+                }
+                let name = match format {
+                    DecorateFormat::Short => reference.name().shorten().to_string(),
+                    DecorateFormat::Full => reference.name().as_bstr().to_string(),
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                if let Ok(commit) = reference.peel_to_commit() {
+                    out.push((commit.id, name));
+                }
+            }
+            Ok(())
+        };
+
+        let mut branch_refs = Vec::new();
+        if need_branches {
+            collect(platform.local_branches()?, &mut branch_refs)?;
+            collect(platform.remote_branches()?, &mut branch_refs)?;
+        }
+
+        let mut tag_refs = Vec::new();
+        if need_tags {
+            collect(platform.tags()?, &mut tag_refs)?;
+        }
+
+        if branch_refs.is_empty() && tag_refs.is_empty() {
+            return Ok(ContainedIndex::empty());
+        }
+
+        let mut branch_names: Vec<String> =
+            branch_refs.iter().map(|(_, name)| name.clone()).collect();
+        branch_names.sort_unstable();
+        branch_names.dedup();
+
+        let mut tag_names: Vec<String> = tag_refs.iter().map(|(_, name)| name.clone()).collect();
+        tag_names.sort_unstable();
+        tag_names.dedup();
+
+        let branch_words = branch_names.len().div_ceil(64);
+        let tag_words = tag_names.len().div_ceil(64);
+        let total_words = branch_words + tag_words;
+
+        if wanted.is_empty() {
+            return Ok(ContainedIndex {
+                branch_names,
+                tag_names,
+                branch_words,
+                bits: HashMap::new(),
+            });
+        }
+
+        let mut pending: HashMap<gix::ObjectId, RefBits> = HashMap::new();
+        for (tip, name) in &branch_refs {
+            let bit = branch_names
+                .binary_search(name)
+                .expect("name collected above");
+            pending
+                .entry(*tip)
+                .or_insert_with(|| RefBits::new(total_words))
+                .set(bit);
+        }
+        for (tip, name) in &tag_refs {
+            let bit =
+                branch_words * 64 + tag_names.binary_search(name).expect("name collected above");
+            pending
+                .entry(*tip)
+                .or_insert_with(|| RefBits::new(total_words))
+                .set(bit);
+        }
+
+        // Bit propagation requires every child to be visited before its parents, which
+        // `rev_walk`'s breadth-first and commit-time orders do not guarantee.
+        let tips: Vec<gix::ObjectId> = pending.keys().copied().collect();
+        let topo = gix::traverse::commit::topo::Builder::from_iters(
+            self.repo(),
+            tips,
+            None::<Vec<gix::ObjectId>>,
+        )
+        .with_commit_graph(self.repo().commit_graph_if_enabled().ok().flatten())
+        .build()?;
+
+        let mut bits: HashMap<gix::ObjectId, RefBits> = HashMap::new();
+        for info in topo {
+            let info = info?;
+            let Some(cur_bits) = pending.remove(&info.id) else {
+                continue;
+            };
+            for parent in &info.parent_ids {
+                pending
+                    .entry(*parent)
+                    .or_insert_with(|| RefBits::new(total_words))
+                    .or_assign(&cur_bits);
+            }
+            if wanted.contains(&info.id) {
+                bits.insert(info.id, cur_bits);
+                if bits.len() == wanted.len() {
+                    break;
+                }
+            }
+        }
+
+        Ok(ContainedIndex {
+            branch_names,
+            tag_names,
+            branch_words,
+            bits,
+        })
+    }
+
     fn get_file_changes(
         &self,
         commit: &gix::Commit,
@@ -273,6 +484,7 @@ impl Drop for GixRepo {
 struct GixLogReadPlannerInner {
     commit_oids: Vec<gix::ObjectId>,
     decorations: HashMap<gix::ObjectId, Vec<String>>,
+    contained: ContainedIndex,
     current_index: AtomicUsize,
     batch_size: usize,
     max_threads: u64,
@@ -297,6 +509,14 @@ impl GixLogReadPlanner {
         } else {
             HashMap::new()
         };
+        let need_branches = schema::needs_contained_branches(column_indices);
+        let need_tags = schema::needs_contained_tags(column_indices);
+        let contained = if need_branches || need_tags {
+            let wanted: HashSet<gix::ObjectId> = commit_oids.iter().copied().collect();
+            repo.get_contained(params.decorate, need_branches, need_tags, &wanted)?
+        } else {
+            ContainedIndex::empty()
+        };
 
         let (max_threads, batch_size) = compute_parallelism(commit_oids.len());
 
@@ -304,6 +524,7 @@ impl GixLogReadPlanner {
             inner: Arc::new(GixLogReadPlannerInner {
                 commit_oids,
                 decorations,
+                contained,
                 current_index: AtomicUsize::new(0),
                 batch_size,
                 max_threads,
@@ -358,7 +579,6 @@ impl GitLogReader for GixLogReader {
         let mut writer = VectorInserter::new(output, column_indices);
 
         let empty_refs: Vec<String> = Vec::new();
-        let empty_contained: [&str; 0] = [];
         let skip_file_changes = !schema::needs_file_changes(column_indices);
         let oids = &self.inner.commit_oids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
@@ -369,15 +589,9 @@ impl GitLogReader for GixLogReader {
                 self.diff_merges,
             )?;
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
-            // TODO(gix): implement contained_branches / contained_tags
-            writer.push(
-                batch_idx,
-                &oid.to_string(),
-                &commit,
-                refs,
-                &empty_contained,
-                &empty_contained,
-            );
+            let branches: Vec<&str> = self.inner.contained.branches_of(oid).collect();
+            let tags: Vec<&str> = self.inner.contained.tags_of(oid).collect();
+            writer.push(batch_idx, &oid.to_string(), &commit, refs, &branches, &tags);
         }
 
         writer.finish();
@@ -449,5 +663,198 @@ mod tests {
         let refs = repo.get_refs(DecorateFormat::Short).unwrap();
         let second_oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
         assert!(!refs.contains_key(&second_oid));
+    }
+
+    #[test]
+    fn get_contained_tags_marks_all_descendant_tags() {
+        let repo = GixRepo::open(".").unwrap();
+        let tagged_oid = gix::ObjectId::from_hex(TAGGED_COMMIT.as_bytes()).unwrap();
+        let wanted: HashSet<gix::ObjectId> = [tagged_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Short, false, true, &wanted)
+            .unwrap();
+        let names: Vec<&str> = index.tags_of(&tagged_oid).collect();
+        assert_eq!(
+            names,
+            vec!["v0.1.1", "v0.1.2", "v0.2.0", "v0.3.0", "v0.4.0"]
+        );
+    }
+
+    #[test]
+    fn get_contained_tags_full_format() {
+        let repo = GixRepo::open(".").unwrap();
+        let tagged_oid = gix::ObjectId::from_hex(TAGGED_COMMIT.as_bytes()).unwrap();
+        let wanted: HashSet<gix::ObjectId> = [tagged_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Full, false, true, &wanted)
+            .unwrap();
+        assert!(index.tags_of(&tagged_oid).any(|n| n == "refs/tags/v0.1.1"));
+    }
+
+    #[test]
+    fn get_contained_branches_marks_ancestor() {
+        let repo = GixRepo::open(".").unwrap();
+        let head_name = repo.repo().head_name().unwrap().unwrap();
+        let head_name = head_name.shorten().to_string();
+        let second_oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
+        let wanted: HashSet<gix::ObjectId> = [second_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Short, true, false, &wanted)
+            .unwrap();
+        assert!(index.branches_of(&second_oid).any(|n| n == head_name));
+    }
+
+    #[test]
+    fn get_contained_branches_includes_remotes() {
+        let repo = GixRepo::open(".").unwrap();
+        let second_oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
+        let wanted: HashSet<gix::ObjectId> = [second_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Short, true, false, &wanted)
+            .unwrap();
+        assert!(index.branches_of(&second_oid).any(|n| n == "origin/main"));
+    }
+
+    #[test]
+    fn get_contained_branches_skips_symbolic_head_alias() {
+        let repo = GixRepo::open(".").unwrap();
+        let index = repo
+            .get_contained(DecorateFormat::Short, true, false, &HashSet::new())
+            .unwrap();
+        assert!(!index.branch_names.iter().any(|n| n == "origin/HEAD"));
+    }
+
+    #[test]
+    fn get_contained_branches_self_inclusive() {
+        let repo = GixRepo::open(".").unwrap();
+        let head_oid = repo.repo().head_id().unwrap().detach();
+        let head_name = repo.repo().head_name().unwrap().unwrap();
+        let head_name = head_name.shorten().to_string();
+        let wanted: HashSet<gix::ObjectId> = [head_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Short, true, false, &wanted)
+            .unwrap();
+        assert!(index.branches_of(&head_oid).any(|n| n == head_name));
+    }
+
+    #[test]
+    fn contained_tags_are_sorted() {
+        let repo = GixRepo::open(".").unwrap();
+        let tagged_oid = gix::ObjectId::from_hex(TAGGED_COMMIT.as_bytes()).unwrap();
+        let wanted: HashSet<gix::ObjectId> = [tagged_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Short, false, true, &wanted)
+            .unwrap();
+        let names: Vec<&str> = index.tags_of(&tagged_oid).collect();
+        assert!(names.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    fn init_fan_in_repo() -> (std::path::PathBuf, [gix::ObjectId; 4]) {
+        let dir = std::env::temp_dir().join(format!(
+            "duckdb-git-test-gix-merge-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repo = gix::init(&dir).unwrap();
+        let sig = gix::actor::Signature {
+            name: "Test".into(),
+            email: "test@example.com".into(),
+            time: gix::date::Time::new(0, 0),
+        };
+        let tree = repo
+            .write_object(gix::objs::Tree::empty())
+            .unwrap()
+            .detach();
+
+        // Written via write_object rather than commit_as: the latter requires the
+        // updated ref to already point at the first parent, which C (branching off A
+        // while the ref is at B) would violate.
+        let commit = |message: &str, parents: Vec<gix::ObjectId>| {
+            repo.write_object(&gix::objs::Commit {
+                tree,
+                parents: parents.into(),
+                author: sig.clone(),
+                committer: sig.clone(),
+                encoding: None,
+                message: message.into(),
+                extra_headers: Vec::new(),
+            })
+            .unwrap()
+            .detach()
+        };
+
+        let a_id = commit("A", vec![]);
+        let b_id = commit("B", vec![a_id]);
+        let c_id = commit("C", vec![a_id]);
+        let d_id = commit("D", vec![b_id, c_id]);
+
+        use gix::refs::transaction::PreviousValue;
+        repo.tag_reference("left", b_id, PreviousValue::Any)
+            .unwrap();
+        repo.tag_reference("right", c_id, PreviousValue::Any)
+            .unwrap();
+        repo.tag_reference("merged", d_id, PreviousValue::Any)
+            .unwrap();
+
+        (dir, [a_id, b_id, c_id, d_id])
+    }
+
+    #[test]
+    fn get_contained_handles_merge_fan_in() {
+        let (dir, [a_id, b_id, c_id, d_id]) = init_fan_in_repo();
+
+        let gr = GixRepo::open(dir.to_str().unwrap()).unwrap();
+        let wanted: HashSet<gix::ObjectId> = [a_id, b_id, c_id, d_id].into_iter().collect();
+        let index = gr
+            .get_contained(DecorateFormat::Short, false, true, &wanted)
+            .unwrap();
+
+        assert_eq!(index.tags_of(&d_id).collect::<Vec<_>>(), vec!["merged"]);
+        assert_eq!(
+            index.tags_of(&b_id).collect::<Vec<_>>(),
+            vec!["left", "merged"]
+        );
+        assert_eq!(
+            index.tags_of(&c_id).collect::<Vec<_>>(),
+            vec!["merged", "right"]
+        );
+        assert_eq!(
+            index.tags_of(&a_id).collect::<Vec<_>>(),
+            vec!["left", "merged", "right"]
+        );
+
+        drop(gr);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn get_contained_is_exact_when_walk_stops_early() {
+        let (dir, [a_id, b_id, c_id, d_id]) = init_fan_in_repo();
+        let gr = GixRepo::open(dir.to_str().unwrap()).unwrap();
+
+        for (oid, expected) in [
+            (d_id, vec!["merged"]),
+            (b_id, vec!["left", "merged"]),
+            (c_id, vec!["merged", "right"]),
+            (a_id, vec!["left", "merged", "right"]),
+        ] {
+            let wanted: HashSet<gix::ObjectId> = [oid].into_iter().collect();
+            let index = gr
+                .get_contained(DecorateFormat::Short, false, true, &wanted)
+                .unwrap();
+            assert_eq!(index.tags_of(&oid).collect::<Vec<_>>(), expected);
+        }
+
+        let index = gr
+            .get_contained(DecorateFormat::Short, false, true, &HashSet::new())
+            .unwrap();
+        assert_eq!(index.tag_names, vec!["left", "merged", "right"]);
+        assert_eq!(index.tags_of(&d_id).count(), 0);
+
+        drop(gr);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

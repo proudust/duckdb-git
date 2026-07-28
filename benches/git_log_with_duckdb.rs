@@ -117,10 +117,6 @@ fn with_diff(bencher: divan::Bencher, config: ThreadedConfig) {
     });
 }
 
-// NOTE: until the gix backend implements real contains logic (tracked separately),
-// its `contained_branches`/`contained_tags` are an empty-list stub, so the `gix`
-// arm here measures a no-op, not real work. Only the `libgit` numbers are
-// meaningful for judging the per-ref-revwalk cost of this feature.
 #[divan::bench(args = THREADED_CONFIGS, sample_count = 10)]
 fn with_contains(bencher: divan::Bencher, config: ThreadedConfig) {
     let path = repo_path();

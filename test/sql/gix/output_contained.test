@@ -1,0 +1,69 @@
+# name: test/sql/gix/output_contained.test
+# description: contained_branches / contained_tags columns (gix backend)
+# group: [git]
+
+require duckdb_git
+
+require-env GIX_BACKEND 1
+
+# KEY distinguishing behavior vs `decorate`: this commit is not a ref tip
+# (decorate is []), but it's an ancestor of every tag below, so it shows up
+# in contained_tags for all of them. Tags are immutable, so exact array
+# equality is safe here.
+query I
+SELECT contained_tags FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, backend='gix');
+----
+[v0.1.1, v0.1.2, v0.2.0, v0.3.0, v0.4.0]
+
+# Same commit: it's an ancestor of the checked-out branch (name varies by
+# checkout, so assert presence only).
+query I
+SELECT len(contained_branches) > 0 FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, backend='gix');
+----
+true
+
+# Remote-tracking branches are always included.
+query I
+SELECT list_contains(contained_branches, 'origin/main') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, backend='gix');
+----
+true
+
+# Bare "origin/HEAD" alias entry is never included (symbolic ref, filtered out).
+query I
+SELECT list_contains(contained_branches, 'origin/HEAD') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, backend='gix');
+----
+false
+
+# Self-inclusion: v0.1.1's own commit contains the v0.1.1 tag.
+query I
+SELECT list_contains(contained_tags, 'v0.1.1') FROM git_log('.', revision='295db8704f2b2e12fe71a1f433b8b17906fedf25', max_count=1, backend='gix');
+----
+true
+
+# decorate='full' format is reused for full ref paths in contained_* too.
+query I
+SELECT contained_tags FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, decorate='full', backend='gix');
+----
+[refs/tags/v0.1.1, refs/tags/v0.1.2, refs/tags/v0.2.0, refs/tags/v0.3.0, refs/tags/v0.4.0]
+
+# Full local branch paths (name varies by checkout; assert refs/heads/ prefix).
+query I
+SELECT len(list_filter(contained_branches, x -> starts_with(x, 'refs/heads/'))) > 0 FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, decorate='full', backend='gix');
+----
+true
+
+# Full remote path for the stable origin/main tip.
+query I
+SELECT list_contains(contained_branches, 'refs/remotes/origin/main') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, decorate='full', backend='gix');
+----
+true
+
+# Both backends must agree across the whole history, not just the spot checks above.
+# The first column guards against this passing vacuously on an empty join.
+query II
+SELECT count(*) > 0, count(*) FILTER (
+    list_sort(g.contained_branches) IS DISTINCT FROM list_sort(l.contained_branches)
+    OR list_sort(g.contained_tags) IS DISTINCT FROM list_sort(l.contained_tags))
+FROM git_log('.', backend='gix') g JOIN git_log('.', backend='libgit') l USING (commit_id);
+----
+true	0

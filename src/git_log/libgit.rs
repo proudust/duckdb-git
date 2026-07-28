@@ -909,4 +909,84 @@ mod tests {
         drop(lgr);
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    const MULTI_WORD_N: usize = 70;
+
+    fn init_multi_word_repo() -> (std::path::PathBuf, [git2::Oid; 2]) {
+        let dir = std::env::temp_dir().join(format!(
+            "duckdb-git-test-multiword-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repo = git2::Repository::init(&dir).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+
+        let root_id = repo.commit(None, &sig, &sig, "root", &tree, &[]).unwrap();
+        let root = repo.find_commit(root_id).unwrap();
+        let tip_id = repo
+            .commit(None, &sig, &sig, "tip", &tree, &[&root])
+            .unwrap();
+        let tip = repo.find_commit(tip_id).unwrap();
+
+        for i in 0..MULTI_WORD_N {
+            let target = if i % 2 == 0 { &tip } else { &root };
+            repo.branch(&format!("b{i:03}"), target, false).unwrap();
+            repo.tag_lightweight(&format!("t{i:03}"), target.as_object(), false)
+                .unwrap();
+        }
+
+        (dir, [root_id, tip_id])
+    }
+
+    #[test]
+    fn get_contained_multi_word_refbits() {
+        let (dir, [root_id, tip_id]) = init_multi_word_repo();
+        let lgr = LibGitRepo::open(dir.to_str().unwrap()).unwrap();
+        let wanted: HashSet<git2::Oid> = [root_id, tip_id].into_iter().collect();
+        let index = lgr
+            .get_contained(DecorateFormat::Short, false, true, true, &wanted)
+            .unwrap();
+
+        assert!(
+            index.branch_words > 1,
+            "test must exercise RefBits::Words, not Inline"
+        );
+
+        let even_branches: Vec<String> = (0..MULTI_WORD_N)
+            .step_by(2)
+            .map(|i| format!("b{i:03}"))
+            .collect();
+        let all_branches: Vec<String> = (0..MULTI_WORD_N).map(|i| format!("b{i:03}")).collect();
+        let even_tags: Vec<String> = (0..MULTI_WORD_N)
+            .step_by(2)
+            .map(|i| format!("t{i:03}"))
+            .collect();
+        let all_tags: Vec<String> = (0..MULTI_WORD_N).map(|i| format!("t{i:03}")).collect();
+
+        assert_eq!(
+            index.branches_of(&tip_id).collect::<Vec<_>>(),
+            even_branches.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            index.tags_of(&tip_id).collect::<Vec<_>>(),
+            even_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            index.branches_of(&root_id).collect::<Vec<_>>(),
+            all_branches.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            index.tags_of(&root_id).collect::<Vec<_>>(),
+            all_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+        );
+
+        drop(lgr);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

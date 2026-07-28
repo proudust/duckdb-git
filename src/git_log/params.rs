@@ -215,7 +215,7 @@ pub fn named_parameters() -> Vec<(String, LogicalTypeHandle)> {
 }
 
 pub(crate) fn is_remote_url(s: &str) -> bool {
-    s.split_once("://").map_or(false, |(scheme, _)| {
+    s.split_once("://").is_some_and(|(scheme, _)| {
         scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
     })
 }

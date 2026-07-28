@@ -5,11 +5,11 @@ mod libgit;
 mod params;
 #[cfg(feature = "gix-backend")]
 mod remote;
-#[cfg(feature = "libgit-backend")]
-mod xdiff;
 mod schema;
 mod types;
 mod vector;
+#[cfg(feature = "libgit-backend")]
+mod xdiff;
 
 use params::{BackendKind, GitLogParameter};
 use types::{GitLogReadPlanner, GitLogReader};

@@ -25,7 +25,7 @@ impl GixRepo {
     fn open(repo_path: &str) -> Result<Self, Box<dyn Error>> {
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
             Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1.to_thread_local()),
-            _ => gix::open(repo_path),
+            _ => gix::open(repo_path).map_err(|e| -> Box<dyn Error> { Box::new(e) }),
         })?;
         Ok(GixRepo {
             repo: Some(repo),
@@ -334,9 +334,9 @@ struct GixLogReader {
 }
 
 impl GitLogReader for GixLogReader {
-    fn read<'a>(
+    fn read(
         &mut self,
-        output: &'a mut DataChunkHandle,
+        output: &mut DataChunkHandle,
         column_indices: &[u64],
     ) -> Result<u32, Box<dyn Error>> {
         let start_index = self

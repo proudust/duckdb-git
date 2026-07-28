@@ -37,9 +37,9 @@ pub struct CommitData {
 }
 
 pub trait GitLogReader {
-    fn read<'a>(
+    fn read(
         &mut self,
-        output: &'a mut DataChunkHandle,
+        output: &mut DataChunkHandle,
         column_indices: &[u64],
     ) -> Result<u32, Box<dyn Error>>;
 }

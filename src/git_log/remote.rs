@@ -12,8 +12,7 @@ pub fn ensure_local_clone(url: &str) -> Result<PathBuf, Box<dyn Error>> {
 
     match gix::open(&dir) {
         Ok(_) => {
-            fetch_existing(&dir)
-                .map_err(|e| format!("failed to fetch '{url}': {e}"))?;
+            fetch_existing(&dir).map_err(|e| format!("failed to fetch '{url}': {e}"))?;
         }
         Err(_) => {
             if dir.exists() {
@@ -41,11 +40,7 @@ fn cache_dir_for(url: &str) -> PathBuf {
 }
 
 fn sanitize_name(url: &str) -> String {
-    let segment = url
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or("");
+    let segment = url.trim_end_matches('/').rsplit('/').next().unwrap_or("");
     let name = segment.strip_suffix(".git").unwrap_or(segment);
     let sanitized: String = name
         .chars()
@@ -134,10 +129,13 @@ fn fetch_existing(dir: &Path) -> Result<(), Box<dyn Error>> {
 
 static DIR_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
-fn dir_lock(dir: &PathBuf) -> Arc<Mutex<()>> {
+fn dir_lock(dir: &Path) -> Arc<Mutex<()>> {
     let map_lock = DIR_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut map = map_lock.lock().unwrap();
-    Arc::clone(map.entry(dir.clone()).or_insert_with(|| Arc::new(Mutex::new(()))))
+    Arc::clone(
+        map.entry(dir.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
 }
 
 #[cfg(test)]
@@ -194,7 +192,10 @@ mod tests {
 
     #[test]
     fn sanitize_name_special_chars() {
-        assert_eq!(sanitize_name("https://example.com/my repo!@#"), "my-repo---");
+        assert_eq!(
+            sanitize_name("https://example.com/my repo!@#"),
+            "my-repo---"
+        );
     }
 
     #[test]
@@ -260,5 +261,4 @@ mod tests {
 
         std::fs::remove_dir_all(&local_path).ok();
     }
-
 }

@@ -1,7 +1,3 @@
-#![allow(special_module_name)]
-
-mod lib;
-
 // To build the Wasm target, a `staticlib` crate-type is required
 //
 // This is different than the default needed in native, and there is
@@ -12,3 +8,5 @@ mod lib;
 //
 // To build the Wasm target explicitly, use:
 //   cargo build --example $PACKAGE_NAME
+
+include!("lib.rs");

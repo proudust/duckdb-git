@@ -89,7 +89,6 @@ const IGNORE_ALL_SPACE: &str = "ignore_all_space";
 const BACKEND: &str = "backend";
 const DECORATE: &str = "decorate";
 const DIFF_MERGES: &str = "diff_merges";
-const INCLUDE_REMOTES: &str = "include_remotes";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RevisionTerm {
@@ -172,7 +171,6 @@ pub(crate) struct GitLogParameter {
     pub backend: BackendKind,
     pub decorate: DecorateFormat,
     pub diff_merges: DiffMerges,
-    pub include_remotes: bool,
 }
 
 pub fn parameters() -> Vec<LogicalTypeHandle> {
@@ -206,10 +204,6 @@ pub fn named_parameters() -> Vec<(String, LogicalTypeHandle)> {
         (
             DIFF_MERGES.to_string(),
             LogicalTypeHandle::from(LogicalTypeId::Varchar),
-        ),
-        (
-            INCLUDE_REMOTES.to_string(),
-            LogicalTypeHandle::from(LogicalTypeId::Boolean),
         ),
     ]
 }
@@ -258,11 +252,6 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Erro
         .transpose()?
         .unwrap_or_else(DiffMerges::default);
 
-    let include_remotes = bind
-        .get_named_parameter(INCLUDE_REMOTES)
-        .map(|value| parse_include_remotes(&value.to_string()))
-        .unwrap_or(false);
-
     Ok(GitLogParameter {
         repo_path,
         revision,
@@ -271,7 +260,6 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Erro
         backend,
         decorate,
         diff_merges,
-        include_remotes,
     })
 }
 
@@ -282,10 +270,6 @@ fn parse_max_count(value: &str) -> Result<usize, Box<dyn Error>> {
 }
 
 fn parse_ignore_all_space(value: &str) -> bool {
-    value.eq_ignore_ascii_case("true")
-}
-
-fn parse_include_remotes(value: &str) -> bool {
     value.eq_ignore_ascii_case("true")
 }
 
@@ -387,14 +371,6 @@ mod tests {
         assert!(parse_ignore_all_space("TRUE"));
         assert!(!parse_ignore_all_space("false"));
         assert!(!parse_ignore_all_space(""));
-    }
-
-    #[test]
-    fn parse_include_remotes_test() {
-        assert!(parse_include_remotes("true"));
-        assert!(parse_include_remotes("TRUE"));
-        assert!(!parse_include_remotes("false"));
-        assert!(!parse_include_remotes(""));
     }
 
     #[test]

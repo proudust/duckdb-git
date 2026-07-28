@@ -222,19 +222,13 @@ impl LibGitRepo {
     fn get_contained(
         &self,
         format: DecorateFormat,
-        include_remotes: bool,
         need_branches: bool,
         need_tags: bool,
         wanted: &HashSet<git2::Oid>,
     ) -> Result<ContainedIndex, Box<dyn Error>> {
         let mut branch_refs = Vec::new();
         if need_branches {
-            let filter = if include_remotes {
-                None
-            } else {
-                Some(git2::BranchType::Local)
-            };
-            for branch in self.repo().branches(filter)? {
+            for branch in self.repo().branches(None)? {
                 let (branch, _branch_type) = branch?;
                 let reference = branch.get();
                 if reference.kind() != Some(git2::ReferenceType::Direct) {
@@ -566,13 +560,7 @@ impl LibGitLogReadPlanner {
         let need_tags = schema::needs_contained_tags(column_indices);
         let contained = if need_branches || need_tags {
             let wanted: HashSet<git2::Oid> = commit_oids.iter().copied().collect();
-            repo.get_contained(
-                params.decorate,
-                params.include_remotes,
-                need_branches,
-                need_tags,
-                &wanted,
-            )?
+            repo.get_contained(params.decorate, need_branches, need_tags, &wanted)?
         } else {
             ContainedIndex::empty()
         };
@@ -730,7 +718,7 @@ mod tests {
         let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
         let wanted: HashSet<git2::Oid> = [tagged_oid].into_iter().collect();
         let index = repo
-            .get_contained(DecorateFormat::Short, false, false, true, &wanted)
+            .get_contained(DecorateFormat::Short, false, true, &wanted)
             .unwrap();
         let names: Vec<&str> = index.tags_of(&tagged_oid).collect();
         assert_eq!(
@@ -745,7 +733,7 @@ mod tests {
         let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
         let wanted: HashSet<git2::Oid> = [tagged_oid].into_iter().collect();
         let index = repo
-            .get_contained(DecorateFormat::Full, false, false, true, &wanted)
+            .get_contained(DecorateFormat::Full, false, true, &wanted)
             .unwrap();
         assert!(index.tags_of(&tagged_oid).any(|n| n == "refs/tags/v0.1.1"));
     }
@@ -758,31 +746,18 @@ mod tests {
         let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
         let wanted: HashSet<git2::Oid> = [second_oid].into_iter().collect();
         let index = repo
-            .get_contained(DecorateFormat::Short, false, true, false, &wanted)
+            .get_contained(DecorateFormat::Short, true, false, &wanted)
             .unwrap();
         assert!(index.branches_of(&second_oid).any(|n| n == head_name));
     }
 
     #[test]
-    fn get_contained_branches_excludes_remotes_by_default() {
+    fn get_contained_branches_includes_remotes() {
         let repo = LibGitRepo::open(".").unwrap();
         let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
         let wanted: HashSet<git2::Oid> = [second_oid].into_iter().collect();
         let index = repo
-            .get_contained(DecorateFormat::Short, false, true, false, &wanted)
-            .unwrap();
-        assert!(!index
-            .branches_of(&second_oid)
-            .any(|n| n.starts_with("origin/")));
-    }
-
-    #[test]
-    fn get_contained_branches_includes_remotes_when_requested() {
-        let repo = LibGitRepo::open(".").unwrap();
-        let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
-        let wanted: HashSet<git2::Oid> = [second_oid].into_iter().collect();
-        let index = repo
-            .get_contained(DecorateFormat::Short, true, true, false, &wanted)
+            .get_contained(DecorateFormat::Short, true, false, &wanted)
             .unwrap();
         assert!(index.branches_of(&second_oid).any(|n| n == "origin/main"));
     }
@@ -791,7 +766,7 @@ mod tests {
     fn get_contained_branches_skips_symbolic_head_alias() {
         let repo = LibGitRepo::open(".").unwrap();
         let index = repo
-            .get_contained(DecorateFormat::Short, true, true, false, &HashSet::new())
+            .get_contained(DecorateFormat::Short, true, false, &HashSet::new())
             .unwrap();
         assert!(!index.branch_names.iter().any(|n| n == "origin/HEAD"));
     }
@@ -804,7 +779,7 @@ mod tests {
         let head_name = head.shorthand().unwrap().to_string();
         let wanted: HashSet<git2::Oid> = [head_oid].into_iter().collect();
         let index = repo
-            .get_contained(DecorateFormat::Short, false, true, false, &wanted)
+            .get_contained(DecorateFormat::Short, true, false, &wanted)
             .unwrap();
         assert!(index.branches_of(&head_oid).any(|n| n == head_name));
     }
@@ -815,7 +790,7 @@ mod tests {
         let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
         let wanted: HashSet<git2::Oid> = [tagged_oid].into_iter().collect();
         let index = repo
-            .get_contained(DecorateFormat::Short, false, false, true, &wanted)
+            .get_contained(DecorateFormat::Short, false, true, &wanted)
             .unwrap();
         let names: Vec<&str> = index.tags_of(&tagged_oid).collect();
         assert!(names.windows(2).all(|w| w[0] <= w[1]));
@@ -861,7 +836,7 @@ mod tests {
         let lgr = LibGitRepo::open(dir.to_str().unwrap()).unwrap();
         let wanted: HashSet<git2::Oid> = [a_id, b_id, c_id, d_id].into_iter().collect();
         let index = lgr
-            .get_contained(DecorateFormat::Short, false, false, true, &wanted)
+            .get_contained(DecorateFormat::Short, false, true, &wanted)
             .unwrap();
 
         assert_eq!(index.tags_of(&d_id).collect::<Vec<_>>(), vec!["merged"]);
@@ -895,13 +870,13 @@ mod tests {
         ] {
             let wanted: HashSet<git2::Oid> = [oid].into_iter().collect();
             let index = lgr
-                .get_contained(DecorateFormat::Short, false, false, true, &wanted)
+                .get_contained(DecorateFormat::Short, false, true, &wanted)
                 .unwrap();
             assert_eq!(index.tags_of(&oid).collect::<Vec<_>>(), expected);
         }
 
         let index = lgr
-            .get_contained(DecorateFormat::Short, false, false, true, &HashSet::new())
+            .get_contained(DecorateFormat::Short, false, true, &HashSet::new())
             .unwrap();
         assert_eq!(index.tag_names, vec!["left", "merged", "right"]);
         assert_eq!(index.tags_of(&d_id).count(), 0);
@@ -949,7 +924,7 @@ mod tests {
         let lgr = LibGitRepo::open(dir.to_str().unwrap()).unwrap();
         let wanted: HashSet<git2::Oid> = [root_id, tip_id].into_iter().collect();
         let index = lgr
-            .get_contained(DecorateFormat::Short, false, true, true, &wanted)
+            .get_contained(DecorateFormat::Short, true, true, &wanted)
             .unwrap();
 
         assert!(

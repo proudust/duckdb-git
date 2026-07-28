@@ -1,5 +1,5 @@
 # name: test/sql/libgit/output_contained.test
-# description: contained_branches / contained_tags columns and include_remotes parameter (libgit backend)
+# description: contained_branches / contained_tags columns (libgit backend)
 # group: [git]
 
 require duckdb_git
@@ -20,21 +20,15 @@ SELECT len(contained_branches) > 0 FROM git_log('.', revision='2e6d5e79dafd8ff8c
 ----
 true
 
-# Default include_remotes=false: no remote-tracking branch names leak in.
+# Remote-tracking branches are always included.
 query I
 SELECT list_contains(contained_branches, 'origin/main') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1);
 ----
-false
-
-# include_remotes=true adds remote-tracking branches ...
-query I
-SELECT list_contains(contained_branches, 'origin/main') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, include_remotes=true);
-----
 true
 
-# ... but never a bare "origin/HEAD" alias entry (symbolic ref, filtered out).
+# Bare "origin/HEAD" alias entry is never included (symbolic ref, filtered out).
 query I
-SELECT list_contains(contained_branches, 'origin/HEAD') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, include_remotes=true);
+SELECT list_contains(contained_branches, 'origin/HEAD') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1);
 ----
 false
 
@@ -58,6 +52,6 @@ true
 
 # Full remote path for the stable origin/main tip.
 query I
-SELECT list_contains(contained_branches, 'refs/remotes/origin/main') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, decorate='full', include_remotes=true);
+SELECT list_contains(contained_branches, 'refs/remotes/origin/main') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, decorate='full');
 ----
 true

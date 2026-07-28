@@ -81,7 +81,6 @@ Returns commit history as a table.
 | `ignore_all_space` | `BOOLEAN`                    | `false`       | Ignore whitespace changes in diffs                            |
 | `diff_merges`      | `VARCHAR`                    | `'off'`       | How to show diffs for merge commits (`off`, `first-parent`).  |
 | `decorate`         | `VARCHAR`                    | `'short'`     | Ref name format in the `decorate` column (`short` or `full`). |
-| `include_remotes`  | `BOOLEAN`                    | `false`       | Include `refs/remotes/*` branches in `contained_branches`.    |
 | `backend`          | `VARCHAR`                    | `'libgit'`    | Determines how history is retrieved. [^2]                     |
 
 [^1]: Symmetric differences (`a...b`) are not supported.
@@ -90,21 +89,21 @@ Returns commit history as a table.
 
 #### Output Columns
 
-| Column                | Type                     | Description                                  |
-| --------------------- | ------------------------ | -------------------------------------------- |
-| `commit_id`           | `VARCHAR NOT NULL`       | Full commit hash                             |
-| `author`              | `VARCHAR NOT NULL`       | Author name                                  |
-| `author_email`        | `VARCHAR NOT NULL`       | Author email                                 |
-| `author_timestamp`    | `TIMESTAMPTZ NOT NULL`   | Author timestamp                             |
-| `committer`           | `VARCHAR NOT NULL`       | Committer name                               |
-| `committer_email`     | `VARCHAR NOT NULL`       | Committer email                              |
-| `committer_timestamp` | `TIMESTAMPTZ NOT NULL`   | Committer timestamp                          |
-| `message`             | `VARCHAR NOT NULL`       | Commit message                               |
-| `parents`             | `VARCHAR[] NOT NULL`     | Parent commit hashes                         |
-| `decorate`            | `VARCHAR[] NOT NULL`     | Branch and tag names pointing at this commit |
+| Column                | Type                     | Description                                                                       |
+| --------------------- | ------------------------ | --------------------------------------------------------------------------------- |
+| `commit_id`           | `VARCHAR NOT NULL`       | Full commit hash                                                                  |
+| `author`              | `VARCHAR NOT NULL`       | Author name                                                                       |
+| `author_email`        | `VARCHAR NOT NULL`       | Author email                                                                      |
+| `author_timestamp`    | `TIMESTAMPTZ NOT NULL`   | Author timestamp                                                                  |
+| `committer`           | `VARCHAR NOT NULL`       | Committer name                                                                    |
+| `committer_email`     | `VARCHAR NOT NULL`       | Committer email                                                                   |
+| `committer_timestamp` | `TIMESTAMPTZ NOT NULL`   | Committer timestamp                                                               |
+| `message`             | `VARCHAR NOT NULL`       | Commit message                                                                    |
+| `parents`             | `VARCHAR[] NOT NULL`     | Parent commit hashes                                                              |
+| `decorate`            | `VARCHAR[] NOT NULL`     | Branch and tag names pointing at this commit                                      |
 | `contained_branches`  | `VARCHAR[] NOT NULL`     | Branches whose tip is this commit or a descendant of it (`git branch --contains`) |
-| `contained_tags`      | `VARCHAR[] NOT NULL`     | Tags whose tip is this commit or a descendant of it (`git tag --contains`) |
-| `file_changes`        | `STRUCT(...)[] NOT NULL` | File changes                                 |
+| `contained_tags`      | `VARCHAR[] NOT NULL`     | Tags whose tip is this commit or a descendant of it (`git tag --contains`)        |
+| `file_changes`        | `STRUCT(...)[] NOT NULL` | File changes                                                                      |
 
 The `file_changes` struct contains:
 

@@ -136,6 +136,19 @@ fn with_contains(bencher: divan::Bencher, config: ThreadedConfig) {
 }
 
 #[divan::bench(args = BACKENDS, sample_count = 10)]
+fn with_contains_max_count_10(bencher: divan::Bencher, backend: &str) {
+    let path = repo_path();
+    let db = setup_duckdb(1);
+    let sql = format!(
+        "SELECT count(contained_branches) + count(contained_tags) FROM git_log(?, backend='{backend}', max_count=10)"
+    );
+    bencher.bench_local(|| {
+        let mut stmt = db.prepare(&sql).unwrap();
+        stmt.query_row([&path], |row| row.get::<_, i64>(0)).unwrap()
+    });
+}
+
+#[divan::bench(args = BACKENDS, sample_count = 10)]
 fn limit_10(bencher: divan::Bencher, backend: &str) {
     let path = repo_path();
     let db = setup_duckdb(1);

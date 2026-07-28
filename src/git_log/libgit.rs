@@ -290,6 +290,15 @@ impl LibGitRepo {
         let tag_words = tag_names.len().div_ceil(64);
         let total_words = branch_words + tag_words;
 
+        if wanted.is_empty() {
+            return Ok(ContainedIndex {
+                branch_names,
+                tag_names,
+                branch_words,
+                bits: HashMap::new(),
+            });
+        }
+
         let mut revwalk = self.repo().revwalk()?;
         revwalk.set_sorting(git2::Sort::TOPOLOGICAL)?;
 
@@ -329,6 +338,9 @@ impl LibGitRepo {
             }
             if wanted.contains(&oid) {
                 bits.insert(oid, cur_bits);
+                if bits.len() == wanted.len() {
+                    break;
+                }
             }
         }
 
@@ -809,8 +821,7 @@ mod tests {
         assert!(names.windows(2).all(|w| w[0] <= w[1]));
     }
 
-    #[test]
-    fn get_contained_handles_merge_fan_in() {
+    fn init_fan_in_repo() -> (std::path::PathBuf, [git2::Oid; 4]) {
         let dir = std::env::temp_dir().join(format!(
             "duckdb-git-test-merge-{}-{}",
             std::process::id(),
@@ -840,6 +851,13 @@ mod tests {
         repo.tag_lightweight("merged", d.as_object(), false)
             .unwrap();
 
+        (dir, [a_id, b_id, c_id, d_id])
+    }
+
+    #[test]
+    fn get_contained_handles_merge_fan_in() {
+        let (dir, [a_id, b_id, c_id, d_id]) = init_fan_in_repo();
+
         let lgr = LibGitRepo::open(dir.to_str().unwrap()).unwrap();
         let wanted: HashSet<git2::Oid> = [a_id, b_id, c_id, d_id].into_iter().collect();
         let index = lgr
@@ -859,6 +877,34 @@ mod tests {
             index.tags_of(&a_id).collect::<Vec<_>>(),
             vec!["left", "merged", "right"]
         );
+
+        drop(lgr);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn get_contained_is_exact_when_walk_stops_early() {
+        let (dir, [a_id, b_id, c_id, d_id]) = init_fan_in_repo();
+        let lgr = LibGitRepo::open(dir.to_str().unwrap()).unwrap();
+
+        for (oid, expected) in [
+            (d_id, vec!["merged"]),
+            (b_id, vec!["left", "merged"]),
+            (c_id, vec!["merged", "right"]),
+            (a_id, vec!["left", "merged", "right"]),
+        ] {
+            let wanted: HashSet<git2::Oid> = [oid].into_iter().collect();
+            let index = lgr
+                .get_contained(DecorateFormat::Short, false, false, true, &wanted)
+                .unwrap();
+            assert_eq!(index.tags_of(&oid).collect::<Vec<_>>(), expected);
+        }
+
+        let index = lgr
+            .get_contained(DecorateFormat::Short, false, false, true, &HashSet::new())
+            .unwrap();
+        assert_eq!(index.tag_names, vec!["left", "merged", "right"]);
+        assert_eq!(index.tags_of(&d_id).count(), 0);
 
         drop(lgr);
         std::fs::remove_dir_all(&dir).ok();

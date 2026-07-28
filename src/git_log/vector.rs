@@ -96,8 +96,8 @@ impl<'a> VectorInserter<'a> {
         oid: &str,
         commit: &CommitData,
         refs: &[String],
-        contained_branches: &[String],
-        contained_tags: &[String],
+        contained_branches: &[&str],
+        contained_tags: &[&str],
     ) {
         if let Some(v) = self.commit_id.as_mut() {
             v.insert(idx, oid);
@@ -150,8 +150,8 @@ impl<'a> VectorInserter<'a> {
         if let Some(contained_branches_vec) = self.contained_branches.as_mut() {
             let contained_branches_child = contained_branches_vec
                 .child(self.contained_branches_offset + contained_branches.len());
-            for (i, name) in contained_branches.iter().enumerate() {
-                contained_branches_child.insert(self.contained_branches_offset + i, name.as_str());
+            for (i, name) in contained_branches.iter().copied().enumerate() {
+                contained_branches_child.insert(self.contained_branches_offset + i, name);
             }
             contained_branches_vec.set_entry(
                 idx,
@@ -164,8 +164,8 @@ impl<'a> VectorInserter<'a> {
         if let Some(contained_tags_vec) = self.contained_tags.as_mut() {
             let contained_tags_child =
                 contained_tags_vec.child(self.contained_tags_offset + contained_tags.len());
-            for (i, name) in contained_tags.iter().enumerate() {
-                contained_tags_child.insert(self.contained_tags_offset + i, name.as_str());
+            for (i, name) in contained_tags.iter().copied().enumerate() {
+                contained_tags_child.insert(self.contained_tags_offset + i, name);
             }
             contained_tags_vec.set_entry(idx, self.contained_tags_offset, contained_tags.len());
             self.contained_tags_offset += contained_tags.len();

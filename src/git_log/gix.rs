@@ -358,6 +358,7 @@ impl GitLogReader for GixLogReader {
         let mut writer = VectorInserter::new(output, column_indices);
 
         let empty_refs: Vec<String> = Vec::new();
+        let empty_contained: [&str; 0] = [];
         let skip_file_changes = !schema::needs_file_changes(column_indices);
         let oids = &self.inner.commit_oids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
@@ -374,8 +375,8 @@ impl GitLogReader for GixLogReader {
                 &oid.to_string(),
                 &commit,
                 refs,
-                &empty_refs,
-                &empty_refs,
+                &empty_contained,
+                &empty_contained,
             );
         }
 

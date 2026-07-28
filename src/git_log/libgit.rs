@@ -8,7 +8,7 @@ use crate::git_log::{GitLogReadPlanner, GitLogReader};
 use duckdb::core::DataChunkHandle;
 use git2::Repository;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -68,6 +68,38 @@ fn iter_ones(words: &[u64]) -> impl Iterator<Item = usize> + '_ {
             Some(wi * 64 + bit)
         })
     })
+}
+
+struct ContainedIndex {
+    branch_names: Vec<String>,
+    tag_names: Vec<String>,
+    branch_words: usize,
+    bits: HashMap<git2::Oid, RefBits>,
+}
+
+impl ContainedIndex {
+    fn empty() -> Self {
+        ContainedIndex {
+            branch_names: Vec::new(),
+            tag_names: Vec::new(),
+            branch_words: 0,
+            bits: HashMap::new(),
+        }
+    }
+
+    fn branches_of(&self, oid: &git2::Oid) -> impl Iterator<Item = &str> {
+        let branch_words = self.branch_words;
+        self.bits.get(oid).into_iter().flat_map(move |bits| {
+            iter_ones(&bits.as_slice()[..branch_words]).map(|i| self.branch_names[i].as_str())
+        })
+    }
+
+    fn tags_of(&self, oid: &git2::Oid) -> impl Iterator<Item = &str> {
+        let branch_words = self.branch_words;
+        self.bits.get(oid).into_iter().flat_map(move |bits| {
+            iter_ones(&bits.as_slice()[branch_words..]).map(|i| self.tag_names[i].as_str())
+        })
+    }
 }
 
 struct LibGitRepo {
@@ -187,110 +219,125 @@ impl LibGitRepo {
         Ok(refs_map)
     }
 
-    fn get_contained_branches(
+    fn get_contained(
         &self,
         format: DecorateFormat,
         include_remotes: bool,
-    ) -> Result<HashMap<git2::Oid, Vec<String>>, Box<dyn Error>> {
-        let filter = if include_remotes {
-            None
-        } else {
-            Some(git2::BranchType::Local)
-        };
-        let mut refs = Vec::new();
-        for branch in self.repo().branches(filter)? {
-            let (branch, _branch_type) = branch?;
-            let reference = branch.get();
-            if reference.kind() != Some(git2::ReferenceType::Direct) {
-                continue;
-            }
-            let name = match format {
-                DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
-                DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
+        need_branches: bool,
+        need_tags: bool,
+        wanted: &HashSet<git2::Oid>,
+    ) -> Result<ContainedIndex, Box<dyn Error>> {
+        let mut branch_refs = Vec::new();
+        if need_branches {
+            let filter = if include_remotes {
+                None
+            } else {
+                Some(git2::BranchType::Local)
             };
-            if name.is_empty() {
-                continue;
-            }
-            if let Ok(tip) = reference.peel_to_commit() {
-                refs.push((tip.id(), name));
-            }
-        }
-        self.build_contained_map(&refs)
-    }
-
-    fn get_contained_tags(
-        &self,
-        format: DecorateFormat,
-    ) -> Result<HashMap<git2::Oid, Vec<String>>, Box<dyn Error>> {
-        let mut refs = Vec::new();
-        for reference in self.repo().references()? {
-            let reference = reference?;
-            if !reference.is_tag() {
-                continue;
-            }
-            let name = match format {
-                DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
-                DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
-            };
-            if name.is_empty() {
-                continue;
-            }
-            if let Ok(tip) = reference.peel_to_commit() {
-                refs.push((tip.id(), name));
+            for branch in self.repo().branches(filter)? {
+                let (branch, _branch_type) = branch?;
+                let reference = branch.get();
+                if reference.kind() != Some(git2::ReferenceType::Direct) {
+                    continue;
+                }
+                let name = match format {
+                    DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
+                    DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                if let Ok(tip) = reference.peel_to_commit() {
+                    branch_refs.push((tip.id(), name));
+                }
             }
         }
-        self.build_contained_map(&refs)
-    }
 
-    fn build_contained_map(
-        &self,
-        refs: &[(git2::Oid, String)],
-    ) -> Result<HashMap<git2::Oid, Vec<String>>, Box<dyn Error>> {
-        if refs.is_empty() {
-            return Ok(HashMap::new());
+        let mut tag_refs = Vec::new();
+        if need_tags {
+            for reference in self.repo().references()? {
+                let reference = reference?;
+                if !reference.is_tag() {
+                    continue;
+                }
+                let name = match format {
+                    DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
+                    DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                if let Ok(tip) = reference.peel_to_commit() {
+                    tag_refs.push((tip.id(), name));
+                }
+            }
         }
 
-        let mut names: Vec<String> = refs.iter().map(|(_, name)| name.clone()).collect();
-        names.sort_unstable();
-        names.dedup();
+        if branch_refs.is_empty() && tag_refs.is_empty() {
+            return Ok(ContainedIndex::empty());
+        }
+
+        let mut branch_names: Vec<String> =
+            branch_refs.iter().map(|(_, name)| name.clone()).collect();
+        branch_names.sort_unstable();
+        branch_names.dedup();
+
+        let mut tag_names: Vec<String> = tag_refs.iter().map(|(_, name)| name.clone()).collect();
+        tag_names.sort_unstable();
+        tag_names.dedup();
+
+        let branch_words = branch_names.len().div_ceil(64);
+        let tag_words = tag_names.len().div_ceil(64);
+        let total_words = branch_words + tag_words;
 
         let mut revwalk = self.repo().revwalk()?;
         revwalk.set_sorting(git2::Sort::TOPOLOGICAL)?;
 
-        let word_count = names.len().div_ceil(64);
-
         let mut pending: HashMap<git2::Oid, RefBits> = HashMap::new();
-        for (tip, name) in refs {
-            let bit = names.binary_search(name).expect("name collected above");
+        for (tip, name) in &branch_refs {
+            let bit = branch_names
+                .binary_search(name)
+                .expect("name collected above");
             pending
                 .entry(*tip)
-                .or_insert_with(|| RefBits::new(word_count))
+                .or_insert_with(|| RefBits::new(total_words))
+                .set(bit);
+            revwalk.push(*tip)?;
+        }
+        for (tip, name) in &tag_refs {
+            let bit =
+                branch_words * 64 + tag_names.binary_search(name).expect("name collected above");
+            pending
+                .entry(*tip)
+                .or_insert_with(|| RefBits::new(total_words))
                 .set(bit);
             revwalk.push(*tip)?;
         }
 
-        let mut result: HashMap<git2::Oid, Vec<String>> = HashMap::new();
+        let mut bits: HashMap<git2::Oid, RefBits> = HashMap::new();
         for oid in revwalk {
             let oid = oid?;
-            let Some(bits) = pending.remove(&oid) else {
+            let Some(cur_bits) = pending.remove(&oid) else {
                 continue;
             };
-            result.insert(
-                oid,
-                iter_ones(bits.as_slice())
-                    .map(|i| names[i].clone())
-                    .collect(),
-            );
             let commit = self.repo().find_commit(oid)?;
             for parent in commit.parent_ids() {
                 pending
                     .entry(parent)
-                    .or_insert_with(|| RefBits::new(word_count))
-                    .or_assign(&bits);
+                    .or_insert_with(|| RefBits::new(total_words))
+                    .or_assign(&cur_bits);
+            }
+            if wanted.contains(&oid) {
+                bits.insert(oid, cur_bits);
             }
         }
 
-        Ok(result)
+        Ok(ContainedIndex {
+            branch_names,
+            tag_names,
+            branch_words,
+            bits,
+        })
     }
 
     fn get_file_changes(
@@ -478,8 +525,7 @@ impl Drop for LibGitRepo {
 struct LibGitLogReadPlannerInner {
     commit_oids: Vec<git2::Oid>,
     decorations: HashMap<git2::Oid, Vec<String>>,
-    contained_branches: HashMap<git2::Oid, Vec<String>>,
-    contained_tags: HashMap<git2::Oid, Vec<String>>,
+    contained: ContainedIndex,
     current_index: AtomicUsize,
     batch_size: usize,
     max_threads: u64,
@@ -504,15 +550,19 @@ impl LibGitLogReadPlanner {
         } else {
             HashMap::new()
         };
-        let contained_branches = if schema::needs_contained_branches(column_indices) {
-            repo.get_contained_branches(params.decorate, params.include_remotes)?
+        let need_branches = schema::needs_contained_branches(column_indices);
+        let need_tags = schema::needs_contained_tags(column_indices);
+        let contained = if need_branches || need_tags {
+            let wanted: HashSet<git2::Oid> = commit_oids.iter().copied().collect();
+            repo.get_contained(
+                params.decorate,
+                params.include_remotes,
+                need_branches,
+                need_tags,
+                &wanted,
+            )?
         } else {
-            HashMap::new()
-        };
-        let contained_tags = if schema::needs_contained_tags(column_indices) {
-            repo.get_contained_tags(params.decorate)?
-        } else {
-            HashMap::new()
+            ContainedIndex::empty()
         };
 
         let (max_threads, batch_size) = compute_parallelism(commit_oids.len());
@@ -521,8 +571,7 @@ impl LibGitLogReadPlanner {
             inner: Arc::new(LibGitLogReadPlannerInner {
                 commit_oids,
                 decorations,
-                contained_branches,
-                contained_tags,
+                contained,
                 current_index: AtomicUsize::new(0),
                 batch_size,
                 max_threads,
@@ -587,13 +636,9 @@ impl GitLogReader for LibGitLogReader {
                 self.diff_merges,
             )?;
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
-            let branches = self
-                .inner
-                .contained_branches
-                .get(oid)
-                .unwrap_or(&empty_refs);
-            let tags = self.inner.contained_tags.get(oid).unwrap_or(&empty_refs);
-            writer.push(batch_idx, &oid.to_string(), &commit, refs, branches, tags);
+            let branches: Vec<&str> = self.inner.contained.branches_of(oid).collect();
+            let tags: Vec<&str> = self.inner.contained.tags_of(oid).collect();
+            writer.push(batch_idx, &oid.to_string(), &commit, refs, &branches, &tags);
         }
 
         writer.finish();
@@ -670,26 +715,27 @@ mod tests {
     #[test]
     fn get_contained_tags_marks_all_descendant_tags() {
         let repo = LibGitRepo::open(".").unwrap();
-        let tags = repo.get_contained_tags(DecorateFormat::Short).unwrap();
         let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
-        let names = tags
-            .get(&tagged_oid)
-            .expect("tagged commit should have contained tags");
+        let wanted: HashSet<git2::Oid> = [tagged_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Short, false, false, true, &wanted)
+            .unwrap();
+        let names: Vec<&str> = index.tags_of(&tagged_oid).collect();
         assert_eq!(
             names,
-            &vec!["v0.1.1", "v0.1.2", "v0.2.0", "v0.3.0", "v0.4.0"]
+            vec!["v0.1.1", "v0.1.2", "v0.2.0", "v0.3.0", "v0.4.0"]
         );
     }
 
     #[test]
     fn get_contained_tags_full_format() {
         let repo = LibGitRepo::open(".").unwrap();
-        let tags = repo.get_contained_tags(DecorateFormat::Full).unwrap();
         let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
-        let names = tags
-            .get(&tagged_oid)
-            .expect("tagged commit should have contained tags");
-        assert!(names.iter().any(|n| n == "refs/tags/v0.1.1"));
+        let wanted: HashSet<git2::Oid> = [tagged_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Full, false, false, true, &wanted)
+            .unwrap();
+        assert!(index.tags_of(&tagged_oid).any(|n| n == "refs/tags/v0.1.1"));
     }
 
     #[test]
@@ -697,51 +743,45 @@ mod tests {
         let repo = LibGitRepo::open(".").unwrap();
         let head = repo.repo().head().unwrap();
         let head_name = head.shorthand().unwrap().to_string();
-        let branches = repo
-            .get_contained_branches(DecorateFormat::Short, false)
-            .unwrap();
         let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
-        let names = branches
-            .get(&second_oid)
-            .expect("second commit should be contained in branches");
-        assert!(names.iter().any(|n| n == &head_name));
+        let wanted: HashSet<git2::Oid> = [second_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Short, false, true, false, &wanted)
+            .unwrap();
+        assert!(index.branches_of(&second_oid).any(|n| n == head_name));
     }
 
     #[test]
     fn get_contained_branches_excludes_remotes_by_default() {
         let repo = LibGitRepo::open(".").unwrap();
-        let branches = repo
-            .get_contained_branches(DecorateFormat::Short, false)
-            .unwrap();
         let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
-        let names = branches
-            .get(&second_oid)
-            .expect("second commit should be contained in branches");
-        assert!(!names.iter().any(|n| n.starts_with("origin/")));
+        let wanted: HashSet<git2::Oid> = [second_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Short, false, true, false, &wanted)
+            .unwrap();
+        assert!(!index
+            .branches_of(&second_oid)
+            .any(|n| n.starts_with("origin/")));
     }
 
     #[test]
     fn get_contained_branches_includes_remotes_when_requested() {
         let repo = LibGitRepo::open(".").unwrap();
-        let branches = repo
-            .get_contained_branches(DecorateFormat::Short, true)
-            .unwrap();
         let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
-        let names = branches
-            .get(&second_oid)
-            .expect("second commit should be contained in branches");
-        assert!(names.iter().any(|n| n == "origin/main"));
+        let wanted: HashSet<git2::Oid> = [second_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Short, true, true, false, &wanted)
+            .unwrap();
+        assert!(index.branches_of(&second_oid).any(|n| n == "origin/main"));
     }
 
     #[test]
     fn get_contained_branches_skips_symbolic_head_alias() {
         let repo = LibGitRepo::open(".").unwrap();
-        let branches = repo
-            .get_contained_branches(DecorateFormat::Short, true)
+        let index = repo
+            .get_contained(DecorateFormat::Short, true, true, false, &HashSet::new())
             .unwrap();
-        assert!(!branches
-            .values()
-            .any(|names| names.iter().any(|n| n == "origin/HEAD")));
+        assert!(!index.branch_names.iter().any(|n| n == "origin/HEAD"));
     }
 
     #[test]
@@ -750,26 +790,27 @@ mod tests {
         let head = repo.repo().head().unwrap();
         let head_oid = head.peel_to_commit().unwrap().id();
         let head_name = head.shorthand().unwrap().to_string();
-        let branches = repo
-            .get_contained_branches(DecorateFormat::Short, false)
+        let wanted: HashSet<git2::Oid> = [head_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Short, false, true, false, &wanted)
             .unwrap();
-        let names = branches
-            .get(&head_oid)
-            .expect("HEAD commit should contain its own branch");
-        assert!(names.iter().any(|n| n == &head_name));
+        assert!(index.branches_of(&head_oid).any(|n| n == head_name));
     }
 
     #[test]
     fn contained_tags_are_sorted() {
         let repo = LibGitRepo::open(".").unwrap();
-        let tags = repo.get_contained_tags(DecorateFormat::Short).unwrap();
         let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
-        let names = tags.get(&tagged_oid).unwrap();
+        let wanted: HashSet<git2::Oid> = [tagged_oid].into_iter().collect();
+        let index = repo
+            .get_contained(DecorateFormat::Short, false, false, true, &wanted)
+            .unwrap();
+        let names: Vec<&str> = index.tags_of(&tagged_oid).collect();
         assert!(names.windows(2).all(|w| w[0] <= w[1]));
     }
 
     #[test]
-    fn build_contained_map_handles_merge_fan_in() {
+    fn get_contained_handles_merge_fan_in() {
         let dir = std::env::temp_dir().join(format!(
             "duckdb-git-test-merge-{}-{}",
             std::process::id(),
@@ -800,24 +841,23 @@ mod tests {
             .unwrap();
 
         let lgr = LibGitRepo::open(dir.to_str().unwrap()).unwrap();
-        let tags = lgr.get_contained_tags(DecorateFormat::Short).unwrap();
+        let wanted: HashSet<git2::Oid> = [a_id, b_id, c_id, d_id].into_iter().collect();
+        let index = lgr
+            .get_contained(DecorateFormat::Short, false, false, true, &wanted)
+            .unwrap();
 
-        assert_eq!(tags.get(&d_id).unwrap(), &vec!["merged".to_string()]);
+        assert_eq!(index.tags_of(&d_id).collect::<Vec<_>>(), vec!["merged"]);
         assert_eq!(
-            tags.get(&b_id).unwrap(),
-            &vec!["left".to_string(), "merged".to_string()]
+            index.tags_of(&b_id).collect::<Vec<_>>(),
+            vec!["left", "merged"]
         );
         assert_eq!(
-            tags.get(&c_id).unwrap(),
-            &vec!["merged".to_string(), "right".to_string()]
+            index.tags_of(&c_id).collect::<Vec<_>>(),
+            vec!["merged", "right"]
         );
         assert_eq!(
-            tags.get(&a_id).unwrap(),
-            &vec![
-                "left".to_string(),
-                "merged".to_string(),
-                "right".to_string()
-            ]
+            index.tags_of(&a_id).collect::<Vec<_>>(),
+            vec!["left", "merged", "right"]
         );
 
         drop(lgr);

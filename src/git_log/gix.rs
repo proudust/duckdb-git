@@ -332,31 +332,52 @@ impl GixRepo {
                 .set(bit);
         }
 
-        // Bit propagation requires every child to be visited before its parents, which
-        // `rev_walk`'s breadth-first and commit-time orders do not guarantee.
         let tips: Vec<gix::ObjectId> = pending.keys().copied().collect();
-        let topo = gix::traverse::commit::topo::Builder::from_iters(
-            self.repo(),
-            tips,
-            None::<Vec<gix::ObjectId>>,
-        )
-        .with_commit_graph(self.repo().commit_graph_if_enabled().ok().flatten())
-        .build()?;
+        let mut parents_of: HashMap<gix::ObjectId, gix::traverse::commit::ParentIds> =
+            HashMap::new();
+        let mut child_count: HashMap<gix::ObjectId, usize> = HashMap::new();
+        for info in self.repo().rev_walk(tips).all()? {
+            let info = info?;
+            child_count.entry(info.id).or_insert(0);
+            for parent in &info.parent_ids {
+                *child_count.entry(*parent).or_insert(0) += 1;
+            }
+            parents_of.insert(info.id, info.parent_ids);
+        }
+
+        let mut queue: Vec<gix::ObjectId> = child_count
+            .iter()
+            .filter(|(_, count)| **count == 0)
+            .map(|(id, _)| *id)
+            .collect();
 
         let mut bits: HashMap<gix::ObjectId, RefBits> = HashMap::new();
-        for info in topo {
-            let info = info?;
-            let Some(cur_bits) = pending.remove(&info.id) else {
+        while let Some(id) = queue.pop() {
+            let cur_bits = pending.remove(&id);
+            for parent in parents_of
+                .get(&id)
+                .map(|p| p.as_slice())
+                .unwrap_or_default()
+            {
+                if let Some(cur_bits) = cur_bits.as_ref() {
+                    pending
+                        .entry(*parent)
+                        .or_insert_with(|| RefBits::new(total_words))
+                        .or_assign(cur_bits);
+                }
+                // A parent becomes ready once every child has propagated into it.
+                if let Some(count) = child_count.get_mut(parent) {
+                    *count -= 1;
+                    if *count == 0 {
+                        queue.push(*parent);
+                    }
+                }
+            }
+            let Some(cur_bits) = cur_bits else {
                 continue;
             };
-            for parent in &info.parent_ids {
-                pending
-                    .entry(*parent)
-                    .or_insert_with(|| RefBits::new(total_words))
-                    .or_assign(&cur_bits);
-            }
-            if wanted.contains(&info.id) {
-                bits.insert(info.id, cur_bits);
+            if wanted.contains(&id) {
+                bits.insert(id, cur_bits);
                 if bits.len() == wanted.len() {
                     break;
                 }
@@ -853,6 +874,119 @@ mod tests {
             .unwrap();
         assert_eq!(index.tag_names, vec!["left", "merged", "right"]);
         assert_eq!(index.tags_of(&d_id).count(), 0);
+
+        drop(gr);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    const MULTI_WORD_N: usize = 70;
+
+    fn init_multi_word_repo() -> (std::path::PathBuf, [gix::ObjectId; 2]) {
+        let dir = std::env::temp_dir().join(format!(
+            "duckdb-git-test-gix-multiword-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut repo = gix::init(&dir).unwrap();
+        // Creating refs/heads/* writes a reflog, which needs a committer identity.
+        // CI has no global git config, so set one on the test repo itself.
+        let mut config = repo.config_snapshot_mut();
+        config
+            .set_raw_value(&gix::config::tree::User::NAME, "Test")
+            .unwrap();
+        config
+            .set_raw_value(&gix::config::tree::User::EMAIL, "test@example.com")
+            .unwrap();
+        drop(config);
+        let sig = gix::actor::Signature {
+            name: "Test".into(),
+            email: "test@example.com".into(),
+            time: gix::date::Time::new(0, 0),
+        };
+        let tree = repo
+            .write_object(gix::objs::Tree::empty())
+            .unwrap()
+            .detach();
+
+        let commit = |message: &str, parents: Vec<gix::ObjectId>| {
+            repo.write_object(&gix::objs::Commit {
+                tree,
+                parents: parents.into(),
+                author: sig.clone(),
+                committer: sig.clone(),
+                encoding: None,
+                message: message.into(),
+                extra_headers: Vec::new(),
+            })
+            .unwrap()
+            .detach()
+        };
+
+        let root_id = commit("root", vec![]);
+        let tip_id = commit("tip", vec![root_id]);
+
+        use gix::refs::transaction::PreviousValue;
+        for i in 0..MULTI_WORD_N {
+            let target = if i % 2 == 0 { tip_id } else { root_id };
+            repo.reference(
+                format!("refs/heads/b{i:03}"),
+                target,
+                PreviousValue::Any,
+                "test",
+            )
+            .unwrap();
+            repo.tag_reference(format!("t{i:03}"), target, PreviousValue::Any)
+                .unwrap();
+        }
+
+        (dir, [root_id, tip_id])
+    }
+
+    #[test]
+    fn get_contained_multi_word_refbits() {
+        let (dir, [root_id, tip_id]) = init_multi_word_repo();
+        let gr = GixRepo::open(dir.to_str().unwrap()).unwrap();
+        let wanted: HashSet<gix::ObjectId> = [root_id, tip_id].into_iter().collect();
+        let index = gr
+            .get_contained(DecorateFormat::Short, true, true, &wanted)
+            .unwrap();
+
+        assert!(
+            index.branch_words > 1,
+            "test must exercise RefBits::Words, not Inline"
+        );
+
+        let even_branches: Vec<String> = (0..MULTI_WORD_N)
+            .step_by(2)
+            .map(|i| format!("b{i:03}"))
+            .collect();
+        let all_branches: Vec<String> = (0..MULTI_WORD_N).map(|i| format!("b{i:03}")).collect();
+        let even_tags: Vec<String> = (0..MULTI_WORD_N)
+            .step_by(2)
+            .map(|i| format!("t{i:03}"))
+            .collect();
+        let all_tags: Vec<String> = (0..MULTI_WORD_N).map(|i| format!("t{i:03}")).collect();
+
+        assert_eq!(
+            index.branches_of(&tip_id).collect::<Vec<_>>(),
+            even_branches.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            index.tags_of(&tip_id).collect::<Vec<_>>(),
+            even_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            index.branches_of(&root_id).collect::<Vec<_>>(),
+            all_branches.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            index.tags_of(&root_id).collect::<Vec<_>>(),
+            all_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+        );
 
         drop(gr);
         std::fs::remove_dir_all(&dir).ok();

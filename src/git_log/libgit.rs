@@ -646,10 +646,13 @@ impl GitLogReader for LibGitLogReader {
     }
 }
 
+const MAX_LIBGIT_THREADS: usize = 4;
+
 fn compute_parallelism(commit_count: usize) -> (u64, usize) {
     let cpu_cores = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(1);
+        .unwrap_or(1)
+        .min(MAX_LIBGIT_THREADS);
     let max_threads = std::cmp::min(commit_count, cpu_cores) as u64;
     let batch_size = (commit_count / cpu_cores).clamp(1, 2048);
     (max_threads, batch_size)

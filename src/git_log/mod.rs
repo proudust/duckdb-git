@@ -1,3 +1,5 @@
+#[cfg(any(feature = "libgit-backend", feature = "gix-backend"))]
+mod ref_index;
 #[cfg(feature = "gix-backend")]
 mod gix;
 #[cfg(feature = "libgit-backend")]

@@ -143,13 +143,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cache_dir_deterministic() {
-        let a = cache_dir_for("https://github.com/foo/bar.git");
-        let b = cache_dir_for("https://github.com/foo/bar.git");
-        assert_eq!(a, b);
-    }
-
-    #[test]
     fn cache_dir_different_urls_differ() {
         let a = cache_dir_for("https://github.com/foo/bar.git");
         let b = cache_dir_for("https://github.com/foo/baz.git");
@@ -159,12 +152,14 @@ mod tests {
     #[test]
     fn cache_dir_normalized_variants() {
         let base = cache_dir_for("https://github.com/foo/bar");
-        let with_git = cache_dir_for("https://github.com/foo/bar.git");
-        let with_slash = cache_dir_for("https://github.com/foo/bar/");
-        let with_both = cache_dir_for("https://github.com/foo/bar.git/");
-        assert_eq!(base, with_git);
-        assert_eq!(base, with_slash);
-        assert_eq!(base, with_both);
+        for variant in [
+            "https://github.com/foo/bar",
+            "https://github.com/foo/bar.git",
+            "https://github.com/foo/bar/",
+            "https://github.com/foo/bar.git/",
+        ] {
+            assert_eq!(cache_dir_for(variant), base, "{variant}");
+        }
     }
 
     #[test]
@@ -181,27 +176,16 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_name_strips_git_suffix() {
-        assert_eq!(sanitize_name("https://github.com/foo/bar.git"), "bar");
-    }
-
-    #[test]
-    fn sanitize_name_trailing_slash() {
-        assert_eq!(sanitize_name("https://github.com/foo/bar/"), "bar");
-    }
-
-    #[test]
-    fn sanitize_name_special_chars() {
-        assert_eq!(
-            sanitize_name("https://example.com/my repo!@#"),
-            "my-repo---"
-        );
-    }
-
-    #[test]
-    fn sanitize_name_empty_falls_back() {
-        assert_eq!(sanitize_name(""), "repo");
-        assert_eq!(sanitize_name("/"), "repo");
+    fn sanitize_name_derives_last_segment() {
+        for (url, expected) in [
+            ("https://github.com/foo/bar.git", "bar"),
+            ("https://github.com/foo/bar/", "bar"),
+            ("https://example.com/my repo!@#", "my-repo---"),
+            ("", "repo"),
+            ("/", "repo"),
+        ] {
+            assert_eq!(sanitize_name(url), expected, "{url}");
+        }
     }
 
     #[test]

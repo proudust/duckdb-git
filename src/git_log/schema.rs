@@ -147,38 +147,27 @@ mod tests {
 
     #[test]
     fn column_indices_are_contiguous() {
-        for i in 0..=12 {
+        let last = GitLogColumn::FileChanges.index();
+        for i in 0..=last {
             assert!(
                 GitLogColumn::try_from(i).is_ok(),
                 "missing column index {i}"
             );
         }
-        assert!(GitLogColumn::try_from(13).is_err());
+        assert!(GitLogColumn::try_from(last + 1).is_err());
     }
 
     #[test]
     fn projection_helpers() {
-        assert!(needs_refs(&[GitLogColumn::Decorate.index()]));
-        assert!(needs_contained_branches(&[
-            GitLogColumn::ContainedBranches.index()
-        ]));
-        assert!(needs_contained_tags(&[GitLogColumn::ContainedTags.index()]));
-        assert!(needs_file_changes(&[GitLogColumn::FileChanges.index()]));
-        assert!(!needs_refs(&[
-            GitLogColumn::CommitId.index(),
-            GitLogColumn::Author.index(),
-        ]));
-        assert!(!needs_contained_branches(&[
-            GitLogColumn::CommitId.index(),
-            GitLogColumn::Author.index(),
-        ]));
-        assert!(!needs_contained_tags(&[
-            GitLogColumn::CommitId.index(),
-            GitLogColumn::Author.index(),
-        ]));
-        assert!(!needs_file_changes(&[
-            GitLogColumn::CommitId.index(),
-            GitLogColumn::Author.index(),
-        ]));
+        let unrelated = [GitLogColumn::CommitId.index(), GitLogColumn::Author.index()];
+        for (needs, column) in [
+            (needs_refs as fn(&[u64]) -> bool, GitLogColumn::Decorate),
+            (needs_contained_branches, GitLogColumn::ContainedBranches),
+            (needs_contained_tags, GitLogColumn::ContainedTags),
+            (needs_file_changes, GitLogColumn::FileChanges),
+        ] {
+            assert!(needs(&[column.index()]), "{column:?} should be required");
+            assert!(!needs(&unrelated), "{column:?} should not be required");
+        }
     }
 }

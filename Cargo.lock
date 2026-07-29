@@ -762,6 +762,7 @@ dependencies = [
  "duckdb",
  "git2",
  "gix",
+ "tempfile",
 ]
 
 [[package]]

@@ -637,53 +637,39 @@ mod tests {
     const TAGGED_COMMIT: &str = "295db8704f2b2e12fe71a1f433b8b17906fedf25"; // v0.1.1 (annotated tag)
 
     #[test]
-    fn skip_file_changes_returns_empty() {
+    fn get_commit_honors_skip_file_changes() {
         let repo = GixRepo::open(".").unwrap();
         let oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
-        let commit = repo
+
+        let skipped = repo
             .get_commit(oid, false, true, DiffMerges::FirstParent)
             .unwrap();
-        assert!(commit.file_changes.is_empty());
-    }
+        assert!(skipped.file_changes.is_empty());
 
-    #[test]
-    fn no_skip_returns_file_changes() {
-        let repo = GixRepo::open(".").unwrap();
-        let oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
-        let commit = repo
+        let kept = repo
             .get_commit(oid, false, false, DiffMerges::FirstParent)
             .unwrap();
-        assert!(!commit.file_changes.is_empty());
+        assert!(!kept.file_changes.is_empty());
     }
 
     #[test]
     fn get_refs_peels_annotated_tag_to_commit() {
         let repo = GixRepo::open(".").unwrap();
-        let refs = repo.get_refs(DecorateFormat::Short).unwrap();
         let tagged_oid = gix::ObjectId::from_hex(TAGGED_COMMIT.as_bytes()).unwrap();
-        let names = refs
-            .get(&tagged_oid)
-            .expect("tagged commit should have refs");
-        assert!(names.iter().any(|n| n == "v0.1.1"));
-    }
-
-    #[test]
-    fn get_refs_full_returns_full_ref_path() {
-        let repo = GixRepo::open(".").unwrap();
-        let refs = repo.get_refs(DecorateFormat::Full).unwrap();
-        let tagged_oid = gix::ObjectId::from_hex(TAGGED_COMMIT.as_bytes()).unwrap();
-        let names = refs
-            .get(&tagged_oid)
-            .expect("tagged commit should have refs");
-        assert!(names.iter().any(|n| n == "refs/tags/v0.1.1"));
-    }
-
-    #[test]
-    fn get_refs_returns_empty_for_commit_without_refs() {
-        let repo = GixRepo::open(".").unwrap();
-        let refs = repo.get_refs(DecorateFormat::Short).unwrap();
         let second_oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
-        assert!(!refs.contains_key(&second_oid));
+
+        for (format, expected) in [
+            (DecorateFormat::Short, "v0.1.1"),
+            (DecorateFormat::Full, "refs/tags/v0.1.1"),
+        ] {
+            let refs = repo.get_refs(format).unwrap();
+            let names = refs
+                .get(&tagged_oid)
+                .expect("tagged commit should have refs");
+            assert!(names.iter().any(|n| n == expected), "{format:?}");
+            // A commit that is not a ref tip gets no entry at all.
+            assert!(!refs.contains_key(&second_oid), "{format:?}");
+        }
     }
 
     #[test]
@@ -695,10 +681,16 @@ mod tests {
             .get_contained(DecorateFormat::Short, false, true, &wanted)
             .unwrap();
         let names: Vec<&str> = index.tags_of(&tagged_oid).collect();
-        assert_eq!(
-            names,
-            vec!["v0.1.1", "v0.1.2", "v0.2.0", "v0.3.0", "v0.4.0"]
+        assert!(
+            names.windows(2).all(|w| w[0] <= w[1]),
+            "tags must be sorted, got {names:?}"
         );
+        // Every release tag descends from v0.1.1's commit. Membership only, so a
+        // new release tag does not break this; exclusion is covered exactly by
+        // get_contained_is_exact_for_merge_fan_in.
+        for tag in ["v0.1.1", "v0.1.2", "v0.2.0", "v0.3.0", "v0.4.0"] {
+            assert!(names.contains(&tag), "{tag} missing from {names:?}");
+        }
     }
 
     #[test]
@@ -723,16 +715,7 @@ mod tests {
             .get_contained(DecorateFormat::Short, true, false, &wanted)
             .unwrap();
         assert!(index.branches_of(&second_oid).any(|n| n == head_name));
-    }
-
-    #[test]
-    fn get_contained_branches_includes_remotes() {
-        let repo = GixRepo::open(".").unwrap();
-        let second_oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
-        let wanted: HashSet<gix::ObjectId> = [second_oid].into_iter().collect();
-        let index = repo
-            .get_contained(DecorateFormat::Short, true, false, &wanted)
-            .unwrap();
+        // Remote-tracking branches are included too.
         assert!(index.branches_of(&second_oid).any(|n| n == "origin/main"));
     }
 
@@ -758,28 +741,9 @@ mod tests {
         assert!(index.branches_of(&head_oid).any(|n| n == head_name));
     }
 
-    #[test]
-    fn contained_tags_are_sorted() {
-        let repo = GixRepo::open(".").unwrap();
-        let tagged_oid = gix::ObjectId::from_hex(TAGGED_COMMIT.as_bytes()).unwrap();
-        let wanted: HashSet<gix::ObjectId> = [tagged_oid].into_iter().collect();
-        let index = repo
-            .get_contained(DecorateFormat::Short, false, true, &wanted)
-            .unwrap();
-        let names: Vec<&str> = index.tags_of(&tagged_oid).collect();
-        assert!(names.windows(2).all(|w| w[0] <= w[1]));
-    }
-
-    fn init_fan_in_repo() -> (std::path::PathBuf, [gix::ObjectId; 4]) {
-        let dir = std::env::temp_dir().join(format!(
-            "duckdb-git-test-gix-merge-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let repo = gix::init(&dir).unwrap();
+    fn init_fan_in_repo() -> (tempfile::TempDir, [gix::ObjectId; 4]) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = gix::init(dir.path()).unwrap();
         let sig = gix::actor::Signature {
             name: "Test".into(),
             email: "test@example.com".into(),
@@ -824,49 +788,33 @@ mod tests {
     }
 
     #[test]
-    fn get_contained_handles_merge_fan_in() {
+    fn get_contained_is_exact_for_merge_fan_in() {
         let (dir, [a_id, b_id, c_id, d_id]) = init_fan_in_repo();
+        let gr = GixRepo::open(dir.path().to_str().unwrap()).unwrap();
 
-        let gr = GixRepo::open(dir.to_str().unwrap()).unwrap();
-        let wanted: HashSet<gix::ObjectId> = [a_id, b_id, c_id, d_id].into_iter().collect();
-        let index = gr
-            .get_contained(DecorateFormat::Short, false, true, &wanted)
-            .unwrap();
-
-        assert_eq!(index.tags_of(&d_id).collect::<Vec<_>>(), vec!["merged"]);
-        assert_eq!(
-            index.tags_of(&b_id).collect::<Vec<_>>(),
-            vec!["left", "merged"]
-        );
-        assert_eq!(
-            index.tags_of(&c_id).collect::<Vec<_>>(),
-            vec!["merged", "right"]
-        );
-        assert_eq!(
-            index.tags_of(&a_id).collect::<Vec<_>>(),
-            vec!["left", "merged", "right"]
-        );
-
-        drop(gr);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn get_contained_is_exact_when_walk_stops_early() {
-        let (dir, [a_id, b_id, c_id, d_id]) = init_fan_in_repo();
-        let gr = GixRepo::open(dir.to_str().unwrap()).unwrap();
-
-        for (oid, expected) in [
+        let expected = [
             (d_id, vec!["merged"]),
             (b_id, vec!["left", "merged"]),
             (c_id, vec!["merged", "right"]),
             (a_id, vec!["left", "merged", "right"]),
-        ] {
-            let wanted: HashSet<gix::ObjectId> = [oid].into_iter().collect();
+        ];
+
+        let all: HashSet<gix::ObjectId> = [a_id, b_id, c_id, d_id].into_iter().collect();
+        let index = gr
+            .get_contained(DecorateFormat::Short, false, true, &all)
+            .unwrap();
+        for (oid, want) in &expected {
+            assert_eq!(index.tags_of(oid).collect::<Vec<_>>(), *want);
+        }
+
+        // Asking for one commit at a time lets the walk stop early; the answer
+        // must not change.
+        for (oid, want) in &expected {
+            let wanted: HashSet<gix::ObjectId> = [*oid].into_iter().collect();
             let index = gr
                 .get_contained(DecorateFormat::Short, false, true, &wanted)
                 .unwrap();
-            assert_eq!(index.tags_of(&oid).collect::<Vec<_>>(), expected);
+            assert_eq!(index.tags_of(oid).collect::<Vec<_>>(), *want);
         }
 
         let index = gr
@@ -874,31 +822,28 @@ mod tests {
             .unwrap();
         assert_eq!(index.tag_names, vec!["left", "merged", "right"]);
         assert_eq!(index.tags_of(&d_id).count(), 0);
-
-        drop(gr);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     const MULTI_WORD_N: usize = 70;
 
-    fn init_multi_word_repo() -> (std::path::PathBuf, [gix::ObjectId; 2]) {
-        let dir = std::env::temp_dir().join(format!(
-            "duckdb-git-test-gix-multiword-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let mut repo = gix::init(&dir).unwrap();
+    fn ref_names(prefix: char, step: usize) -> Vec<String> {
+        (0..MULTI_WORD_N)
+            .step_by(step)
+            .map(|i| format!("{prefix}{i:03}"))
+            .collect()
+    }
+
+    fn init_multi_word_repo() -> (tempfile::TempDir, [gix::ObjectId; 2]) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut repo = gix::init(dir.path()).unwrap();
         // Creating refs/heads/* writes a reflog, which needs a committer identity.
         // CI has no global git config, so set one on the test repo itself.
         let mut config = repo.config_snapshot_mut();
         config
-            .set_raw_value(&gix::config::tree::User::NAME, "Test")
+            .set_raw_value(gix::config::tree::User::NAME, "Test")
             .unwrap();
         config
-            .set_raw_value(&gix::config::tree::User::EMAIL, "test@example.com")
+            .set_raw_value(gix::config::tree::User::EMAIL, "test@example.com")
             .unwrap();
         drop(config);
         let sig = gix::actor::Signature {
@@ -948,7 +893,7 @@ mod tests {
     #[test]
     fn get_contained_multi_word_refbits() {
         let (dir, [root_id, tip_id]) = init_multi_word_repo();
-        let gr = GixRepo::open(dir.to_str().unwrap()).unwrap();
+        let gr = GixRepo::open(dir.path().to_str().unwrap()).unwrap();
         let wanted: HashSet<gix::ObjectId> = [root_id, tip_id].into_iter().collect();
         let index = gr
             .get_contained(DecorateFormat::Short, true, true, &wanted)
@@ -959,36 +904,40 @@ mod tests {
             "test must exercise RefBits::Words, not Inline"
         );
 
-        let even_branches: Vec<String> = (0..MULTI_WORD_N)
-            .step_by(2)
-            .map(|i| format!("b{i:03}"))
-            .collect();
-        let all_branches: Vec<String> = (0..MULTI_WORD_N).map(|i| format!("b{i:03}")).collect();
-        let even_tags: Vec<String> = (0..MULTI_WORD_N)
-            .step_by(2)
-            .map(|i| format!("t{i:03}"))
-            .collect();
-        let all_tags: Vec<String> = (0..MULTI_WORD_N).map(|i| format!("t{i:03}")).collect();
-
-        assert_eq!(
-            index.branches_of(&tip_id).collect::<Vec<_>>(),
-            even_branches.iter().map(|s| s.as_str()).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            index.tags_of(&tip_id).collect::<Vec<_>>(),
-            even_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>()
-        );
-
-        assert_eq!(
-            index.branches_of(&root_id).collect::<Vec<_>>(),
-            all_branches.iter().map(|s| s.as_str()).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            index.tags_of(&root_id).collect::<Vec<_>>(),
-            all_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>()
-        );
-
-        drop(gr);
-        std::fs::remove_dir_all(&dir).ok();
+        // Even-numbered refs point at the tip, odd ones at the root, so the root
+        // (an ancestor of both) is contained in all of them.
+        for (label, actual, expected) in [
+            (
+                "tip branches",
+                index
+                    .branches_of(&tip_id)
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+                ref_names('b', 2),
+            ),
+            (
+                "tip tags",
+                index.tags_of(&tip_id).map(String::from).collect::<Vec<_>>(),
+                ref_names('t', 2),
+            ),
+            (
+                "root branches",
+                index
+                    .branches_of(&root_id)
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+                ref_names('b', 1),
+            ),
+            (
+                "root tags",
+                index
+                    .tags_of(&root_id)
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+                ref_names('t', 1),
+            ),
+        ] {
+            assert_eq!(actual, expected, "{label}");
+        }
     }
 }

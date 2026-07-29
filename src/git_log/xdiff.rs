@@ -215,67 +215,54 @@ mod tests {
     }
 
     #[test]
-    fn added_file() {
+    fn line_counts() {
+        // Forces libgit2's global initialization before calling into xdiff.
         let _ = git2::Repository::open(".");
-        let (add, del) = diff_line_counts(b"", b"line1\nline2\nline3\n", false).unwrap();
-        assert_eq!((add, del), (3, 0));
-    }
 
-    #[test]
-    fn deleted_file() {
-        let _ = git2::Repository::open(".");
-        let (add, del) = diff_line_counts(b"line1\nline2\n", b"", false).unwrap();
-        assert_eq!((add, del), (0, 2));
-    }
-
-    #[test]
-    fn modified_file() {
-        let _ = git2::Repository::open(".");
-        let (add, del) = diff_line_counts(b"aaa\nbbb\nccc\n", b"aaa\nBBB\nccc\n", false).unwrap();
-        assert_eq!((add, del), (1, 1));
-    }
-
-    #[test]
-    fn binary_returns_zero() {
-        let _ = git2::Repository::open(".");
-        let (add, del) = diff_line_counts(b"\x00binary", b"text\n", false).unwrap();
-        assert_eq!((add, del), (0, 0));
-    }
-
-    #[test]
-    fn ignore_whitespace() {
-        let _ = git2::Repository::open(".");
-        let (add, del) = diff_line_counts(b"hello world\n", b"hello  world\n", true).unwrap();
-        assert_eq!((add, del), (0, 0));
-        let (add, del) = diff_line_counts(b"hello world\n", b"hello  world\n", false).unwrap();
-        assert_eq!((add, del), (1, 1));
-    }
-
-    #[test]
-    fn ignore_whitespace_crlf() {
-        let _ = git2::Repository::open(".");
-        let (add, del) = diff_line_counts(b"line\r\n", b"line\n", true).unwrap();
-        assert_eq!((add, del), (0, 0));
-    }
-
-    #[test]
-    fn ignore_whitespace_trailing() {
-        let _ = git2::Repository::open(".");
-        let (add, del) = diff_line_counts(b"line  \n", b"line\n", true).unwrap();
-        assert_eq!((add, del), (0, 0));
-    }
-
-    #[test]
-    fn identical_files() {
-        let _ = git2::Repository::open(".");
-        let (add, del) = diff_line_counts(b"same\n", b"same\n", false).unwrap();
-        assert_eq!((add, del), (0, 0));
-    }
-
-    #[test]
-    fn both_empty() {
-        let _ = git2::Repository::open(".");
-        let (add, del) = diff_line_counts(b"", b"", false).unwrap();
-        assert_eq!((add, del), (0, 0));
+        for (label, old, new, ignore_ws, expected) in [
+            (
+                "added",
+                &b""[..],
+                &b"line1\nline2\nline3\n"[..],
+                false,
+                (3, 0),
+            ),
+            ("deleted", b"line1\nline2\n", b"", false, (0, 2)),
+            (
+                "modified",
+                b"aaa\nbbb\nccc\n",
+                b"aaa\nBBB\nccc\n",
+                false,
+                (1, 1),
+            ),
+            ("binary", b"\x00binary", b"text\n", false, (0, 0)),
+            ("identical", b"same\n", b"same\n", false, (0, 0)),
+            ("both empty", b"", b"", false, (0, 0)),
+            (
+                "inner space, kept",
+                b"hello world\n",
+                b"hello  world\n",
+                false,
+                (1, 1),
+            ),
+            (
+                "inner space, ignored",
+                b"hello world\n",
+                b"hello  world\n",
+                true,
+                (0, 0),
+            ),
+            ("crlf, ignored", b"line\r\n", b"line\n", true, (0, 0)),
+            (
+                "trailing space, ignored",
+                b"line  \n",
+                b"line\n",
+                true,
+                (0, 0),
+            ),
+        ] {
+            let counts = diff_line_counts(old, new, ignore_ws).unwrap();
+            assert_eq!(counts, expected, "{label}");
+        }
     }
 }

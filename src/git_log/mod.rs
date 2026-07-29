@@ -1,17 +1,15 @@
-#[cfg(any(feature = "libgit-backend", feature = "gix-backend"))]
-mod ref_index;
 #[cfg(feature = "gix-backend")]
 mod gix;
 #[cfg(feature = "libgit-backend")]
 mod libgit;
 mod params;
+#[cfg(any(feature = "libgit-backend", feature = "gix-backend"))]
+mod ref_index;
 #[cfg(feature = "gix-backend")]
 mod remote;
 mod schema;
 mod types;
 mod vector;
-#[cfg(feature = "libgit-backend")]
-mod xdiff;
 
 use params::{BackendKind, GitLogParameter};
 use types::{GitLogReadPlanner, GitLogReader};

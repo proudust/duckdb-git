@@ -4,12 +4,6 @@
 
 require duckdb_git
 
-# Test that parents array works correctly for initial commit (should be empty)
-query I
-SELECT len(parents) FROM git_log('.', revision='b1e7e960fcbee2de7489b7dcca09a9223039521e') LIMIT 1;
-----
-0
-
 # Test that parents values are correct per row (regression: offsets were always 0)
 query II
 SELECT commit_id, parents

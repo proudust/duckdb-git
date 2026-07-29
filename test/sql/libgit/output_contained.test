@@ -6,12 +6,12 @@ require duckdb_git
 
 # KEY distinguishing behavior vs `decorate`: this commit is not a ref tip
 # (decorate is []), but it's an ancestor of every tag below, so it shows up
-# in contained_tags for all of them. Tags are immutable, so exact array
-# equality is safe here.
+# in contained_tags for all of them. Membership only -- a new release tag
+# must not break this.
 query I
-SELECT contained_tags FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1);
+SELECT list_has_all(contained_tags, ['v0.1.1', 'v0.1.2', 'v0.2.0', 'v0.3.0', 'v0.4.0']) FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1);
 ----
-[v0.1.1, v0.1.2, v0.2.0, v0.3.0, v0.4.0]
+true
 
 # Same commit: it's an ancestor of main (presence check only -- main's tip
 # moves over time, but it will always still contain this very old commit).
@@ -40,9 +40,9 @@ true
 
 # decorate='full' format is reused for full ref paths in contained_* too.
 query I
-SELECT contained_tags FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, decorate='full');
+SELECT list_has_all(contained_tags, ['refs/tags/v0.1.1', 'refs/tags/v0.1.2', 'refs/tags/v0.2.0', 'refs/tags/v0.3.0', 'refs/tags/v0.4.0']) FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, decorate='full');
 ----
-[refs/tags/v0.1.1, refs/tags/v0.1.2, refs/tags/v0.2.0, refs/tags/v0.3.0, refs/tags/v0.4.0]
+true
 
 # Full local branch paths (name varies by checkout; assert refs/heads/ prefix).
 query I

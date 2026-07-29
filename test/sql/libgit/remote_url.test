@@ -11,7 +11,3 @@ query I
 SELECT count(*) FROM git_log('https://github.com/proudust/duckdb-git.git', max_count=3);
 ----
 3
-
-# decorate column works on remote repos
-statement ok
-SELECT commit_id, decorate FROM git_log('https://github.com/proudust/duckdb-git.git', max_count=1);

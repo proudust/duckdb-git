@@ -1,7 +1,7 @@
-use crate::git_log::ref_index::{ContainedIndex, RefBits};
 use crate::git_log::params::{
     unresolved_revision_error, DecorateFormat, DiffMerges, GitLogParameter, RevisionTerm,
 };
+use crate::git_log::ref_index::{ContainedIndex, RefBits};
 use crate::git_log::schema;
 use crate::git_log::types::{gitlink_numstat, CommitData, FileChange};
 use crate::git_log::vector::VectorInserter;
@@ -18,423 +18,33 @@ thread_local! {
     static CACHED_REPO: RefCell<Option<(String, Repository)>> = const { RefCell::new(None) };
 }
 
-struct LibGitRepo {
+/// Holds at most one repository per thread: dropping a handle installs its
+/// repository, evicting whatever was cached for a different path. A query
+/// alternating between repositories on the same worker thread therefore
+/// misses every time.
+struct CachedRepo {
     repo: Option<Repository>,
     repo_path: String,
 }
 
-impl LibGitRepo {
+impl CachedRepo {
     fn open(repo_path: &str) -> Result<Self, Box<dyn Error>> {
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
             Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1),
             _ => Repository::open(repo_path),
         })?;
-        Ok(LibGitRepo {
+        Ok(CachedRepo {
             repo: Some(repo),
             repo_path: repo_path.to_string(),
         })
     }
 
     fn repo(&self) -> &Repository {
-        self.repo.as_ref().unwrap()
-    }
-
-    fn get_commit_oids(
-        &self,
-        revision: Option<&[RevisionTerm]>,
-        max_count: Option<usize>,
-    ) -> Result<Vec<git2::Oid>, Box<dyn Error>> {
-        let mut revwalk = self.repo().revwalk()?;
-
-        match revision {
-            Some(terms) => {
-                for term in terms {
-                    let obj =
-                        self.repo()
-                            .revparse_single(&term.spec)
-                            .map_err(|_| -> Box<dyn Error> {
-                                unresolved_revision_error(&term.origin).into()
-                            })?;
-                    if term.negate {
-                        revwalk.hide(obj.id())?;
-                    } else {
-                        revwalk.push(obj.id())?;
-                    }
-                }
-            }
-            None => {
-                revwalk.push_head()?;
-            }
-        }
-
-        let revwalk_iter: Box<dyn Iterator<Item = _>> = match max_count {
-            Some(count) => Box::new(revwalk.take(count)),
-            None => Box::new(revwalk),
-        };
-
-        let mut commit_oids = Vec::new();
-        for oid in revwalk_iter {
-            commit_oids.push(oid?);
-        }
-
-        Ok(commit_oids)
-    }
-
-    fn get_commit(
-        &self,
-        oid: git2::Oid,
-        ignore_all_space: bool,
-        skip_file_changes: bool,
-        diff_merges: DiffMerges,
-    ) -> Result<CommitData, Box<dyn Error>> {
-        let commit = self.repo().find_commit(oid)?;
-        let author = commit.author();
-        let committer = commit.committer();
-
-        let skip =
-            skip_file_changes || (diff_merges == DiffMerges::Off && commit.parent_count() > 1);
-        let file_changes = if skip {
-            Vec::new()
-        } else {
-            self.get_file_changes(&commit, ignore_all_space)?
-        };
-
-        Ok(CommitData {
-            author_name: author.name_bytes().to_vec(),
-            author_email: author.email_bytes().to_vec(),
-            author_timestamp: author.when().seconds(),
-            committer_name: committer.name_bytes().to_vec(),
-            committer_email: committer.email_bytes().to_vec(),
-            committer_timestamp: committer.when().seconds(),
-            message: commit.message_bytes().to_vec(),
-            parents: (0..commit.parent_count())
-                .map(|i| commit.parent_id(i).unwrap().to_string())
-                .collect(),
-            file_changes,
-        })
-    }
-
-    fn get_refs(
-        &self,
-        format: DecorateFormat,
-    ) -> Result<HashMap<git2::Oid, Vec<String>>, Box<dyn Error>> {
-        let mut refs_map: HashMap<git2::Oid, Vec<String>> = HashMap::new();
-        for reference in self.repo().references()? {
-            let reference = reference?;
-            let name = match format {
-                DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
-                DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
-            };
-            if name.is_empty() {
-                continue;
-            }
-            if let Ok(commit) = reference.peel_to_commit() {
-                refs_map.entry(commit.id()).or_default().push(name);
-            }
-        }
-        Ok(refs_map)
-    }
-
-    fn get_contained(
-        &self,
-        format: DecorateFormat,
-        need_branches: bool,
-        need_tags: bool,
-        wanted: &HashSet<git2::Oid>,
-    ) -> Result<ContainedIndex<git2::Oid>, Box<dyn Error>> {
-        let mut branch_refs = Vec::new();
-        if need_branches {
-            for branch in self.repo().branches(None)? {
-                let (branch, _branch_type) = branch?;
-                let reference = branch.get();
-                if reference.kind() != Some(git2::ReferenceType::Direct) {
-                    continue;
-                }
-                let name = match format {
-                    DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
-                    DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
-                };
-                if name.is_empty() {
-                    continue;
-                }
-                if let Ok(tip) = reference.peel_to_commit() {
-                    branch_refs.push((tip.id(), name));
-                }
-            }
-        }
-
-        let mut tag_refs = Vec::new();
-        if need_tags {
-            for reference in self.repo().references()? {
-                let reference = reference?;
-                if !reference.is_tag() {
-                    continue;
-                }
-                let name = match format {
-                    DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
-                    DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
-                };
-                if name.is_empty() {
-                    continue;
-                }
-                if let Ok(tip) = reference.peel_to_commit() {
-                    tag_refs.push((tip.id(), name));
-                }
-            }
-        }
-
-        if branch_refs.is_empty() && tag_refs.is_empty() {
-            return Ok(ContainedIndex::empty());
-        }
-
-        let mut branch_names: Vec<String> =
-            branch_refs.iter().map(|(_, name)| name.clone()).collect();
-        branch_names.sort_unstable();
-        branch_names.dedup();
-
-        let mut tag_names: Vec<String> = tag_refs.iter().map(|(_, name)| name.clone()).collect();
-        tag_names.sort_unstable();
-        tag_names.dedup();
-
-        let branch_words = branch_names.len().div_ceil(64);
-        let tag_words = tag_names.len().div_ceil(64);
-        let total_words = branch_words + tag_words;
-
-        if wanted.is_empty() {
-            return Ok(ContainedIndex {
-                branch_names,
-                tag_names,
-                branch_words,
-                bits: HashMap::new(),
-            });
-        }
-
-        let mut revwalk = self.repo().revwalk()?;
-        revwalk.set_sorting(git2::Sort::TOPOLOGICAL)?;
-
-        let mut pending: HashMap<git2::Oid, RefBits> = HashMap::new();
-        for (tip, name) in &branch_refs {
-            let bit = branch_names
-                .binary_search(name)
-                .expect("name collected above");
-            pending
-                .entry(*tip)
-                .or_insert_with(|| RefBits::new(total_words))
-                .set(bit);
-            revwalk.push(*tip)?;
-        }
-        for (tip, name) in &tag_refs {
-            let bit =
-                branch_words * 64 + tag_names.binary_search(name).expect("name collected above");
-            pending
-                .entry(*tip)
-                .or_insert_with(|| RefBits::new(total_words))
-                .set(bit);
-            revwalk.push(*tip)?;
-        }
-
-        let mut bits: HashMap<git2::Oid, RefBits> = HashMap::new();
-        for oid in revwalk {
-            let oid = oid?;
-            let Some(cur_bits) = pending.remove(&oid) else {
-                continue;
-            };
-            let commit = self.repo().find_commit(oid)?;
-            for parent in commit.parent_ids() {
-                pending
-                    .entry(parent)
-                    .or_insert_with(|| RefBits::new(total_words))
-                    .or_assign(&cur_bits);
-            }
-            if wanted.contains(&oid) {
-                bits.insert(oid, cur_bits);
-                if bits.len() == wanted.len() {
-                    break;
-                }
-            }
-        }
-
-        Ok(ContainedIndex {
-            branch_names,
-            tag_names,
-            branch_words,
-            bits,
-        })
-    }
-
-    fn get_file_changes(
-        &self,
-        commit: &git2::Commit,
-        ignore_all_space: bool,
-    ) -> Result<Vec<FileChange>, git2::Error> {
-        let mut file_changes = Vec::new();
-
-        if commit.parent_count() == 0 {
-            let tree = commit.tree()?;
-            tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
-                if entry.kind() == Some(git2::ObjectType::Tree) {
-                    return git2::TreeWalkResult::Ok;
-                }
-                if let Some(name) = entry.name() {
-                    let oid = entry.id();
-                    if entry.kind() == Some(git2::ObjectType::Commit) {
-                        let (add_lines, del_lines) = gitlink_numstat("A");
-                        file_changes.push(FileChange {
-                            path: format!("{}{}", root, name),
-                            old_path: None,
-                            status: "A",
-                            blob_id: oid.to_string(),
-                            file_size: None,
-                            add_lines,
-                            del_lines,
-                        });
-                    } else if let Ok(blob) = self.repo().find_blob(oid) {
-                        let content = std::str::from_utf8(blob.content());
-                        let add_lines = if let Ok(text) = content {
-                            text.lines().count() as i32
-                        } else {
-                            0
-                        };
-                        file_changes.push(FileChange {
-                            path: format!("{}{}", root, name),
-                            old_path: None,
-                            status: "A",
-                            blob_id: oid.to_string(),
-                            file_size: Some(blob.size() as i64),
-                            add_lines,
-                            del_lines: 0,
-                        });
-                    }
-                }
-                git2::TreeWalkResult::Ok
-            })?;
-            return Ok(file_changes);
-        }
-
-        let parent = commit.parent(0)?;
-        let parent_tree = parent.tree()?;
-        let current_tree = commit.tree()?;
-
-        let mut diff_options = git2::DiffOptions::new();
-        if ignore_all_space {
-            diff_options.ignore_whitespace(true);
-        }
-
-        let mut diff = self.repo().diff_tree_to_tree(
-            Some(&parent_tree),
-            Some(&current_tree),
-            Some(&mut diff_options),
-        )?;
-
-        let mut find_opts = git2::DiffFindOptions::new();
-        find_opts
-            .renames(true)
-            .rename_threshold(50)
-            .ignore_whitespace(ignore_all_space);
-
-        diff.find_similar(Some(&mut find_opts))?;
-
-        file_changes.reserve(diff.deltas().len());
-
-        for i in 0..diff.deltas().len() {
-            let delta = diff.get_delta(i).unwrap();
-
-            let status = match delta.status() {
-                git2::Delta::Added => "A",
-                git2::Delta::Deleted => "D",
-                git2::Delta::Modified => "M",
-                git2::Delta::Renamed => "R",
-                git2::Delta::Copied => "C",
-                git2::Delta::Ignored => "I",
-                git2::Delta::Untracked => "?",
-                git2::Delta::Typechange => "T",
-                _ => "U",
-            };
-
-            let file_path = if let Some(new_file) = delta.new_file().path() {
-                new_file.to_string_lossy().to_string()
-            } else if let Some(old_file) = delta.old_file().path() {
-                old_file.to_string_lossy().to_string()
-            } else {
-                "unknown".to_string()
-            };
-
-            let old_path = match delta.status() {
-                git2::Delta::Renamed | git2::Delta::Copied => delta
-                    .old_file()
-                    .path()
-                    .map(|p| p.to_string_lossy().to_string()),
-                _ => None,
-            };
-
-            let is_gitlink = delta.new_file().mode() == git2::FileMode::Commit
-                || delta.old_file().mode() == git2::FileMode::Commit;
-
-            let (blob_id, file_size, add_lines, del_lines) = if is_gitlink {
-                let id = if delta.new_file().path().is_some() {
-                    delta.new_file().id().to_string()
-                } else if delta.old_file().path().is_some() {
-                    delta.old_file().id().to_string()
-                } else {
-                    "unknown".to_string()
-                };
-                let (add, del) = gitlink_numstat(status);
-                (id, None, add, del)
-            } else {
-                let (blob_id, file_size) = if delta.new_file().path().is_some() {
-                    (
-                        delta.new_file().id().to_string(),
-                        Some(delta.new_file().size() as i64),
-                    )
-                } else if delta.old_file().path().is_some() {
-                    (
-                        delta.old_file().id().to_string(),
-                        Some(delta.old_file().size() as i64),
-                    )
-                } else {
-                    ("unknown".to_string(), Some(0))
-                };
-
-                let (add, del) = {
-                    let old_id = delta.old_file().id();
-                    let new_id = delta.new_file().id();
-                    let old_blob;
-                    let old_content: &[u8] = if old_id.is_zero() {
-                        &[]
-                    } else {
-                        old_blob = self.repo().find_blob(old_id)?;
-                        old_blob.content()
-                    };
-                    let new_blob;
-                    let new_content: &[u8] = if new_id.is_zero() {
-                        &[]
-                    } else {
-                        new_blob = self.repo().find_blob(new_id)?;
-                        new_blob.content()
-                    };
-                    super::xdiff::diff_line_counts(old_content, new_content, ignore_all_space)
-                        .map_err(|e| git2::Error::from_str(&e.to_string()))?
-                };
-
-                (blob_id, file_size, add, del)
-            };
-
-            file_changes.push(FileChange {
-                path: file_path,
-                old_path,
-                status,
-                blob_id,
-                file_size,
-                add_lines,
-                del_lines,
-            });
-        }
-
-        Ok(file_changes)
+        self.repo.as_ref().expect("repo is present outside Drop")
     }
 }
 
-impl Drop for LibGitRepo {
+impl Drop for CachedRepo {
     fn drop(&mut self) {
         if let Some(repo) = self.repo.take() {
             CACHED_REPO.with_borrow_mut(|cached| {
@@ -442,6 +52,396 @@ impl Drop for LibGitRepo {
             });
         }
     }
+}
+
+fn walk_commit_oids(
+    repo: &Repository,
+    revision: Option<&[RevisionTerm]>,
+    max_count: Option<usize>,
+) -> Result<Vec<git2::Oid>, Box<dyn Error>> {
+    let mut revwalk = repo.revwalk()?;
+
+    match revision {
+        Some(terms) => {
+            for term in terms {
+                let obj = repo
+                    .revparse_single(&term.spec)
+                    .map_err(|_| -> Box<dyn Error> {
+                        unresolved_revision_error(&term.origin).into()
+                    })?;
+                if term.negate {
+                    revwalk.hide(obj.id())?;
+                } else {
+                    revwalk.push(obj.id())?;
+                }
+            }
+        }
+        None => {
+            revwalk.push_head()?;
+        }
+    }
+
+    let revwalk_iter: Box<dyn Iterator<Item = _>> = match max_count {
+        Some(count) => Box::new(revwalk.take(count)),
+        None => Box::new(revwalk),
+    };
+
+    let mut commit_oids = Vec::new();
+    for oid in revwalk_iter {
+        commit_oids.push(oid?);
+    }
+
+    Ok(commit_oids)
+}
+
+fn read_commit(
+    repo: &Repository,
+    oid: git2::Oid,
+    ignore_all_space: bool,
+    skip_file_changes: bool,
+    diff_merges: DiffMerges,
+) -> Result<CommitData, Box<dyn Error>> {
+    let commit = repo.find_commit(oid)?;
+    let author = commit.author();
+    let committer = commit.committer();
+
+    let skip = skip_file_changes || (diff_merges == DiffMerges::Off && commit.parent_count() > 1);
+    let file_changes = if skip {
+        Vec::new()
+    } else {
+        collect_file_changes(repo, &commit, ignore_all_space)?
+    };
+
+    Ok(CommitData {
+        author_name: author.name_bytes().to_vec(),
+        author_email: author.email_bytes().to_vec(),
+        author_timestamp: author.when().seconds(),
+        committer_name: committer.name_bytes().to_vec(),
+        committer_email: committer.email_bytes().to_vec(),
+        committer_timestamp: committer.when().seconds(),
+        message: commit.message_bytes().to_vec(),
+        parents: (0..commit.parent_count())
+            .map(|i| commit.parent_id(i).unwrap().to_string())
+            .collect(),
+        file_changes,
+    })
+}
+
+fn collect_refs(
+    repo: &Repository,
+    format: DecorateFormat,
+) -> Result<HashMap<git2::Oid, Vec<String>>, Box<dyn Error>> {
+    let mut refs_map: HashMap<git2::Oid, Vec<String>> = HashMap::new();
+    for reference in repo.references()? {
+        let reference = reference?;
+        let name = match format {
+            DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
+            DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
+        };
+        if name.is_empty() {
+            continue;
+        }
+        if let Ok(commit) = reference.peel_to_commit() {
+            refs_map.entry(commit.id()).or_default().push(name);
+        }
+    }
+    Ok(refs_map)
+}
+
+fn build_contained_index(
+    repo: &Repository,
+    format: DecorateFormat,
+    need_branches: bool,
+    need_tags: bool,
+    wanted: &HashSet<git2::Oid>,
+) -> Result<ContainedIndex<git2::Oid>, Box<dyn Error>> {
+    let mut branch_refs = Vec::new();
+    if need_branches {
+        for branch in repo.branches(None)? {
+            let (branch, _branch_type) = branch?;
+            let reference = branch.get();
+            if reference.kind() != Some(git2::ReferenceType::Direct) {
+                continue;
+            }
+            let name = match format {
+                DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
+                DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            if let Ok(tip) = reference.peel_to_commit() {
+                branch_refs.push((tip.id(), name));
+            }
+        }
+    }
+
+    let mut tag_refs = Vec::new();
+    if need_tags {
+        for reference in repo.references()? {
+            let reference = reference?;
+            if !reference.is_tag() {
+                continue;
+            }
+            let name = match format {
+                DecorateFormat::Short => reference.shorthand().unwrap_or("").to_string(),
+                DecorateFormat::Full => reference.name().unwrap_or("").to_string(),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            if let Ok(tip) = reference.peel_to_commit() {
+                tag_refs.push((tip.id(), name));
+            }
+        }
+    }
+
+    if branch_refs.is_empty() && tag_refs.is_empty() {
+        return Ok(ContainedIndex::empty());
+    }
+
+    let mut branch_names: Vec<String> = branch_refs.iter().map(|(_, name)| name.clone()).collect();
+    branch_names.sort_unstable();
+    branch_names.dedup();
+
+    let mut tag_names: Vec<String> = tag_refs.iter().map(|(_, name)| name.clone()).collect();
+    tag_names.sort_unstable();
+    tag_names.dedup();
+
+    let branch_words = branch_names.len().div_ceil(64);
+    let tag_words = tag_names.len().div_ceil(64);
+    let total_words = branch_words + tag_words;
+
+    if wanted.is_empty() {
+        return Ok(ContainedIndex {
+            branch_names,
+            tag_names,
+            branch_words,
+            bits: HashMap::new(),
+        });
+    }
+
+    let mut revwalk = repo.revwalk()?;
+    revwalk.set_sorting(git2::Sort::TOPOLOGICAL)?;
+
+    let mut pending: HashMap<git2::Oid, RefBits> = HashMap::new();
+    for (tip, name) in &branch_refs {
+        let bit = branch_names
+            .binary_search(name)
+            .expect("name collected above");
+        pending
+            .entry(*tip)
+            .or_insert_with(|| RefBits::new(total_words))
+            .set(bit);
+        revwalk.push(*tip)?;
+    }
+    for (tip, name) in &tag_refs {
+        let bit = branch_words * 64 + tag_names.binary_search(name).expect("name collected above");
+        pending
+            .entry(*tip)
+            .or_insert_with(|| RefBits::new(total_words))
+            .set(bit);
+        revwalk.push(*tip)?;
+    }
+
+    let mut bits: HashMap<git2::Oid, RefBits> = HashMap::new();
+    for oid in revwalk {
+        let oid = oid?;
+        let Some(cur_bits) = pending.remove(&oid) else {
+            continue;
+        };
+        let commit = repo.find_commit(oid)?;
+        for parent in commit.parent_ids() {
+            pending
+                .entry(parent)
+                .or_insert_with(|| RefBits::new(total_words))
+                .or_assign(&cur_bits);
+        }
+        if wanted.contains(&oid) {
+            bits.insert(oid, cur_bits);
+            if bits.len() == wanted.len() {
+                break;
+            }
+        }
+    }
+
+    Ok(ContainedIndex {
+        branch_names,
+        tag_names,
+        branch_words,
+        bits,
+    })
+}
+
+fn collect_file_changes(
+    repo: &Repository,
+    commit: &git2::Commit,
+    ignore_all_space: bool,
+) -> Result<Vec<FileChange>, git2::Error> {
+    let mut file_changes = Vec::new();
+
+    if commit.parent_count() == 0 {
+        let tree = commit.tree()?;
+        tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+            if entry.kind() == Some(git2::ObjectType::Tree) {
+                return git2::TreeWalkResult::Ok;
+            }
+            if let Some(name) = entry.name() {
+                let oid = entry.id();
+                if entry.kind() == Some(git2::ObjectType::Commit) {
+                    let (add_lines, del_lines) = gitlink_numstat("A");
+                    file_changes.push(FileChange {
+                        path: format!("{}{}", root, name),
+                        old_path: None,
+                        status: "A",
+                        blob_id: oid.to_string(),
+                        file_size: None,
+                        add_lines,
+                        del_lines,
+                    });
+                } else if let Ok(blob) = repo.find_blob(oid) {
+                    let content = std::str::from_utf8(blob.content());
+                    let add_lines = if let Ok(text) = content {
+                        text.lines().count() as i32
+                    } else {
+                        0
+                    };
+                    file_changes.push(FileChange {
+                        path: format!("{}{}", root, name),
+                        old_path: None,
+                        status: "A",
+                        blob_id: oid.to_string(),
+                        file_size: Some(blob.size() as i64),
+                        add_lines,
+                        del_lines: 0,
+                    });
+                }
+            }
+            git2::TreeWalkResult::Ok
+        })?;
+        return Ok(file_changes);
+    }
+
+    let parent = commit.parent(0)?;
+    let parent_tree = parent.tree()?;
+    let current_tree = commit.tree()?;
+
+    let mut diff_options = git2::DiffOptions::new();
+    if ignore_all_space {
+        diff_options.ignore_whitespace(true);
+    }
+
+    let mut diff = repo.diff_tree_to_tree(
+        Some(&parent_tree),
+        Some(&current_tree),
+        Some(&mut diff_options),
+    )?;
+
+    let mut find_opts = git2::DiffFindOptions::new();
+    find_opts
+        .renames(true)
+        .rename_threshold(50)
+        .ignore_whitespace(ignore_all_space);
+
+    diff.find_similar(Some(&mut find_opts))?;
+
+    file_changes.reserve(diff.deltas().len());
+
+    for i in 0..diff.deltas().len() {
+        let delta = diff.get_delta(i).unwrap();
+
+        let status = match delta.status() {
+            git2::Delta::Added => "A",
+            git2::Delta::Deleted => "D",
+            git2::Delta::Modified => "M",
+            git2::Delta::Renamed => "R",
+            git2::Delta::Copied => "C",
+            git2::Delta::Ignored => "I",
+            git2::Delta::Untracked => "?",
+            git2::Delta::Typechange => "T",
+            _ => "U",
+        };
+
+        let file_path = if let Some(new_file) = delta.new_file().path() {
+            new_file.to_string_lossy().to_string()
+        } else if let Some(old_file) = delta.old_file().path() {
+            old_file.to_string_lossy().to_string()
+        } else {
+            "unknown".to_string()
+        };
+
+        let old_path = match delta.status() {
+            git2::Delta::Renamed | git2::Delta::Copied => delta
+                .old_file()
+                .path()
+                .map(|p| p.to_string_lossy().to_string()),
+            _ => None,
+        };
+
+        let is_gitlink = delta.new_file().mode() == git2::FileMode::Commit
+            || delta.old_file().mode() == git2::FileMode::Commit;
+
+        let (blob_id, file_size, add_lines, del_lines) = if is_gitlink {
+            let id = if delta.new_file().path().is_some() {
+                delta.new_file().id().to_string()
+            } else if delta.old_file().path().is_some() {
+                delta.old_file().id().to_string()
+            } else {
+                "unknown".to_string()
+            };
+            let (add, del) = gitlink_numstat(status);
+            (id, None, add, del)
+        } else {
+            let (blob_id, file_size) = if delta.new_file().path().is_some() {
+                (
+                    delta.new_file().id().to_string(),
+                    Some(delta.new_file().size() as i64),
+                )
+            } else if delta.old_file().path().is_some() {
+                (
+                    delta.old_file().id().to_string(),
+                    Some(delta.old_file().size() as i64),
+                )
+            } else {
+                ("unknown".to_string(), Some(0))
+            };
+
+            let (add, del) = {
+                let old_id = delta.old_file().id();
+                let new_id = delta.new_file().id();
+                let old_blob;
+                let old_content: &[u8] = if old_id.is_zero() {
+                    &[]
+                } else {
+                    old_blob = repo.find_blob(old_id)?;
+                    old_blob.content()
+                };
+                let new_blob;
+                let new_content: &[u8] = if new_id.is_zero() {
+                    &[]
+                } else {
+                    new_blob = repo.find_blob(new_id)?;
+                    new_blob.content()
+                };
+                super::xdiff::diff_line_counts(old_content, new_content, ignore_all_space)
+                    .map_err(|e| git2::Error::from_str(&e.to_string()))?
+            };
+
+            (blob_id, file_size, add, del)
+        };
+
+        file_changes.push(FileChange {
+            path: file_path,
+            old_path,
+            status,
+            blob_id,
+            file_size,
+            add_lines,
+            del_lines,
+        });
+    }
+
+    Ok(file_changes)
 }
 
 struct LibGitLogReadPlannerInner {
@@ -464,11 +464,12 @@ impl LibGitLogReadPlanner {
         params: &GitLogParameter,
         column_indices: &[u64],
     ) -> Result<Self, Box<dyn Error>> {
-        let repo = LibGitRepo::open(repo_path)?;
+        let handle = CachedRepo::open(repo_path)?;
+        let repo = handle.repo();
 
-        let commit_oids = repo.get_commit_oids(params.revision.as_deref(), params.max_count)?;
+        let commit_oids = walk_commit_oids(repo, params.revision.as_deref(), params.max_count)?;
         let decorations = if schema::needs_refs(column_indices) {
-            repo.get_refs(params.decorate)?
+            collect_refs(repo, params.decorate)?
         } else {
             HashMap::new()
         };
@@ -476,7 +477,7 @@ impl LibGitLogReadPlanner {
         let need_tags = schema::needs_contained_tags(column_indices);
         let contained = if need_branches || need_tags {
             let wanted: HashSet<git2::Oid> = commit_oids.iter().copied().collect();
-            repo.get_contained(params.decorate, need_branches, need_tags, &wanted)?
+            build_contained_index(repo, params.decorate, need_branches, need_tags, &wanted)?
         } else {
             ContainedIndex::empty()
         };
@@ -537,7 +538,8 @@ impl GitLogReader for LibGitLogReader {
             self.inner.commit_oids.len(),
         );
 
-        let repo = LibGitRepo::open(&self.inner.repo_path)?;
+        let handle = CachedRepo::open(&self.inner.repo_path)?;
+        let repo = handle.repo();
 
         let mut writer = VectorInserter::new(output, column_indices);
 
@@ -545,7 +547,8 @@ impl GitLogReader for LibGitLogReader {
         let skip_file_changes = !schema::needs_file_changes(column_indices);
         let oids = &self.inner.commit_oids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
-            let commit = repo.get_commit(
+            let commit = read_commit(
+                repo,
                 *oid,
                 self.ignore_all_space,
                 skip_file_changes,
@@ -581,25 +584,66 @@ mod tests {
     const SECOND_COMMIT: &str = "2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5";
     const TAGGED_COMMIT: &str = "295db8704f2b2e12fe71a1f433b8b17906fedf25"; // v0.1.1 (annotated tag)
 
+    /// The only non-obvious behaviour in this module: drop installs into a
+    /// one-slot thread cache, a matching path is taken back out, and a
+    /// mismatching one is evicted only once the new handle drops.
     #[test]
-    fn get_commit_honors_skip_file_changes() {
-        let repo = LibGitRepo::open(".").unwrap();
+    fn cached_repo_round_trips_through_thread_cache() {
+        // --test-threads=1 runs tests on the shared main thread, so start clean.
+        CACHED_REPO.with_borrow_mut(|cached| *cached = None);
+
+        {
+            let handle = CachedRepo::open(".").unwrap();
+            assert!(handle.repo().path().exists());
+        }
+        CACHED_REPO.with_borrow(|cached| {
+            assert!(
+                matches!(cached, Some((path, _)) if path == "."),
+                "drop installs"
+            );
+        });
+
+        {
+            let _handle = CachedRepo::open(".").unwrap();
+            CACHED_REPO.with_borrow(|cached| {
+                assert!(cached.is_none(), "a matching path is taken from the cache");
+            });
+        }
+
+        {
+            let _handle = CachedRepo::open("./.git").unwrap();
+            CACHED_REPO.with_borrow(|cached| {
+                assert!(
+                    matches!(cached, Some((path, _)) if path == "."),
+                    "a miss leaves the cached entry alone"
+                );
+            });
+        }
+        CACHED_REPO.with_borrow(|cached| {
+            assert!(
+                matches!(cached, Some((path, _)) if path == "./.git"),
+                "drop evicts the previous entry"
+            );
+        });
+
+        CACHED_REPO.with_borrow_mut(|cached| *cached = None);
+    }
+
+    #[test]
+    fn read_commit_honors_skip_file_changes() {
+        let repo = Repository::open(".").unwrap();
         let oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
 
-        let skipped = repo
-            .get_commit(oid, false, true, DiffMerges::FirstParent)
-            .unwrap();
+        let skipped = read_commit(&repo, oid, false, true, DiffMerges::FirstParent).unwrap();
         assert!(skipped.file_changes.is_empty());
 
-        let kept = repo
-            .get_commit(oid, false, false, DiffMerges::FirstParent)
-            .unwrap();
+        let kept = read_commit(&repo, oid, false, false, DiffMerges::FirstParent).unwrap();
         assert!(!kept.file_changes.is_empty());
     }
 
     #[test]
-    fn get_refs_peels_annotated_tag_to_commit() {
-        let repo = LibGitRepo::open(".").unwrap();
+    fn collect_refs_peels_annotated_tag_to_commit() {
+        let repo = Repository::open(".").unwrap();
         let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
         let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
 
@@ -607,7 +651,7 @@ mod tests {
             (DecorateFormat::Short, "v0.1.1"),
             (DecorateFormat::Full, "refs/tags/v0.1.1"),
         ] {
-            let refs = repo.get_refs(format).unwrap();
+            let refs = collect_refs(&repo, format).unwrap();
             let names = refs
                 .get(&tagged_oid)
                 .expect("tagged commit should have refs");
@@ -618,13 +662,12 @@ mod tests {
     }
 
     #[test]
-    fn get_contained_tags_marks_all_descendant_tags() {
-        let repo = LibGitRepo::open(".").unwrap();
+    fn contained_index_tags_marks_all_descendant_tags() {
+        let repo = Repository::open(".").unwrap();
         let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
         let wanted: HashSet<git2::Oid> = [tagged_oid].into_iter().collect();
-        let index = repo
-            .get_contained(DecorateFormat::Short, false, true, &wanted)
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, false, true, &wanted).unwrap();
         let names: Vec<&str> = index.tags_of(&tagged_oid).collect();
         assert!(
             names.windows(2).all(|w| w[0] <= w[1]),
@@ -632,57 +675,54 @@ mod tests {
         );
         // Every release tag descends from v0.1.1's commit. Membership only, so a
         // new release tag does not break this; exclusion is covered exactly by
-        // get_contained_is_exact_for_merge_fan_in.
+        // contained_index_is_exact_for_merge_fan_in.
         for tag in ["v0.1.1", "v0.1.2", "v0.2.0", "v0.3.0", "v0.4.0"] {
             assert!(names.contains(&tag), "{tag} missing from {names:?}");
         }
     }
 
     #[test]
-    fn get_contained_tags_full_format() {
-        let repo = LibGitRepo::open(".").unwrap();
+    fn contained_index_tags_full_format() {
+        let repo = Repository::open(".").unwrap();
         let tagged_oid = git2::Oid::from_str(TAGGED_COMMIT).unwrap();
         let wanted: HashSet<git2::Oid> = [tagged_oid].into_iter().collect();
-        let index = repo
-            .get_contained(DecorateFormat::Full, false, true, &wanted)
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Full, false, true, &wanted).unwrap();
         assert!(index.tags_of(&tagged_oid).any(|n| n == "refs/tags/v0.1.1"));
     }
 
     #[test]
-    fn get_contained_branches_marks_ancestor() {
-        let repo = LibGitRepo::open(".").unwrap();
-        let head = repo.repo().head().unwrap();
+    fn contained_index_branches_marks_ancestor() {
+        let repo = Repository::open(".").unwrap();
+        let head = repo.head().unwrap();
         let head_name = head.shorthand().unwrap().to_string();
         let second_oid = git2::Oid::from_str(SECOND_COMMIT).unwrap();
         let wanted: HashSet<git2::Oid> = [second_oid].into_iter().collect();
-        let index = repo
-            .get_contained(DecorateFormat::Short, true, false, &wanted)
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, true, false, &wanted).unwrap();
         assert!(index.branches_of(&second_oid).any(|n| n == head_name));
         // Remote-tracking branches are included too.
         assert!(index.branches_of(&second_oid).any(|n| n == "origin/main"));
     }
 
     #[test]
-    fn get_contained_branches_skips_symbolic_head_alias() {
-        let repo = LibGitRepo::open(".").unwrap();
-        let index = repo
-            .get_contained(DecorateFormat::Short, true, false, &HashSet::new())
-            .unwrap();
+    fn contained_index_branches_skips_symbolic_head_alias() {
+        let repo = Repository::open(".").unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, true, false, &HashSet::new())
+                .unwrap();
         assert!(!index.branch_names.iter().any(|n| n == "origin/HEAD"));
     }
 
     #[test]
-    fn get_contained_branches_self_inclusive() {
-        let repo = LibGitRepo::open(".").unwrap();
-        let head = repo.repo().head().unwrap();
+    fn contained_index_branches_self_inclusive() {
+        let repo = Repository::open(".").unwrap();
+        let head = repo.head().unwrap();
         let head_oid = head.peel_to_commit().unwrap().id();
         let head_name = head.shorthand().unwrap().to_string();
         let wanted: HashSet<git2::Oid> = [head_oid].into_iter().collect();
-        let index = repo
-            .get_contained(DecorateFormat::Short, true, false, &wanted)
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, true, false, &wanted).unwrap();
         assert!(index.branches_of(&head_oid).any(|n| n == head_name));
     }
 
@@ -713,9 +753,9 @@ mod tests {
     }
 
     #[test]
-    fn get_contained_is_exact_for_merge_fan_in() {
+    fn contained_index_is_exact_for_merge_fan_in() {
         let (dir, [a_id, b_id, c_id, d_id]) = init_fan_in_repo();
-        let lgr = LibGitRepo::open(dir.path().to_str().unwrap()).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
 
         let expected = [
             (d_id, vec!["merged"]),
@@ -725,9 +765,7 @@ mod tests {
         ];
 
         let all: HashSet<git2::Oid> = [a_id, b_id, c_id, d_id].into_iter().collect();
-        let index = lgr
-            .get_contained(DecorateFormat::Short, false, true, &all)
-            .unwrap();
+        let index = build_contained_index(&repo, DecorateFormat::Short, false, true, &all).unwrap();
         for (oid, want) in &expected {
             assert_eq!(index.tags_of(oid).collect::<Vec<_>>(), *want);
         }
@@ -736,15 +774,14 @@ mod tests {
         // must not change.
         for (oid, want) in &expected {
             let wanted: HashSet<git2::Oid> = [*oid].into_iter().collect();
-            let index = lgr
-                .get_contained(DecorateFormat::Short, false, true, &wanted)
-                .unwrap();
+            let index =
+                build_contained_index(&repo, DecorateFormat::Short, false, true, &wanted).unwrap();
             assert_eq!(index.tags_of(oid).collect::<Vec<_>>(), *want);
         }
 
-        let index = lgr
-            .get_contained(DecorateFormat::Short, false, true, &HashSet::new())
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, false, true, &HashSet::new())
+                .unwrap();
         assert_eq!(index.tag_names, vec!["left", "merged", "right"]);
         assert_eq!(index.tags_of(&d_id).count(), 0);
     }
@@ -783,13 +820,12 @@ mod tests {
     }
 
     #[test]
-    fn get_contained_multi_word_refbits() {
+    fn contained_index_multi_word_refbits() {
         let (dir, [root_id, tip_id]) = init_multi_word_repo();
-        let lgr = LibGitRepo::open(dir.path().to_str().unwrap()).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
         let wanted: HashSet<git2::Oid> = [root_id, tip_id].into_iter().collect();
-        let index = lgr
-            .get_contained(DecorateFormat::Short, true, true, &wanted)
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, true, true, &wanted).unwrap();
 
         assert!(
             index.branch_words > 1,

@@ -1,7 +1,7 @@
-use crate::git_log::ref_index::{ContainedIndex, RefBits};
 use crate::git_log::params::{
     unresolved_revision_error, DecorateFormat, DiffMerges, GitLogParameter, RevisionTerm,
 };
+use crate::git_log::ref_index::{ContainedIndex, RefBits};
 use crate::git_log::schema;
 use crate::git_log::types::{gitlink_numstat, CommitData, FileChange};
 use crate::git_log::vector::VectorInserter;
@@ -17,397 +17,33 @@ thread_local! {
     static CACHED_REPO: RefCell<Option<(String, gix::ThreadSafeRepository)>> = const { RefCell::new(None) };
 }
 
-struct GixRepo {
+/// Holds at most one repository per thread: dropping a handle installs its
+/// repository, evicting whatever was cached for a different path. A query
+/// alternating between repositories on the same worker thread therefore
+/// misses every time.
+struct CachedRepo {
     repo: Option<gix::Repository>,
     repo_path: String,
 }
 
-impl GixRepo {
+impl CachedRepo {
     fn open(repo_path: &str) -> Result<Self, Box<dyn Error>> {
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
             Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1.to_thread_local()),
             _ => gix::open(repo_path).map_err(|e| -> Box<dyn Error> { Box::new(e) }),
         })?;
-        Ok(GixRepo {
+        Ok(CachedRepo {
             repo: Some(repo),
             repo_path: repo_path.to_string(),
         })
     }
 
     fn repo(&self) -> &gix::Repository {
-        self.repo.as_ref().unwrap()
-    }
-
-    fn get_commit_oids(
-        &self,
-        revision: Option<&[RevisionTerm]>,
-        max_count: Option<usize>,
-    ) -> Result<Vec<gix::ObjectId>, Box<dyn Error>> {
-        let (tips, hidden) = match revision {
-            Some(terms) => {
-                let mut tips = Vec::new();
-                let mut hidden = Vec::new();
-                for term in terms {
-                    let id = self
-                        .repo()
-                        .rev_parse_single(term.spec.as_str())
-                        .map_err(|_| -> Box<dyn Error> {
-                            unresolved_revision_error(&term.origin).into()
-                        })?
-                        .detach();
-                    if term.negate {
-                        hidden.push(id);
-                    } else {
-                        tips.push(id);
-                    }
-                }
-                (tips, hidden)
-            }
-            None => (vec![self.repo().head_id()?.detach()], Vec::new()),
-        };
-
-        let walk = self.repo().rev_walk(tips).with_hidden(hidden);
-        let all = walk.all()?;
-
-        let oids: Result<Vec<gix::ObjectId>, Box<dyn Error>> = match max_count {
-            Some(count) => all.take(count).map(|info| Ok(info?.id)).collect(),
-            None => all.map(|info| Ok(info?.id)).collect(),
-        };
-
-        oids
-    }
-
-    fn get_commit(
-        &self,
-        oid: gix::ObjectId,
-        // TODO: gix does not yet support ignore_all_space option for diffs
-        _ignore_all_space: bool,
-        skip_file_changes: bool,
-        diff_merges: DiffMerges,
-    ) -> Result<CommitData, Box<dyn Error>> {
-        let commit = self.repo().find_commit(oid)?;
-
-        let author_name = commit.author().map(|a| a.name.to_vec()).unwrap_or_default();
-        let author_email = commit
-            .author()
-            .map(|a| a.email.to_vec())
-            .unwrap_or_default();
-        let author_timestamp = commit
-            .author()
-            .ok()
-            .and_then(|a| a.time().ok())
-            .map(|t| t.seconds)
-            .unwrap_or(0);
-
-        let committer_name = commit
-            .committer()
-            .map(|a| a.name.to_vec())
-            .unwrap_or_default();
-        let committer_email = commit
-            .committer()
-            .map(|a| a.email.to_vec())
-            .unwrap_or_default();
-        let committer_timestamp = commit
-            .committer()
-            .ok()
-            .and_then(|a| a.time().ok())
-            .map(|t| t.seconds)
-            .unwrap_or(0);
-
-        let message = commit.message_raw_sloppy().to_vec();
-        let parents = commit.parent_ids().map(|id| id.to_string()).collect();
-
-        let skip = skip_file_changes
-            || (diff_merges == DiffMerges::Off && commit.parent_ids().count() > 1);
-        let file_changes = if skip {
-            Vec::new()
-        } else {
-            self.get_file_changes(&commit)?
-        };
-
-        Ok(CommitData {
-            author_name,
-            author_email,
-            author_timestamp,
-            committer_name,
-            committer_email,
-            committer_timestamp,
-            message,
-            parents,
-            file_changes,
-        })
-    }
-
-    fn get_refs(
-        &self,
-        format: DecorateFormat,
-    ) -> Result<HashMap<gix::ObjectId, Vec<String>>, Box<dyn Error>> {
-        let mut refs_map: HashMap<gix::ObjectId, Vec<String>> = HashMap::new();
-
-        let platform = self.repo().references()?;
-        for reference in platform.all()? {
-            let mut reference = reference.map_err(|e| e.to_string())?;
-            let name = match format {
-                DecorateFormat::Short => reference.name().shorten().to_string(),
-                DecorateFormat::Full => reference.name().as_bstr().to_string(),
-            };
-            if name.is_empty() {
-                continue;
-            }
-            if let Ok(commit) = reference.peel_to_commit() {
-                refs_map.entry(commit.id).or_default().push(name);
-            }
-        }
-        Ok(refs_map)
-    }
-
-    fn get_contained(
-        &self,
-        format: DecorateFormat,
-        need_branches: bool,
-        need_tags: bool,
-        wanted: &HashSet<gix::ObjectId>,
-    ) -> Result<ContainedIndex<gix::ObjectId>, Box<dyn Error>> {
-        let platform = self.repo().references()?;
-
-        let collect = |iter: gix::reference::iter::Iter<'_, '_>,
-                       out: &mut Vec<(gix::ObjectId, String)>|
-         -> Result<(), Box<dyn Error>> {
-            for reference in iter {
-                let mut reference = reference.map_err(|e| e.to_string())?;
-                if matches!(reference.inner.target, gix::refs::Target::Symbolic(_)) {
-                    continue;
-                }
-                let name = match format {
-                    DecorateFormat::Short => reference.name().shorten().to_string(),
-                    DecorateFormat::Full => reference.name().as_bstr().to_string(),
-                };
-                if name.is_empty() {
-                    continue;
-                }
-                if let Ok(commit) = reference.peel_to_commit() {
-                    out.push((commit.id, name));
-                }
-            }
-            Ok(())
-        };
-
-        let mut branch_refs = Vec::new();
-        if need_branches {
-            collect(platform.local_branches()?, &mut branch_refs)?;
-            collect(platform.remote_branches()?, &mut branch_refs)?;
-        }
-
-        let mut tag_refs = Vec::new();
-        if need_tags {
-            collect(platform.tags()?, &mut tag_refs)?;
-        }
-
-        if branch_refs.is_empty() && tag_refs.is_empty() {
-            return Ok(ContainedIndex::empty());
-        }
-
-        let mut branch_names: Vec<String> =
-            branch_refs.iter().map(|(_, name)| name.clone()).collect();
-        branch_names.sort_unstable();
-        branch_names.dedup();
-
-        let mut tag_names: Vec<String> = tag_refs.iter().map(|(_, name)| name.clone()).collect();
-        tag_names.sort_unstable();
-        tag_names.dedup();
-
-        let branch_words = branch_names.len().div_ceil(64);
-        let tag_words = tag_names.len().div_ceil(64);
-        let total_words = branch_words + tag_words;
-
-        if wanted.is_empty() {
-            return Ok(ContainedIndex {
-                branch_names,
-                tag_names,
-                branch_words,
-                bits: HashMap::new(),
-            });
-        }
-
-        let mut pending: HashMap<gix::ObjectId, RefBits> = HashMap::new();
-        for (tip, name) in &branch_refs {
-            let bit = branch_names
-                .binary_search(name)
-                .expect("name collected above");
-            pending
-                .entry(*tip)
-                .or_insert_with(|| RefBits::new(total_words))
-                .set(bit);
-        }
-        for (tip, name) in &tag_refs {
-            let bit =
-                branch_words * 64 + tag_names.binary_search(name).expect("name collected above");
-            pending
-                .entry(*tip)
-                .or_insert_with(|| RefBits::new(total_words))
-                .set(bit);
-        }
-
-        let tips: Vec<gix::ObjectId> = pending.keys().copied().collect();
-        let mut parents_of: HashMap<gix::ObjectId, gix::traverse::commit::ParentIds> =
-            HashMap::new();
-        let mut child_count: HashMap<gix::ObjectId, usize> = HashMap::new();
-        for info in self.repo().rev_walk(tips).all()? {
-            let info = info?;
-            child_count.entry(info.id).or_insert(0);
-            for parent in &info.parent_ids {
-                *child_count.entry(*parent).or_insert(0) += 1;
-            }
-            parents_of.insert(info.id, info.parent_ids);
-        }
-
-        let mut queue: Vec<gix::ObjectId> = child_count
-            .iter()
-            .filter(|(_, count)| **count == 0)
-            .map(|(id, _)| *id)
-            .collect();
-
-        let mut bits: HashMap<gix::ObjectId, RefBits> = HashMap::new();
-        while let Some(id) = queue.pop() {
-            let cur_bits = pending.remove(&id);
-            for parent in parents_of
-                .get(&id)
-                .map(|p| p.as_slice())
-                .unwrap_or_default()
-            {
-                if let Some(cur_bits) = cur_bits.as_ref() {
-                    pending
-                        .entry(*parent)
-                        .or_insert_with(|| RefBits::new(total_words))
-                        .or_assign(cur_bits);
-                }
-                // A parent becomes ready once every child has propagated into it.
-                if let Some(count) = child_count.get_mut(parent) {
-                    *count -= 1;
-                    if *count == 0 {
-                        queue.push(*parent);
-                    }
-                }
-            }
-            let Some(cur_bits) = cur_bits else {
-                continue;
-            };
-            if wanted.contains(&id) {
-                bits.insert(id, cur_bits);
-                if bits.len() == wanted.len() {
-                    break;
-                }
-            }
-        }
-
-        Ok(ContainedIndex {
-            branch_names,
-            tag_names,
-            branch_words,
-            bits,
-        })
-    }
-
-    fn get_file_changes(
-        &self,
-        commit: &gix::Commit,
-    ) -> Result<Vec<FileChange>, Box<dyn std::error::Error>> {
-        let mut file_changes = Vec::new();
-        let current_tree = commit.tree()?;
-
-        let parent_tree = if commit.parent_ids().count() == 0 {
-            self.repo().empty_tree()
-        } else {
-            let parent_id = commit.parent_ids().next().unwrap().detach();
-            self.repo().find_commit(parent_id)?.tree()?
-        };
-
-        let mut resource_cache = self.repo().diff_resource_cache_for_tree_diff()?;
-
-        parent_tree
-            .changes()?
-            .for_each_to_obtain_tree(&current_tree, |change| {
-                use gix::object::tree::diff::Change;
-
-                // Directories are reported as their own Addition/Deletion/Modification
-                // entries alongside their recursed-into children; skip them so only
-                // blob-level changes are returned, matching the git2 backend.
-                let entry_mode = match &change {
-                    Change::Addition { entry_mode, .. } => *entry_mode,
-                    Change::Deletion { entry_mode, .. } => *entry_mode,
-                    Change::Modification { entry_mode, .. } => *entry_mode,
-                    Change::Rewrite { entry_mode, .. } => *entry_mode,
-                };
-                if entry_mode.is_tree() {
-                    return Ok::<_, std::convert::Infallible>(
-                        gix::object::tree::diff::Action::Continue(()),
-                    );
-                }
-
-                let location = change.location().to_string();
-                let (status, old_path): (&'static str, Option<String>) = match &change {
-                    Change::Addition { .. } => ("A", None),
-                    Change::Deletion { .. } => ("D", None),
-                    Change::Modification { .. } => ("M", None),
-                    Change::Rewrite {
-                        copy: true,
-                        source_location,
-                        ..
-                    } => (
-                        "C",
-                        Some(String::from_utf8_lossy(source_location).into_owned()),
-                    ),
-                    Change::Rewrite {
-                        copy: false,
-                        source_location,
-                        ..
-                    } => (
-                        "R",
-                        Some(String::from_utf8_lossy(source_location).into_owned()),
-                    ),
-                };
-
-                let id = change.id();
-                let is_gitlink = entry_mode.is_commit();
-
-                let file_size = if is_gitlink {
-                    None
-                } else {
-                    id.try_header().ok().flatten().map(|h| h.size() as i64)
-                };
-
-                let (add_lines, del_lines) = if is_gitlink {
-                    gitlink_numstat(status)
-                } else {
-                    change
-                        .diff(&mut resource_cache)
-                        .ok()
-                        .and_then(|mut platform| platform.line_counts().ok())
-                        .flatten()
-                        .map(|counts| (counts.insertions as i32, counts.removals as i32))
-                        .unwrap_or((0, 0))
-                };
-
-                resource_cache.clear_resource_cache_keep_allocation();
-
-                file_changes.push(FileChange {
-                    path: location,
-                    old_path,
-                    status,
-                    blob_id: id.to_string(),
-                    file_size,
-                    add_lines,
-                    del_lines,
-                });
-
-                Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue(()))
-            })?;
-
-        Ok(file_changes)
+        self.repo.as_ref().expect("repo is present outside Drop")
     }
 }
 
-impl Drop for GixRepo {
+impl Drop for CachedRepo {
     fn drop(&mut self) {
         if let Some(repo) = self.repo.take() {
             let sync_repo = repo.into_sync();
@@ -416,6 +52,370 @@ impl Drop for GixRepo {
             });
         }
     }
+}
+
+fn walk_commit_oids(
+    repo: &gix::Repository,
+    revision: Option<&[RevisionTerm]>,
+    max_count: Option<usize>,
+) -> Result<Vec<gix::ObjectId>, Box<dyn Error>> {
+    let (tips, hidden) = match revision {
+        Some(terms) => {
+            let mut tips = Vec::new();
+            let mut hidden = Vec::new();
+            for term in terms {
+                let id = repo
+                    .rev_parse_single(term.spec.as_str())
+                    .map_err(|_| -> Box<dyn Error> {
+                        unresolved_revision_error(&term.origin).into()
+                    })?
+                    .detach();
+                if term.negate {
+                    hidden.push(id);
+                } else {
+                    tips.push(id);
+                }
+            }
+            (tips, hidden)
+        }
+        None => (vec![repo.head_id()?.detach()], Vec::new()),
+    };
+
+    let walk = repo.rev_walk(tips).with_hidden(hidden);
+    let all = walk.all()?;
+
+    let oids: Result<Vec<gix::ObjectId>, Box<dyn Error>> = match max_count {
+        Some(count) => all.take(count).map(|info| Ok(info?.id)).collect(),
+        None => all.map(|info| Ok(info?.id)).collect(),
+    };
+
+    oids
+}
+
+fn read_commit(
+    repo: &gix::Repository,
+    oid: gix::ObjectId,
+    // TODO: gix does not yet support ignore_all_space option for diffs
+    _ignore_all_space: bool,
+    skip_file_changes: bool,
+    diff_merges: DiffMerges,
+) -> Result<CommitData, Box<dyn Error>> {
+    let commit = repo.find_commit(oid)?;
+
+    let author_name = commit.author().map(|a| a.name.to_vec()).unwrap_or_default();
+    let author_email = commit
+        .author()
+        .map(|a| a.email.to_vec())
+        .unwrap_or_default();
+    let author_timestamp = commit
+        .author()
+        .ok()
+        .and_then(|a| a.time().ok())
+        .map(|t| t.seconds)
+        .unwrap_or(0);
+
+    let committer_name = commit
+        .committer()
+        .map(|a| a.name.to_vec())
+        .unwrap_or_default();
+    let committer_email = commit
+        .committer()
+        .map(|a| a.email.to_vec())
+        .unwrap_or_default();
+    let committer_timestamp = commit
+        .committer()
+        .ok()
+        .and_then(|a| a.time().ok())
+        .map(|t| t.seconds)
+        .unwrap_or(0);
+
+    let message = commit.message_raw_sloppy().to_vec();
+    let parents = commit.parent_ids().map(|id| id.to_string()).collect();
+
+    let skip =
+        skip_file_changes || (diff_merges == DiffMerges::Off && commit.parent_ids().count() > 1);
+    let file_changes = if skip {
+        Vec::new()
+    } else {
+        collect_file_changes(repo, &commit)?
+    };
+
+    Ok(CommitData {
+        author_name,
+        author_email,
+        author_timestamp,
+        committer_name,
+        committer_email,
+        committer_timestamp,
+        message,
+        parents,
+        file_changes,
+    })
+}
+
+fn collect_refs(
+    repo: &gix::Repository,
+    format: DecorateFormat,
+) -> Result<HashMap<gix::ObjectId, Vec<String>>, Box<dyn Error>> {
+    let mut refs_map: HashMap<gix::ObjectId, Vec<String>> = HashMap::new();
+
+    let platform = repo.references()?;
+    for reference in platform.all()? {
+        let mut reference = reference.map_err(|e| e.to_string())?;
+        let name = match format {
+            DecorateFormat::Short => reference.name().shorten().to_string(),
+            DecorateFormat::Full => reference.name().as_bstr().to_string(),
+        };
+        if name.is_empty() {
+            continue;
+        }
+        if let Ok(commit) = reference.peel_to_commit() {
+            refs_map.entry(commit.id).or_default().push(name);
+        }
+    }
+    Ok(refs_map)
+}
+
+fn build_contained_index(
+    repo: &gix::Repository,
+    format: DecorateFormat,
+    need_branches: bool,
+    need_tags: bool,
+    wanted: &HashSet<gix::ObjectId>,
+) -> Result<ContainedIndex<gix::ObjectId>, Box<dyn Error>> {
+    let platform = repo.references()?;
+
+    let collect = |iter: gix::reference::iter::Iter<'_, '_>,
+                   out: &mut Vec<(gix::ObjectId, String)>|
+     -> Result<(), Box<dyn Error>> {
+        for reference in iter {
+            let mut reference = reference.map_err(|e| e.to_string())?;
+            if matches!(reference.inner.target, gix::refs::Target::Symbolic(_)) {
+                continue;
+            }
+            let name = match format {
+                DecorateFormat::Short => reference.name().shorten().to_string(),
+                DecorateFormat::Full => reference.name().as_bstr().to_string(),
+            };
+            if name.is_empty() {
+                continue;
+            }
+            if let Ok(commit) = reference.peel_to_commit() {
+                out.push((commit.id, name));
+            }
+        }
+        Ok(())
+    };
+
+    let mut branch_refs = Vec::new();
+    if need_branches {
+        collect(platform.local_branches()?, &mut branch_refs)?;
+        collect(platform.remote_branches()?, &mut branch_refs)?;
+    }
+
+    let mut tag_refs = Vec::new();
+    if need_tags {
+        collect(platform.tags()?, &mut tag_refs)?;
+    }
+
+    if branch_refs.is_empty() && tag_refs.is_empty() {
+        return Ok(ContainedIndex::empty());
+    }
+
+    let mut branch_names: Vec<String> = branch_refs.iter().map(|(_, name)| name.clone()).collect();
+    branch_names.sort_unstable();
+    branch_names.dedup();
+
+    let mut tag_names: Vec<String> = tag_refs.iter().map(|(_, name)| name.clone()).collect();
+    tag_names.sort_unstable();
+    tag_names.dedup();
+
+    let branch_words = branch_names.len().div_ceil(64);
+    let tag_words = tag_names.len().div_ceil(64);
+    let total_words = branch_words + tag_words;
+
+    if wanted.is_empty() {
+        return Ok(ContainedIndex {
+            branch_names,
+            tag_names,
+            branch_words,
+            bits: HashMap::new(),
+        });
+    }
+
+    let mut pending: HashMap<gix::ObjectId, RefBits> = HashMap::new();
+    for (tip, name) in &branch_refs {
+        let bit = branch_names
+            .binary_search(name)
+            .expect("name collected above");
+        pending
+            .entry(*tip)
+            .or_insert_with(|| RefBits::new(total_words))
+            .set(bit);
+    }
+    for (tip, name) in &tag_refs {
+        let bit = branch_words * 64 + tag_names.binary_search(name).expect("name collected above");
+        pending
+            .entry(*tip)
+            .or_insert_with(|| RefBits::new(total_words))
+            .set(bit);
+    }
+
+    let tips: Vec<gix::ObjectId> = pending.keys().copied().collect();
+    let mut parents_of: HashMap<gix::ObjectId, gix::traverse::commit::ParentIds> = HashMap::new();
+    let mut child_count: HashMap<gix::ObjectId, usize> = HashMap::new();
+    for info in repo.rev_walk(tips).all()? {
+        let info = info?;
+        child_count.entry(info.id).or_insert(0);
+        for parent in &info.parent_ids {
+            *child_count.entry(*parent).or_insert(0) += 1;
+        }
+        parents_of.insert(info.id, info.parent_ids);
+    }
+
+    let mut queue: Vec<gix::ObjectId> = child_count
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(id, _)| *id)
+        .collect();
+
+    let mut bits: HashMap<gix::ObjectId, RefBits> = HashMap::new();
+    while let Some(id) = queue.pop() {
+        let cur_bits = pending.remove(&id);
+        for parent in parents_of
+            .get(&id)
+            .map(|p| p.as_slice())
+            .unwrap_or_default()
+        {
+            if let Some(cur_bits) = cur_bits.as_ref() {
+                pending
+                    .entry(*parent)
+                    .or_insert_with(|| RefBits::new(total_words))
+                    .or_assign(cur_bits);
+            }
+            // A parent becomes ready once every child has propagated into it.
+            if let Some(count) = child_count.get_mut(parent) {
+                *count -= 1;
+                if *count == 0 {
+                    queue.push(*parent);
+                }
+            }
+        }
+        let Some(cur_bits) = cur_bits else {
+            continue;
+        };
+        if wanted.contains(&id) {
+            bits.insert(id, cur_bits);
+            if bits.len() == wanted.len() {
+                break;
+            }
+        }
+    }
+
+    Ok(ContainedIndex {
+        branch_names,
+        tag_names,
+        branch_words,
+        bits,
+    })
+}
+
+fn collect_file_changes(
+    repo: &gix::Repository,
+    commit: &gix::Commit,
+) -> Result<Vec<FileChange>, Box<dyn std::error::Error>> {
+    let mut file_changes = Vec::new();
+    let current_tree = commit.tree()?;
+
+    let parent_tree = if commit.parent_ids().count() == 0 {
+        repo.empty_tree()
+    } else {
+        let parent_id = commit.parent_ids().next().unwrap().detach();
+        repo.find_commit(parent_id)?.tree()?
+    };
+
+    let mut resource_cache = repo.diff_resource_cache_for_tree_diff()?;
+
+    parent_tree
+        .changes()?
+        .for_each_to_obtain_tree(&current_tree, |change| {
+            use gix::object::tree::diff::Change;
+
+            // Directories are reported as their own Addition/Deletion/Modification
+            // entries alongside their recursed-into children; skip them so only
+            // blob-level changes are returned, matching the git2 backend.
+            let entry_mode = match &change {
+                Change::Addition { entry_mode, .. } => *entry_mode,
+                Change::Deletion { entry_mode, .. } => *entry_mode,
+                Change::Modification { entry_mode, .. } => *entry_mode,
+                Change::Rewrite { entry_mode, .. } => *entry_mode,
+            };
+            if entry_mode.is_tree() {
+                return Ok::<_, std::convert::Infallible>(
+                    gix::object::tree::diff::Action::Continue(()),
+                );
+            }
+
+            let location = change.location().to_string();
+            let (status, old_path): (&'static str, Option<String>) = match &change {
+                Change::Addition { .. } => ("A", None),
+                Change::Deletion { .. } => ("D", None),
+                Change::Modification { .. } => ("M", None),
+                Change::Rewrite {
+                    copy: true,
+                    source_location,
+                    ..
+                } => (
+                    "C",
+                    Some(String::from_utf8_lossy(source_location).into_owned()),
+                ),
+                Change::Rewrite {
+                    copy: false,
+                    source_location,
+                    ..
+                } => (
+                    "R",
+                    Some(String::from_utf8_lossy(source_location).into_owned()),
+                ),
+            };
+
+            let id = change.id();
+            let is_gitlink = entry_mode.is_commit();
+
+            let file_size = if is_gitlink {
+                None
+            } else {
+                id.try_header().ok().flatten().map(|h| h.size() as i64)
+            };
+
+            let (add_lines, del_lines) = if is_gitlink {
+                gitlink_numstat(status)
+            } else {
+                change
+                    .diff(&mut resource_cache)
+                    .ok()
+                    .and_then(|mut platform| platform.line_counts().ok())
+                    .flatten()
+                    .map(|counts| (counts.insertions as i32, counts.removals as i32))
+                    .unwrap_or((0, 0))
+            };
+
+            resource_cache.clear_resource_cache_keep_allocation();
+
+            file_changes.push(FileChange {
+                path: location,
+                old_path,
+                status,
+                blob_id: id.to_string(),
+                file_size,
+                add_lines,
+                del_lines,
+            });
+
+            Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue(()))
+        })?;
+
+    Ok(file_changes)
 }
 
 struct GixLogReadPlannerInner {
@@ -438,11 +438,12 @@ impl GixLogReadPlanner {
         params: &GitLogParameter,
         column_indices: &[u64],
     ) -> Result<Self, Box<dyn Error>> {
-        let repo = GixRepo::open(repo_path)?;
+        let handle = CachedRepo::open(repo_path)?;
+        let repo = handle.repo();
 
-        let commit_oids = repo.get_commit_oids(params.revision.as_deref(), params.max_count)?;
+        let commit_oids = walk_commit_oids(repo, params.revision.as_deref(), params.max_count)?;
         let decorations = if schema::needs_refs(column_indices) {
-            repo.get_refs(params.decorate)?
+            collect_refs(repo, params.decorate)?
         } else {
             HashMap::new()
         };
@@ -450,7 +451,7 @@ impl GixLogReadPlanner {
         let need_tags = schema::needs_contained_tags(column_indices);
         let contained = if need_branches || need_tags {
             let wanted: HashSet<gix::ObjectId> = commit_oids.iter().copied().collect();
-            repo.get_contained(params.decorate, need_branches, need_tags, &wanted)?
+            build_contained_index(repo, params.decorate, need_branches, need_tags, &wanted)?
         } else {
             ContainedIndex::empty()
         };
@@ -511,7 +512,8 @@ impl GitLogReader for GixLogReader {
             self.inner.commit_oids.len(),
         );
 
-        let repo = GixRepo::open(&self.inner.repo_path)?;
+        let handle = CachedRepo::open(&self.inner.repo_path)?;
+        let repo = handle.repo();
 
         let mut writer = VectorInserter::new(output, column_indices);
 
@@ -519,7 +521,8 @@ impl GitLogReader for GixLogReader {
         let skip_file_changes = !schema::needs_file_changes(column_indices);
         let oids = &self.inner.commit_oids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
-            let commit = repo.get_commit(
+            let commit = read_commit(
+                repo,
                 *oid,
                 self.ignore_all_space,
                 skip_file_changes,
@@ -552,25 +555,66 @@ mod tests {
     const SECOND_COMMIT: &str = "2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5";
     const TAGGED_COMMIT: &str = "295db8704f2b2e12fe71a1f433b8b17906fedf25"; // v0.1.1 (annotated tag)
 
+    /// The only non-obvious behaviour in this module: drop installs into a
+    /// one-slot thread cache, a matching path is taken back out, and a
+    /// mismatching one is evicted only once the new handle drops.
     #[test]
-    fn get_commit_honors_skip_file_changes() {
-        let repo = GixRepo::open(".").unwrap();
+    fn cached_repo_round_trips_through_thread_cache() {
+        // --test-threads=1 runs tests on the shared main thread, so start clean.
+        CACHED_REPO.with_borrow_mut(|cached| *cached = None);
+
+        {
+            let handle = CachedRepo::open(".").unwrap();
+            assert!(handle.repo().path().exists());
+        }
+        CACHED_REPO.with_borrow(|cached| {
+            assert!(
+                matches!(cached, Some((path, _)) if path == "."),
+                "drop installs"
+            );
+        });
+
+        {
+            let _handle = CachedRepo::open(".").unwrap();
+            CACHED_REPO.with_borrow(|cached| {
+                assert!(cached.is_none(), "a matching path is taken from the cache");
+            });
+        }
+
+        {
+            let _handle = CachedRepo::open("./.git").unwrap();
+            CACHED_REPO.with_borrow(|cached| {
+                assert!(
+                    matches!(cached, Some((path, _)) if path == "."),
+                    "a miss leaves the cached entry alone"
+                );
+            });
+        }
+        CACHED_REPO.with_borrow(|cached| {
+            assert!(
+                matches!(cached, Some((path, _)) if path == "./.git"),
+                "drop evicts the previous entry"
+            );
+        });
+
+        CACHED_REPO.with_borrow_mut(|cached| *cached = None);
+    }
+
+    #[test]
+    fn read_commit_honors_skip_file_changes() {
+        let repo = gix::open(".").unwrap();
         let oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
 
-        let skipped = repo
-            .get_commit(oid, false, true, DiffMerges::FirstParent)
-            .unwrap();
+        let skipped = read_commit(&repo, oid, false, true, DiffMerges::FirstParent).unwrap();
         assert!(skipped.file_changes.is_empty());
 
-        let kept = repo
-            .get_commit(oid, false, false, DiffMerges::FirstParent)
-            .unwrap();
+        let kept = read_commit(&repo, oid, false, false, DiffMerges::FirstParent).unwrap();
         assert!(!kept.file_changes.is_empty());
     }
 
     #[test]
-    fn get_refs_peels_annotated_tag_to_commit() {
-        let repo = GixRepo::open(".").unwrap();
+    fn collect_refs_peels_annotated_tag_to_commit() {
+        let repo = gix::open(".").unwrap();
         let tagged_oid = gix::ObjectId::from_hex(TAGGED_COMMIT.as_bytes()).unwrap();
         let second_oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
 
@@ -578,7 +622,7 @@ mod tests {
             (DecorateFormat::Short, "v0.1.1"),
             (DecorateFormat::Full, "refs/tags/v0.1.1"),
         ] {
-            let refs = repo.get_refs(format).unwrap();
+            let refs = collect_refs(&repo, format).unwrap();
             let names = refs
                 .get(&tagged_oid)
                 .expect("tagged commit should have refs");
@@ -589,13 +633,12 @@ mod tests {
     }
 
     #[test]
-    fn get_contained_tags_marks_all_descendant_tags() {
-        let repo = GixRepo::open(".").unwrap();
+    fn contained_index_tags_marks_all_descendant_tags() {
+        let repo = gix::open(".").unwrap();
         let tagged_oid = gix::ObjectId::from_hex(TAGGED_COMMIT.as_bytes()).unwrap();
         let wanted: HashSet<gix::ObjectId> = [tagged_oid].into_iter().collect();
-        let index = repo
-            .get_contained(DecorateFormat::Short, false, true, &wanted)
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, false, true, &wanted).unwrap();
         let names: Vec<&str> = index.tags_of(&tagged_oid).collect();
         assert!(
             names.windows(2).all(|w| w[0] <= w[1]),
@@ -603,57 +646,54 @@ mod tests {
         );
         // Every release tag descends from v0.1.1's commit. Membership only, so a
         // new release tag does not break this; exclusion is covered exactly by
-        // get_contained_is_exact_for_merge_fan_in.
+        // contained_index_is_exact_for_merge_fan_in.
         for tag in ["v0.1.1", "v0.1.2", "v0.2.0", "v0.3.0", "v0.4.0"] {
             assert!(names.contains(&tag), "{tag} missing from {names:?}");
         }
     }
 
     #[test]
-    fn get_contained_tags_full_format() {
-        let repo = GixRepo::open(".").unwrap();
+    fn contained_index_tags_full_format() {
+        let repo = gix::open(".").unwrap();
         let tagged_oid = gix::ObjectId::from_hex(TAGGED_COMMIT.as_bytes()).unwrap();
         let wanted: HashSet<gix::ObjectId> = [tagged_oid].into_iter().collect();
-        let index = repo
-            .get_contained(DecorateFormat::Full, false, true, &wanted)
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Full, false, true, &wanted).unwrap();
         assert!(index.tags_of(&tagged_oid).any(|n| n == "refs/tags/v0.1.1"));
     }
 
     #[test]
-    fn get_contained_branches_marks_ancestor() {
-        let repo = GixRepo::open(".").unwrap();
-        let head_name = repo.repo().head_name().unwrap().unwrap();
+    fn contained_index_branches_marks_ancestor() {
+        let repo = gix::open(".").unwrap();
+        let head_name = repo.head_name().unwrap().unwrap();
         let head_name = head_name.shorten().to_string();
         let second_oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
         let wanted: HashSet<gix::ObjectId> = [second_oid].into_iter().collect();
-        let index = repo
-            .get_contained(DecorateFormat::Short, true, false, &wanted)
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, true, false, &wanted).unwrap();
         assert!(index.branches_of(&second_oid).any(|n| n == head_name));
         // Remote-tracking branches are included too.
         assert!(index.branches_of(&second_oid).any(|n| n == "origin/main"));
     }
 
     #[test]
-    fn get_contained_branches_skips_symbolic_head_alias() {
-        let repo = GixRepo::open(".").unwrap();
-        let index = repo
-            .get_contained(DecorateFormat::Short, true, false, &HashSet::new())
-            .unwrap();
+    fn contained_index_branches_skips_symbolic_head_alias() {
+        let repo = gix::open(".").unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, true, false, &HashSet::new())
+                .unwrap();
         assert!(!index.branch_names.iter().any(|n| n == "origin/HEAD"));
     }
 
     #[test]
-    fn get_contained_branches_self_inclusive() {
-        let repo = GixRepo::open(".").unwrap();
-        let head_oid = repo.repo().head_id().unwrap().detach();
-        let head_name = repo.repo().head_name().unwrap().unwrap();
+    fn contained_index_branches_self_inclusive() {
+        let repo = gix::open(".").unwrap();
+        let head_oid = repo.head_id().unwrap().detach();
+        let head_name = repo.head_name().unwrap().unwrap();
         let head_name = head_name.shorten().to_string();
         let wanted: HashSet<gix::ObjectId> = [head_oid].into_iter().collect();
-        let index = repo
-            .get_contained(DecorateFormat::Short, true, false, &wanted)
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, true, false, &wanted).unwrap();
         assert!(index.branches_of(&head_oid).any(|n| n == head_name));
     }
 
@@ -704,9 +744,9 @@ mod tests {
     }
 
     #[test]
-    fn get_contained_is_exact_for_merge_fan_in() {
+    fn contained_index_is_exact_for_merge_fan_in() {
         let (dir, [a_id, b_id, c_id, d_id]) = init_fan_in_repo();
-        let gr = GixRepo::open(dir.path().to_str().unwrap()).unwrap();
+        let repo = gix::open(dir.path()).unwrap();
 
         let expected = [
             (d_id, vec!["merged"]),
@@ -716,9 +756,7 @@ mod tests {
         ];
 
         let all: HashSet<gix::ObjectId> = [a_id, b_id, c_id, d_id].into_iter().collect();
-        let index = gr
-            .get_contained(DecorateFormat::Short, false, true, &all)
-            .unwrap();
+        let index = build_contained_index(&repo, DecorateFormat::Short, false, true, &all).unwrap();
         for (oid, want) in &expected {
             assert_eq!(index.tags_of(oid).collect::<Vec<_>>(), *want);
         }
@@ -727,15 +765,14 @@ mod tests {
         // must not change.
         for (oid, want) in &expected {
             let wanted: HashSet<gix::ObjectId> = [*oid].into_iter().collect();
-            let index = gr
-                .get_contained(DecorateFormat::Short, false, true, &wanted)
-                .unwrap();
+            let index =
+                build_contained_index(&repo, DecorateFormat::Short, false, true, &wanted).unwrap();
             assert_eq!(index.tags_of(oid).collect::<Vec<_>>(), *want);
         }
 
-        let index = gr
-            .get_contained(DecorateFormat::Short, false, true, &HashSet::new())
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, false, true, &HashSet::new())
+                .unwrap();
         assert_eq!(index.tag_names, vec!["left", "merged", "right"]);
         assert_eq!(index.tags_of(&d_id).count(), 0);
     }
@@ -807,13 +844,12 @@ mod tests {
     }
 
     #[test]
-    fn get_contained_multi_word_refbits() {
+    fn contained_index_multi_word_refbits() {
         let (dir, [root_id, tip_id]) = init_multi_word_repo();
-        let gr = GixRepo::open(dir.path().to_str().unwrap()).unwrap();
+        let repo = gix::open(dir.path()).unwrap();
         let wanted: HashSet<gix::ObjectId> = [root_id, tip_id].into_iter().collect();
-        let index = gr
-            .get_contained(DecorateFormat::Short, true, true, &wanted)
-            .unwrap();
+        let index =
+            build_contained_index(&repo, DecorateFormat::Short, true, true, &wanted).unwrap();
 
         assert!(
             index.branch_words > 1,

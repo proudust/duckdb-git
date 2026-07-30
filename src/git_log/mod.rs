@@ -1,9 +1,11 @@
-// Crate-visible because the backends under `git::backend` reach up into these.
-// Phase 4 (CommitSink) should invert that so they can go back to private.
-pub(crate) mod params;
-pub(crate) mod reader;
-pub(crate) mod schema;
-pub(crate) mod vector;
+#[cfg(feature = "gix-backend")]
+mod gix;
+#[cfg(feature = "libgit-backend")]
+mod libgit;
+mod params;
+mod reader;
+mod schema;
+mod vector;
 
 use params::{BackendKind, GitLogParameter};
 use reader::GitLogReadPlanner;
@@ -16,7 +18,7 @@ use duckdb::{
 use std::error::Error;
 use std::sync::Arc;
 
-pub fn open_planner(
+fn open_planner(
     repo_path: &str,
     kind: BackendKind,
     params: &GitLogParameter,
@@ -26,13 +28,11 @@ pub fn open_planner(
         BackendKind::Libgit => {
             #[cfg(feature = "libgit-backend")]
             {
-                Ok(Box::new(
-                    crate::git::backend::libgit::LibGitLogReadPlanner::open(
-                        repo_path,
-                        params,
-                        column_indices,
-                    )?,
-                ))
+                Ok(Box::new(libgit::LibGitLogReadPlanner::open(
+                    repo_path,
+                    params,
+                    column_indices,
+                )?))
             }
             #[cfg(not(feature = "libgit-backend"))]
             {
@@ -40,7 +40,7 @@ pub fn open_planner(
             }
         }
         #[cfg(feature = "gix-backend")]
-        BackendKind::Gix => Ok(Box::new(crate::git::backend::gix::GixLogReadPlanner::open(
+        BackendKind::Gix => Ok(Box::new(gix::GixLogReadPlanner::open(
             repo_path,
             params,
             column_indices,

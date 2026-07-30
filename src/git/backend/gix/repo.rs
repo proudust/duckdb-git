@@ -9,13 +9,13 @@ thread_local! {
 /// repository, evicting whatever was cached for a different path. A query
 /// alternating between repositories on the same worker thread therefore
 /// misses every time.
-pub(super) struct CachedRepo {
+pub(crate) struct CachedRepo {
     repo: Option<gix::Repository>,
     repo_path: String,
 }
 
 impl CachedRepo {
-    pub(super) fn open(repo_path: &str) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn open(repo_path: &str) -> Result<Self, Box<dyn Error>> {
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
             Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1.to_thread_local()),
             _ => gix::open(repo_path).map_err(|e| -> Box<dyn Error> { Box::new(e) }),
@@ -26,7 +26,7 @@ impl CachedRepo {
         })
     }
 
-    pub(super) fn repo(&self) -> &gix::Repository {
+    pub(crate) fn repo(&self) -> &gix::Repository {
         self.repo.as_ref().expect("repo is present outside Drop")
     }
 }

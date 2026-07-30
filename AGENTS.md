@@ -19,17 +19,7 @@ make bench_compare # Re-run benchmarks and print before/after comparison table
 
 ## Project structure
 
-- `src/lib.rs` — extension entry point (`register`, `extension_entrypoint`)
-- `src/git_log/mod.rs` — `git_log` VTab, `open_planner` backend dispatch
-- `src/git_log/types.rs` — `CommitData`, `GitLogReadPlanner`/`GitLogReader` traits
-- `src/git_log/params.rs` — `GitLogParameter`, `BackendKind`, `DecorateFormat`
-- `src/git_log/schema.rs` — column definitions and projection helpers
-- `src/git_log/vector.rs` — DuckDB vector write helpers
-- `src/git_log/libgit.rs` — `LibGitLogReadPlanner`/`LibGitLogReader` (default)
-- `src/git_log/xdiff.rs` — `xdl_diff` FFI bindings for fast add/del line counting (libgit-backend only)
-- `src/git_log/gix.rs` — `GixLogReadPlanner`/`GixLogReader` (experimental, feature-gated)
-- `src/git_log/remote.rs` — remote URL clone/fetch/cache (uses `gix` for transport)
-- `src/wasm_lib.rs` — wasm entry point (swaps crate-type for emscripten builds)
-- `test/sql/libgit/` — libgit backend E2E tests (sqllogictest format)
-- `test/sql/gix/` — gix backend E2E tests (gated by `require-env GIX_BACKEND 1`)
-- `benches/git_log_with_duckdb.rs` — Benchmarks (`BENCH_REPO` env var selects the target repo)
+- `src/git/` — git domain (shared types + backend leaf ops under `backend/{libgit,gix}/`)
+- `src/git_log/` — `git_log` DuckDB table function (VTab, params, planners)
+- `test/sql/{libgit,gix}/` — E2E tests (sqllogictest; gix gated by `GIX_BACKEND=1`)
+- `benches/` — benchmarks (`BENCH_REPO` selects the target repo)

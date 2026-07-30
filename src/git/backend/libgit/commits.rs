@@ -5,7 +5,7 @@ use crate::git::revision::{unresolved_revision_error, RevisionTerm};
 use git2::Repository;
 use std::error::Error;
 
-pub(super) fn walk_commit_oids(
+pub(crate) fn walk_commit_oids(
     repo: &Repository,
     revision: Option<&[RevisionTerm]>,
     max_count: Option<usize>,
@@ -45,7 +45,7 @@ pub(super) fn walk_commit_oids(
     Ok(commit_oids)
 }
 
-pub(super) fn read_commit(
+pub(crate) fn read_commit(
     repo: &Repository,
     oid: git2::Oid,
     ignore_all_space: bool,
@@ -80,8 +80,9 @@ pub(super) fn read_commit(
 
 #[cfg(test)]
 mod tests {
-    use super::super::SECOND_COMMIT;
     use super::*;
+
+    const SECOND_COMMIT: &str = "2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5";
 
     #[test]
     fn read_commit_honors_skip_file_changes() {

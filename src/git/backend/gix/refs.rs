@@ -3,7 +3,7 @@ use crate::git::ref_index::{ContainedIndex, RefBits};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
-pub(super) fn collect_refs(
+pub(crate) fn collect_refs(
     repo: &gix::Repository,
     format: DecorateFormat,
 ) -> Result<HashMap<gix::ObjectId, Vec<String>>, Box<dyn Error>> {
@@ -26,7 +26,7 @@ pub(super) fn collect_refs(
     Ok(refs_map)
 }
 
-pub(super) fn build_contained_index(
+pub(crate) fn build_contained_index(
     repo: &gix::Repository,
     format: DecorateFormat,
     need_branches: bool,
@@ -172,8 +172,10 @@ pub(super) fn build_contained_index(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{SECOND_COMMIT, TAGGED_COMMIT};
     use super::*;
+
+    const SECOND_COMMIT: &str = "2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5";
+    const TAGGED_COMMIT: &str = "295db8704f2b2e12fe71a1f433b8b17906fedf25"; // v0.1.1 (annotated tag)
 
     #[test]
     fn collect_refs_peels_annotated_tag_to_commit() {

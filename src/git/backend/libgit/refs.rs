@@ -1,5 +1,5 @@
-use crate::git_log::params::DecorateFormat;
-use crate::git_log::ref_index::{ContainedIndex, RefBits};
+use crate::git::options::DecorateFormat;
+use crate::git::ref_index::{ContainedIndex, RefBits};
 use git2::Repository;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;

@@ -1,3 +1,4 @@
+mod git;
 mod git_log;
 
 use duckdb::{Connection, Result};

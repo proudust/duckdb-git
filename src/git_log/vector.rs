@@ -1,5 +1,5 @@
+use crate::git::model::CommitData;
 use crate::git_log::schema::{FileChangeField, GitLogColumn};
-use crate::git_log::types::CommitData;
 use duckdb::core::{DataChunkHandle, FlatVector, Inserter, ListVector};
 
 pub struct VectorInserter<'a> {

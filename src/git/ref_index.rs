@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-pub(super) enum RefBits {
+pub(crate) enum RefBits {
     Inline(u64),
     Words(Box<[u64]>),
 }
 
 impl RefBits {
-    pub(super) fn new(word_count: usize) -> Self {
+    pub(crate) fn new(word_count: usize) -> Self {
         if word_count <= 1 {
             RefBits::Inline(0)
         } else {
@@ -31,11 +31,11 @@ impl RefBits {
         }
     }
 
-    pub(super) fn set(&mut self, bit: usize) {
+    pub(crate) fn set(&mut self, bit: usize) {
         self.as_mut_slice()[bit / 64] |= 1u64 << (bit % 64);
     }
 
-    pub(super) fn or_assign(&mut self, other: &RefBits) {
+    pub(crate) fn or_assign(&mut self, other: &RefBits) {
         for (a, b) in self.as_mut_slice().iter_mut().zip(other.as_slice()) {
             *a |= b;
         }
@@ -56,15 +56,15 @@ fn iter_ones(words: &[u64]) -> impl Iterator<Item = usize> + '_ {
     })
 }
 
-pub(super) struct ContainedIndex<K> {
-    pub(super) branch_names: Vec<String>,
-    pub(super) tag_names: Vec<String>,
-    pub(super) branch_words: usize,
-    pub(super) bits: HashMap<K, RefBits>,
+pub(crate) struct ContainedIndex<K> {
+    pub(crate) branch_names: Vec<String>,
+    pub(crate) tag_names: Vec<String>,
+    pub(crate) branch_words: usize,
+    pub(crate) bits: HashMap<K, RefBits>,
 }
 
 impl<K: Eq + Hash> ContainedIndex<K> {
-    pub(super) fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         ContainedIndex {
             branch_names: Vec::new(),
             tag_names: Vec::new(),
@@ -73,14 +73,14 @@ impl<K: Eq + Hash> ContainedIndex<K> {
         }
     }
 
-    pub(super) fn branches_of(&self, oid: &K) -> impl Iterator<Item = &str> {
+    pub(crate) fn branches_of(&self, oid: &K) -> impl Iterator<Item = &str> {
         let branch_words = self.branch_words;
         self.bits.get(oid).into_iter().flat_map(move |bits| {
             iter_ones(&bits.as_slice()[..branch_words]).map(|i| self.branch_names[i].as_str())
         })
     }
 
-    pub(super) fn tags_of(&self, oid: &K) -> impl Iterator<Item = &str> {
+    pub(crate) fn tags_of(&self, oid: &K) -> impl Iterator<Item = &str> {
         let branch_words = self.branch_words;
         self.bits.get(oid).into_iter().flat_map(move |bits| {
             iter_ones(&bits.as_slice()[branch_words..]).map(|i| self.tag_names[i].as_str())

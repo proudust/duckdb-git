@@ -1,4 +1,4 @@
-use crate::git_log::types::{gitlink_numstat, FileChange};
+use crate::git::model::{gitlink_numstat, FileChange};
 
 pub(super) fn collect_file_changes(
     repo: &gix::Repository,

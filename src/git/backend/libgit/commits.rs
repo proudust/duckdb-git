@@ -1,6 +1,7 @@
 use super::diff::collect_file_changes;
-use crate::git_log::params::{unresolved_revision_error, DiffMerges, RevisionTerm};
-use crate::git_log::types::CommitData;
+use crate::git::model::CommitData;
+use crate::git::options::DiffMerges;
+use crate::git::revision::{unresolved_revision_error, RevisionTerm};
 use git2::Repository;
 use std::error::Error;
 

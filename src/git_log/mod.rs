@@ -1,18 +1,12 @@
-#[cfg(feature = "gix-backend")]
-mod gix;
-#[cfg(feature = "libgit-backend")]
-mod libgit;
-mod params;
-#[cfg(any(feature = "libgit-backend", feature = "gix-backend"))]
-mod ref_index;
-#[cfg(feature = "gix-backend")]
-mod remote;
-mod schema;
-mod types;
-mod vector;
+// Crate-visible because the backends under `git::backend` reach up into these.
+// Phase 4 (CommitSink) should invert that so they can go back to private.
+pub(crate) mod params;
+pub(crate) mod reader;
+pub(crate) mod schema;
+pub(crate) mod vector;
 
 use params::{BackendKind, GitLogParameter};
-use types::{GitLogReadPlanner, GitLogReader};
+use reader::GitLogReadPlanner;
 
 use duckdb::{
     core::{DataChunkHandle, LogicalTypeHandle},
@@ -32,11 +26,13 @@ pub fn open_planner(
         BackendKind::Libgit => {
             #[cfg(feature = "libgit-backend")]
             {
-                Ok(Box::new(libgit::LibGitLogReadPlanner::open(
-                    repo_path,
-                    params,
-                    column_indices,
-                )?))
+                Ok(Box::new(
+                    crate::git::backend::libgit::LibGitLogReadPlanner::open(
+                        repo_path,
+                        params,
+                        column_indices,
+                    )?,
+                ))
             }
             #[cfg(not(feature = "libgit-backend"))]
             {
@@ -44,7 +40,7 @@ pub fn open_planner(
             }
         }
         #[cfg(feature = "gix-backend")]
-        BackendKind::Gix => Ok(Box::new(gix::GixLogReadPlanner::open(
+        BackendKind::Gix => Ok(Box::new(crate::git::backend::gix::GixLogReadPlanner::open(
             repo_path,
             params,
             column_indices,
@@ -77,7 +73,7 @@ impl VTab for GitLogVTab {
         let repo_path: std::borrow::Cow<str> = if params::is_remote_url(&params.repo_path) {
             #[cfg(feature = "gix-backend")]
             {
-                let local = remote::ensure_local_clone(&params.repo_path)?;
+                let local = crate::git::remote::ensure_local_clone(&params.repo_path)?;
                 std::borrow::Cow::Owned(local.to_string_lossy().into_owned())
             }
             #[cfg(not(feature = "gix-backend"))]

@@ -3,11 +3,12 @@ mod diff;
 mod refs;
 mod repo;
 
-use crate::git_log::params::{DiffMerges, GitLogParameter};
-use crate::git_log::ref_index::ContainedIndex;
+use crate::git::options::DiffMerges;
+use crate::git::ref_index::ContainedIndex;
+use crate::git_log::params::GitLogParameter;
+use crate::git_log::reader::{GitLogReadPlanner, GitLogReader};
 use crate::git_log::schema;
 use crate::git_log::vector::VectorInserter;
-use crate::git_log::{GitLogReadPlanner, GitLogReader};
 use commits::{read_commit, walk_commit_oids};
 use duckdb::core::DataChunkHandle;
 use refs::{build_contained_index, collect_refs};

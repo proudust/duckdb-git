@@ -20,6 +20,6 @@ make bench_compare # Re-run benchmarks and print before/after comparison table
 ## Project structure
 
 - `src/git/` — git domain (shared types + backend leaf ops under `backend/{libgit,gix}/`)
-- `src/git_log/` — `git_log` DuckDB table function (VTab, params, planners)
+- `src/git_log/` — `git_log` DuckDB table function (VTab, params, scanners)
 - `test/sql/{libgit,gix}/` — E2E tests (sqllogictest; gix gated by `GIX_BACKEND=1`)
 - `benches/` — benchmarks (`BENCH_REPO` selects the target repo)

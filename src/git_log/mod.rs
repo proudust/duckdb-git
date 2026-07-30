@@ -3,12 +3,10 @@ mod gix;
 #[cfg(feature = "libgit-backend")]
 mod libgit;
 mod params;
-mod reader;
 mod schema;
 mod vector;
 
 use params::{BackendKind, GitLogParameter};
-use reader::GitLogReadPlanner;
 
 use duckdb::{
     core::{DataChunkHandle, LogicalTypeHandle},
@@ -16,40 +14,71 @@ use duckdb::{
     Connection, Result,
 };
 use std::error::Error;
-use std::sync::Arc;
 
-fn open_planner(
-    repo_path: &str,
-    kind: BackendKind,
-    params: &GitLogParameter,
-    column_indices: &[u64],
-) -> Result<Box<dyn GitLogReadPlanner>, Box<dyn Error>> {
-    match kind {
-        BackendKind::Libgit => {
-            #[cfg(feature = "libgit-backend")]
-            {
-                Ok(Box::new(libgit::LibGitLogReadPlanner::open(
-                    repo_path,
-                    params,
-                    column_indices,
-                )?))
+enum GitLogScanner {
+    #[cfg(feature = "libgit-backend")]
+    Libgit(libgit::LibGitLogScanner),
+    #[cfg(feature = "gix-backend")]
+    Gix(gix::GixLogScanner),
+}
+
+impl GitLogScanner {
+    fn open(
+        repo_path: &str,
+        kind: BackendKind,
+        params: &GitLogParameter,
+        column_indices: &[u64],
+    ) -> Result<Self, Box<dyn Error>> {
+        match kind {
+            BackendKind::Libgit => {
+                #[cfg(feature = "libgit-backend")]
+                {
+                    Ok(Self::Libgit(libgit::LibGitLogScanner::open(
+                        repo_path,
+                        params,
+                        column_indices,
+                    )?))
+                }
+                #[cfg(not(feature = "libgit-backend"))]
+                {
+                    Err("'libgit' backend not enabled in this build".into())
+                }
             }
-            #[cfg(not(feature = "libgit-backend"))]
-            {
-                Err("'libgit' backend not enabled in this build".into())
-            }
+            #[cfg(feature = "gix-backend")]
+            BackendKind::Gix => Ok(Self::Gix(gix::GixLogScanner::open(
+                repo_path,
+                params,
+                column_indices,
+            )?)),
         }
-        #[cfg(feature = "gix-backend")]
-        BackendKind::Gix => Ok(Box::new(gix::GixLogReadPlanner::open(
-            repo_path,
-            params,
-            column_indices,
-        )?)),
+    }
+
+    fn max_threads(&self) -> u64 {
+        match self {
+            #[cfg(feature = "libgit-backend")]
+            Self::Libgit(s) => s.max_threads(),
+            #[cfg(feature = "gix-backend")]
+            Self::Gix(s) => s.max_threads(),
+        }
+    }
+
+    fn read(
+        &self,
+        params: &GitLogParameter,
+        output: &mut DataChunkHandle,
+        column_indices: &[u64],
+    ) -> Result<u32, Box<dyn Error>> {
+        match self {
+            #[cfg(feature = "libgit-backend")]
+            Self::Libgit(s) => s.read(params, output, column_indices),
+            #[cfg(feature = "gix-backend")]
+            Self::Gix(s) => s.read(params, output, column_indices),
+        }
     }
 }
 
 struct GitLogInitData {
-    planner: Arc<dyn GitLogReadPlanner>,
+    scanner: GitLogScanner,
     column_indices: Vec<u64>,
 }
 
@@ -84,16 +113,11 @@ impl VTab for GitLogVTab {
             std::borrow::Cow::Borrowed(&params.repo_path)
         };
 
-        let planner: Arc<dyn GitLogReadPlanner> = Arc::from(open_planner(
-            &repo_path,
-            params.backend,
-            params,
-            &column_indices,
-        )?);
-        info.set_max_threads(planner.max_threads());
+        let scanner = GitLogScanner::open(&repo_path, params.backend, params, &column_indices)?;
+        info.set_max_threads(scanner.max_threads());
 
         Ok(GitLogInitData {
-            planner,
+            scanner,
             column_indices,
         })
     }
@@ -105,8 +129,9 @@ impl VTab for GitLogVTab {
         let init_data = func.get_init_data();
         let bind_data = func.get_bind_data();
 
-        let mut reader = init_data.planner.new_reader(bind_data);
-        let row_count = reader.read(output, &init_data.column_indices)?;
+        let row_count = init_data
+            .scanner
+            .read(bind_data, output, &init_data.column_indices)?;
         output.set_len(row_count as usize);
         Ok(())
     }

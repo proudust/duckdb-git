@@ -1,10 +1,8 @@
 use crate::git::backend::libgit::{
     build_contained_index, collect_refs, read_commit, walk_commit_oids, CachedRepo,
 };
-use crate::git::options::DiffMerges;
 use crate::git::ref_index::ContainedIndex;
 use crate::git_log::params::GitLogParameter;
-use crate::git_log::reader::{GitLogReadPlanner, GitLogReader};
 use crate::git_log::schema;
 use crate::git_log::vector::VectorInserter;
 use duckdb::core::DataChunkHandle;
@@ -13,7 +11,7 @@ use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-struct LibGitLogReadPlannerInner {
+struct LibGitLogScannerInner {
     commit_oids: Vec<git2::Oid>,
     decorations: HashMap<git2::Oid, Vec<String>>,
     contained: ContainedIndex<git2::Oid>,
@@ -23,11 +21,11 @@ struct LibGitLogReadPlannerInner {
     repo_path: String,
 }
 
-pub struct LibGitLogReadPlanner {
-    inner: Arc<LibGitLogReadPlannerInner>,
+pub struct LibGitLogScanner {
+    inner: Arc<LibGitLogScannerInner>,
 }
 
-impl LibGitLogReadPlanner {
+impl LibGitLogScanner {
     pub fn open(
         repo_path: &str,
         params: &GitLogParameter,
@@ -53,8 +51,8 @@ impl LibGitLogReadPlanner {
 
         let (max_threads, batch_size) = compute_parallelism(commit_oids.len());
 
-        Ok(LibGitLogReadPlanner {
-            inner: Arc::new(LibGitLogReadPlannerInner {
+        Ok(LibGitLogScanner {
+            inner: Arc::new(LibGitLogScannerInner {
                 commit_oids,
                 decorations,
                 contained,
@@ -65,31 +63,14 @@ impl LibGitLogReadPlanner {
             }),
         })
     }
-}
 
-impl GitLogReadPlanner for LibGitLogReadPlanner {
-    fn max_threads(&self) -> u64 {
+    pub fn max_threads(&self) -> u64 {
         self.inner.max_threads
     }
 
-    fn new_reader(&self, params: &GitLogParameter) -> Box<dyn GitLogReader> {
-        Box::new(LibGitLogReader {
-            inner: Arc::clone(&self.inner),
-            ignore_all_space: params.ignore_all_space,
-            diff_merges: params.diff_merges,
-        })
-    }
-}
-
-struct LibGitLogReader {
-    inner: Arc<LibGitLogReadPlannerInner>,
-    ignore_all_space: bool,
-    diff_merges: DiffMerges,
-}
-
-impl GitLogReader for LibGitLogReader {
-    fn read(
-        &mut self,
+    pub fn read(
+        &self,
+        params: &GitLogParameter,
         output: &mut DataChunkHandle,
         column_indices: &[u64],
     ) -> Result<u32, Box<dyn Error>> {
@@ -119,9 +100,9 @@ impl GitLogReader for LibGitLogReader {
             let commit = read_commit(
                 repo,
                 *oid,
-                self.ignore_all_space,
+                params.ignore_all_space,
                 skip_file_changes,
-                self.diff_merges,
+                params.diff_merges,
             )?;
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
             let branches: Vec<&str> = self.inner.contained.branches_of(oid).collect();

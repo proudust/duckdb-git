@@ -1,10 +1,8 @@
 use crate::git::backend::gix::{
     build_contained_index, collect_refs, read_commit, walk_commit_oids, CachedRepo,
 };
-use crate::git::options::DiffMerges;
 use crate::git::ref_index::ContainedIndex;
 use crate::git_log::params::GitLogParameter;
-use crate::git_log::reader::{GitLogReadPlanner, GitLogReader};
 use crate::git_log::schema;
 use crate::git_log::vector::VectorInserter;
 use duckdb::core::DataChunkHandle;
@@ -13,7 +11,7 @@ use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-struct GixLogReadPlannerInner {
+struct GixLogScannerInner {
     commit_oids: Vec<gix::ObjectId>,
     decorations: HashMap<gix::ObjectId, Vec<String>>,
     contained: ContainedIndex<gix::ObjectId>,
@@ -23,11 +21,11 @@ struct GixLogReadPlannerInner {
     repo_path: String,
 }
 
-pub struct GixLogReadPlanner {
-    inner: Arc<GixLogReadPlannerInner>,
+pub struct GixLogScanner {
+    inner: Arc<GixLogScannerInner>,
 }
 
-impl GixLogReadPlanner {
+impl GixLogScanner {
     pub fn open(
         repo_path: &str,
         params: &GitLogParameter,
@@ -53,8 +51,8 @@ impl GixLogReadPlanner {
 
         let (max_threads, batch_size) = compute_parallelism(commit_oids.len());
 
-        Ok(GixLogReadPlanner {
-            inner: Arc::new(GixLogReadPlannerInner {
+        Ok(GixLogScanner {
+            inner: Arc::new(GixLogScannerInner {
                 commit_oids,
                 decorations,
                 contained,
@@ -65,31 +63,14 @@ impl GixLogReadPlanner {
             }),
         })
     }
-}
 
-impl GitLogReadPlanner for GixLogReadPlanner {
-    fn max_threads(&self) -> u64 {
+    pub fn max_threads(&self) -> u64 {
         self.inner.max_threads
     }
 
-    fn new_reader(&self, params: &GitLogParameter) -> Box<dyn GitLogReader> {
-        Box::new(GixLogReader {
-            inner: Arc::clone(&self.inner),
-            ignore_all_space: params.ignore_all_space,
-            diff_merges: params.diff_merges,
-        })
-    }
-}
-
-struct GixLogReader {
-    inner: Arc<GixLogReadPlannerInner>,
-    ignore_all_space: bool,
-    diff_merges: DiffMerges,
-}
-
-impl GitLogReader for GixLogReader {
-    fn read(
-        &mut self,
+    pub fn read(
+        &self,
+        params: &GitLogParameter,
         output: &mut DataChunkHandle,
         column_indices: &[u64],
     ) -> Result<u32, Box<dyn Error>> {
@@ -119,9 +100,9 @@ impl GitLogReader for GixLogReader {
             let commit = read_commit(
                 repo,
                 *oid,
-                self.ignore_all_space,
+                params.ignore_all_space,
                 skip_file_changes,
-                self.diff_merges,
+                params.diff_merges,
             )?;
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
             let branches: Vec<&str> = self.inner.contained.branches_of(oid).collect();

@@ -4,7 +4,7 @@ A [DuckDB](https://duckdb.org/) extension for querying Git repository history wi
 
 ## Usage
 
-Require DuckDB v1.5.4 or later.
+Require DuckDB v1.5.5 or later.
 
 Since it is not signed, you need to start it with the `-unsigned` option.
 

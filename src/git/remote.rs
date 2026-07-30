@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::error::Error;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -64,6 +65,9 @@ pub fn ensure_local_clone(url: &str, engine: RemoteEngine) -> Result<PathBuf, Bo
     let _guard = lock
         .lock()
         .map_err(|e| format!("lock poisoned for '{}': {e}", dir.display()))?;
+    // Declared after the mutex so it is released first: the file lock is what keeps
+    // other DuckDB processes out of the check/fetch/swap sequence below.
+    let _file_guard = lock_cache_dir(&dir)?;
     let ops = ops_for(engine);
 
     // An interrupted swap can leave only `{cache}.bak` behind; put it back before we
@@ -124,8 +128,10 @@ fn install_fresh_clone(url: &str, dir: &Path, ops: &RemoteOps) -> Result<(), Box
 
     if let Err(e) = std::fs::rename(&tmp, dir) {
         std::fs::remove_dir_all(&tmp).ok();
-        // Another process may have installed a usable cache; accept that. Otherwise put
-        // our previous cache back so a rename glitch does not leave the caller empty-handed.
+        // A usable cache appearing here means a writer outside our lock (older build,
+        // manual meddling) got there first; accept it rather than clobbering it.
+        // Otherwise put our previous cache back so a rename glitch does not leave the
+        // caller empty-handed.
         if (ops.is_usable)(dir) {
             remove_cache_dir(&bak).ok();
             return Ok(());
@@ -142,8 +148,11 @@ fn install_fresh_clone(url: &str, dir: &Path, ops: &RemoteOps) -> Result<(), Box
         return Err(format!("failed to move cloned repo to '{}': {e}", dir.display()).into());
     }
 
-    // New cache is live; the previous one can go.
-    remove_cache_dir(&bak)?;
+    // New cache is live, so the previous one is only garbage now. Deleting it can still
+    // fail while another process has the old files open (Windows in particular); that
+    // must not fail an install that already succeeded. A leftover `{cache}.bak` next to
+    // a live cache is inert and gets dropped by the next install.
+    remove_cache_dir(&bak).ok();
     Ok(())
 }
 
@@ -294,8 +303,9 @@ fn prepare_tmp_dir(dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
 
 /// Removes `{cache}.tmp-{pid}` siblings left behind by crashed or long-dead installers.
 ///
-/// Live PIDs are left alone so a concurrent cross-process clone is not disrupted; those
-/// can still be reclaimed after [`STALE_TMP_AGE`] if the installer wedged.
+/// [`lock_cache_dir`] already guarantees no other lock-abiding process is installing, so
+/// this is garbage collection rather than arbitration. Live PIDs are still spared in case
+/// a writer outside our lock owns them; those are reclaimed after [`STALE_TMP_AGE`].
 fn cleanup_orphan_tmp_dirs(dir: &Path) {
     let Some(parent) = dir.parent() else {
         return;
@@ -378,6 +388,11 @@ fn remove_cache_dir(dir: &Path) -> Result<(), Box<dyn Error>> {
 
 static DIR_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
+/// Serialises threads of *this* process on one cache directory.
+///
+/// Taken before [`lock_cache_dir`] because the same-process semantics of advisory file
+/// locks are platform-dependent, and because contending threads should not each need an
+/// open file descriptor to wait.
 fn dir_lock(dir: &Path) -> Arc<Mutex<()>> {
     let map_lock = DIR_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut map = map_lock.lock().unwrap();
@@ -385,6 +400,54 @@ fn dir_lock(dir: &Path) -> Arc<Mutex<()>> {
         map.entry(dir.to_path_buf())
             .or_insert_with(|| Arc::new(Mutex::new(()))),
     )
+}
+
+/// A sibling of the cache directory, never a file inside it: the directory itself is
+/// renamed during a swap, so a lock held within it would not cover the swap.
+///
+/// This empty file is deliberately never removed. Unlinking it would let a waiter keep
+/// its lock on the now-unreachable inode while the next process creates a fresh file and
+/// locks that instead, so both would proceed at once.
+fn lock_file_path(dir: &Path) -> PathBuf {
+    dir.with_file_name(format!(
+        "{}.lock",
+        dir.file_name().unwrap().to_string_lossy()
+    ))
+}
+
+/// Blocks until no other process is maintaining this cache directory.
+///
+/// The OS temp directory is shared, so two DuckDB processes can query the same URL at
+/// once. Without this, their `{cache}.bak` swaps interleave and destroy each other's
+/// state: one restores the other's backup mid-clone, or deletes the backup the other
+/// still needs to roll back to, leaving a stale cache reported as freshly fetched.
+///
+/// Advisory locks (`flock` / `LockFileEx`) are released by the kernel when the holder
+/// exits, so a crashed or killed installer cannot wedge the cache the way a
+/// hand-rolled lockfile would. Waiting is therefore unbounded on purpose — the holder's
+/// work is already bounded by the network timeouts above, and giving up early would only
+/// return the caller to the unsynchronised behaviour this exists to prevent.
+fn lock_cache_dir(dir: &Path) -> Result<Option<File>, Box<dyn Error>> {
+    let parent = dir.parent().unwrap_or(dir);
+    std::fs::create_dir_all(parent)?;
+
+    let path = lock_file_path(dir);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        // The file is a lock token only; its contents are never read or written.
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("failed to open cache lock '{}': {e}", path.display()))?;
+
+    match file.lock() {
+        Ok(()) => Ok(Some(file)),
+        // Targets without advisory locking keep the previous in-process-only behaviour
+        // rather than losing remote URL support entirely.
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => Ok(None),
+        Err(e) => Err(format!("failed to lock cache '{}': {e}", path.display()).into()),
+    }
 }
 
 #[cfg(feature = "libgit-backend")]
@@ -663,6 +726,56 @@ mod tests {
         let prepared = prepare_tmp_dir(&cache).unwrap();
         assert_eq!(prepared, own);
         assert!(!own.exists(), "prepare_tmp_dir clears our own leftover tmp");
+    }
+
+    #[test]
+    fn lock_file_is_a_sibling_of_the_cache_dir() {
+        let dir = cache_dir_for("https://github.com/foo/bar.git", TEST_ENGINE);
+        let lock = lock_file_path(&dir);
+        assert_eq!(lock.parent(), dir.parent());
+        assert_eq!(
+            lock.file_name().unwrap().to_string_lossy(),
+            format!("{}.lock", dir.file_name().unwrap().to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn lock_cache_dir_creates_missing_parents() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("libgit").join("repo-deadbeef");
+
+        let guard = lock_cache_dir(&cache).unwrap();
+
+        assert!(lock_file_path(&cache).exists());
+        assert!(!cache.exists(), "the lock must not create the cache itself");
+        drop(guard);
+    }
+
+    /// A second open file description stands in for a second DuckDB process: on unix and
+    /// Windows these contend exactly as separate processes do.
+    #[test]
+    fn lock_cache_dir_excludes_other_holders() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("repo-deadbeef");
+
+        let guard = lock_cache_dir(&cache)
+            .unwrap()
+            .expect("advisory locking is supported on all built targets");
+        let other = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_file_path(&cache))
+            .unwrap();
+        assert!(
+            matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "a held cache lock must block other holders"
+        );
+
+        drop(guard);
+        assert!(
+            other.try_lock().is_ok(),
+            "the lock must be released with its guard"
+        );
     }
 
     #[test]

@@ -46,13 +46,8 @@ SELECT list_has_all(contained_tags, ['refs/tags/v0.1.1', 'refs/tags/v0.1.2', 're
 ----
 true
 
-# Full local branch paths (name varies by checkout; assert refs/heads/ prefix).
-query I
-SELECT len(list_filter(contained_branches, x -> starts_with(x, 'refs/heads/'))) > 0 FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, decorate='full', backend='gix');
-----
-true
-
-# Full remote path for the stable origin/main tip.
+# Full branch paths: assert refs/remotes/ (stable in CI). Do not require
+# refs/heads/* -- tag/detached checkouts often have only remote-tracking refs.
 query I
 SELECT list_contains(contained_branches, 'refs/remotes/origin/main') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, decorate='full', backend='gix');
 ----

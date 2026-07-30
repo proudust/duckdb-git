@@ -37,7 +37,7 @@ duckdb = { version = "~1.10505.0", features = ["vtab"] }
 git2 = { version = "0.20.2", default-features = false, features = [
     "vendored-libgit2",
 ], optional = true }
-gix = { version = "0.85", default-features = false, optional = true, features = [
+gix = { version = "0.86", default-features = false, optional = true, features = [
     "blocking-network-client",
     "blocking-http-transport-reqwest-rust-tls",
     "sha1",

@@ -103,6 +103,11 @@ fn clone_into(url: &str, dir: &Path) -> Result<(), Box<dyn Error>> {
         .map_err(|e| format!("failed to fetch from '{url}': {e}"))?;
     drop(result);
 
+    // gix 0.86 / gix-ref 0.66 always acquires per-ref locks during packed-refs-only
+    // clone writes. Dropping those locks cleans empty parent dirs up to the gitdir,
+    // which can remove the empty `refs/` tree that `gix::open` still requires.
+    ensure_refs_dirs(&tmp)?;
+
     match std::fs::rename(&tmp, dir) {
         Ok(()) => Ok(()),
         Err(_) if dir.exists() => {
@@ -124,6 +129,14 @@ fn fetch_existing(dir: &Path) -> Result<(), Box<dyn Error>> {
             &std::sync::atomic::AtomicBool::new(false),
         )?;
     drop(outcome);
+    // Same packed-refs-only cleanup can empty `refs/` on subsequent fetches.
+    ensure_refs_dirs(dir)?;
+    Ok(())
+}
+
+fn ensure_refs_dirs(git_dir: &Path) -> Result<(), Box<dyn Error>> {
+    std::fs::create_dir_all(git_dir.join("refs/heads"))?;
+    std::fs::create_dir_all(git_dir.join("refs/tags"))?;
     Ok(())
 }
 

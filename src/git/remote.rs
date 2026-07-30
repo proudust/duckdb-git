@@ -180,21 +180,37 @@ fn recover_orphaned_backup(dir: &Path) -> Result<(), Box<dyn Error>> {
 
 /// Canonical form used only for cache identity.
 ///
-/// Collapses scheme/host case, strips userinfo, trailing `/`, and a final `.git` so
+/// Collapses scheme/host case, strips userinfo, default ports (`:443` / `:80`),
+/// query/fragment, equivalent percent-encoding, trailing `/`, and a final `.git` so
 /// equivalent remotes share one cache directory (and credential-bearing variants do
 /// not get a separate residue even if they somehow reach this layer).
+///
+/// Intentionally **not** collapsed:
+/// - path letter-case — many hosts are case-sensitive; folding would merge distinct
+///   repos. (GitHub is case-insensitive, but that is host policy, not URL equivalence.)
+/// - `http` vs `https` — different origins; sharing a cache would be wrong if only one
+///   scheme works. The cost is a possible double clone of the same project.
 fn normalize_url(url: &str) -> Cow<'_, str> {
-    let trimmed = url.trim_end_matches('/');
-    let stripped = trimmed.strip_suffix(".git").unwrap_or(trimmed);
-
-    let Some((scheme, after_scheme)) = stripped.split_once("://") else {
-        return Cow::Borrowed(stripped);
+    let Some((scheme, after_scheme)) = url.split_once("://") else {
+        let trimmed = url.trim_end_matches('/');
+        let stripped = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+        return if stripped.len() == url.len() {
+            Cow::Borrowed(url)
+        } else {
+            Cow::Owned(stripped.to_string())
+        };
     };
 
-    let (authority, path) = match after_scheme.find(['/', '?', '#']) {
+    let (authority, rest) = match after_scheme.find(['/', '?', '#']) {
         Some(i) => (&after_scheme[..i], &after_scheme[i..]),
         None => (after_scheme, ""),
     };
+    // Query and fragment never participate in git clone identity.
+    let path_raw = match rest.find(['?', '#']) {
+        Some(i) => &rest[..i],
+        None => rest,
+    };
+
     // Drop userinfo (`user:token@host`) so it cannot fork the cache key.
     let hostport = authority
         .rsplit_once('@')
@@ -202,14 +218,80 @@ fn normalize_url(url: &str) -> Cow<'_, str> {
         .unwrap_or(authority);
 
     let scheme_l = scheme.to_ascii_lowercase();
-    let host_l = hostport.to_ascii_lowercase();
-    let path_norm = path.trim_end_matches('/');
+    let host_lower = hostport.to_ascii_lowercase();
+    let host_l = strip_default_port(&scheme_l, &host_lower);
+    let path_decoded = percent_decode(path_raw);
+    let path_trim = path_decoded.trim_end_matches('/');
+    let path_norm = path_trim.strip_suffix(".git").unwrap_or(path_trim);
 
-    if scheme == scheme_l && hostport == host_l && path == path_norm && !authority.contains('@') {
-        return Cow::Borrowed(stripped);
+    let owned = format!("{scheme_l}://{host_l}{path_norm}");
+    if owned == url {
+        Cow::Borrowed(url)
+    } else {
+        Cow::Owned(owned)
     }
+}
 
-    Cow::Owned(format!("{scheme_l}://{host_l}{path_norm}"))
+/// Removes `:80` / `:443` when they are the scheme default.
+///
+/// Bracketed IPv6 (`[::1]:443`) is handled; unbracketed addresses that still contain
+/// `:` after a would-be strip are left alone so we never chop into an address.
+fn strip_default_port<'a>(scheme: &str, hostport: &'a str) -> &'a str {
+    let default = match scheme {
+        "http" => "80",
+        "https" => "443",
+        _ => return hostport,
+    };
+    let Some(host) = hostport
+        .strip_suffix(default)
+        .and_then(|h| h.strip_suffix(':'))
+    else {
+        return hostport;
+    };
+    if host.starts_with('[') {
+        return if host.ends_with(']') { host } else { hostport };
+    }
+    if host.contains(':') {
+        return hostport;
+    }
+    host
+}
+
+/// Decodes `%HH` sequences in a URL path for cache identity.
+///
+/// Invalid escapes are copied through unchanged. Non-UTF-8 results keep the original
+/// path so a decode glitch cannot silently merge unrelated keys.
+fn percent_decode(input: &str) -> Cow<'_, str> {
+    if !input.as_bytes().contains(&b'%') {
+        return Cow::Borrowed(input);
+    }
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    match String::from_utf8(out) {
+        Ok(s) => Cow::Owned(s),
+        Err(_) => Cow::Borrowed(input),
+    }
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Masks `userinfo` in URLs so credentials never appear in error messages.
@@ -230,10 +312,17 @@ fn redact_url(url: &str) -> Cow<'_, str> {
 /// Cache directories are namespaced per engine: libgit2 and gix write subtly
 /// different bare layouts, and sharing one directory would make behaviour depend on
 /// which engine happened to create it first.
+///
+/// The directory name embeds an FNV-1a 64-bit digest of the normalized URL. That is
+/// not a cryptographic hash, so in theory two distinct URLs can collide. On a
+/// world-writable `$TMPDIR` the binding threat is simpler: anyone who knows the URL
+/// can compute the path and plant content there without needing a collision. The
+/// advisory lock only serialises cooperative duckdb-git processes; it is not a
+/// trust boundary against other local users (see README).
 fn cache_dir_for(url: &str, engine: RemoteEngine) -> PathBuf {
     let normalized = normalize_url(url);
     let hash = fnv1a_64(normalized.as_bytes());
-    let name = sanitize_name(url);
+    let name = sanitize_name(&normalized);
     std::env::temp_dir()
         .join("duckdb-git")
         .join(engine_slug(engine))
@@ -250,6 +339,8 @@ fn engine_slug(engine: RemoteEngine) -> &'static str {
 }
 
 fn sanitize_name(url: &str) -> String {
+    // Prefer the last path segment of a normalized URL so percent-encoded names
+    // (`%6dain` → `main`) stay readable in the cache directory prefix.
     let segment = url.trim_end_matches('/').rsplit('/').next().unwrap_or("");
     let name = segment.strip_suffix(".git").unwrap_or(segment);
     let sanitized: String = name
@@ -633,6 +724,14 @@ mod tests {
             // userinfo must not fork the cache key (also rejected at the VTab layer)
             "https://user:token@github.com/foo/bar",
             "https://user@GitHub.com/foo/bar.git",
+            // default HTTPS port, query, fragment, percent-encoding
+            "https://github.com:443/foo/bar",
+            "https://github.com/foo/bar?x=1",
+            "https://github.com/foo/bar#frag",
+            "https://github.com/foo/bar.git?x=1#frag",
+            "https://github.com/foo/%62ar",
+            "https://github.com/foo/%62%61r.git/",
+            "HTTPS://GitHub.com:443/foo/%62ar?x=1#y",
         ] {
             assert_eq!(cache_dir_for(variant, TEST_ENGINE), base, "{variant}");
         }
@@ -651,6 +750,52 @@ mod tests {
         assert_eq!(
             normalize_url("https://github.com/foo/bar"),
             "https://github.com/foo/bar"
+        );
+    }
+
+    #[test]
+    fn normalize_url_strips_default_port_query_fragment_and_percent_encoding() {
+        assert_eq!(
+            normalize_url("https://github.com:443/foo/bar"),
+            "https://github.com/foo/bar"
+        );
+        assert_eq!(
+            normalize_url("http://example.com:80/repo.git"),
+            "http://example.com/repo"
+        );
+        assert_eq!(
+            normalize_url("https://github.com/foo/bar?ref=main#readme"),
+            "https://github.com/foo/bar"
+        );
+        assert_eq!(
+            normalize_url("https://github.com/foo/%6dain"),
+            "https://github.com/foo/main"
+        );
+        assert_eq!(
+            normalize_url("https://github.com/foo/%6Dain.git/"),
+            "https://github.com/foo/main"
+        );
+        // Non-default ports are preserved.
+        assert_eq!(
+            normalize_url("https://github.com:8443/foo/bar"),
+            "https://github.com:8443/foo/bar"
+        );
+        // Bracketed IPv6 with default port.
+        assert_eq!(
+            normalize_url("https://[::1]:443/repo"),
+            "https://[::1]/repo"
+        );
+    }
+
+    #[test]
+    fn normalize_url_keeps_path_case_and_http_https_distinct() {
+        assert_ne!(
+            normalize_url("https://github.com/Foo/Bar"),
+            normalize_url("https://github.com/foo/bar")
+        );
+        assert_ne!(
+            normalize_url("http://github.com/foo/bar"),
+            normalize_url("https://github.com/foo/bar")
         );
     }
 

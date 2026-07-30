@@ -100,15 +100,19 @@ impl VTab for GitLogVTab {
         let column_indices = info.get_column_indices();
 
         let repo_path: std::borrow::Cow<str> = if params::is_remote_url(&params.repo_path) {
-            #[cfg(feature = "gix-backend")]
-            {
-                let local = crate::git::remote::ensure_local_clone(&params.repo_path)?;
-                std::borrow::Cow::Owned(local.to_string_lossy().into_owned())
-            }
-            #[cfg(not(feature = "gix-backend"))]
-            {
-                return Err("remote URLs require the 'gix-backend' feature".into());
-            }
+            params::validate_remote_url(&params.repo_path)?;
+            let engine = match params.backend {
+                #[cfg(feature = "libgit-backend")]
+                BackendKind::Libgit => crate::git::remote::RemoteEngine::Libgit,
+                #[cfg(not(feature = "libgit-backend"))]
+                BackendKind::Libgit => {
+                    return Err("'libgit' backend not enabled in this build".into());
+                }
+                #[cfg(feature = "gix-backend")]
+                BackendKind::Gix => crate::git::remote::RemoteEngine::Gix,
+            };
+            let local = crate::git::remote::ensure_local_clone(&params.repo_path, engine)?;
+            std::borrow::Cow::Owned(local.to_string_lossy().into_owned())
         } else {
             std::borrow::Cow::Borrowed(&params.repo_path)
         };

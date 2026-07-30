@@ -3,6 +3,6 @@ pub mod model;
 pub mod options;
 #[cfg(any(feature = "libgit-backend", feature = "gix-backend"))]
 pub mod ref_index;
-#[cfg(feature = "gix-backend")]
+#[cfg(any(feature = "libgit-backend", feature = "gix-backend"))]
 pub mod remote;
 pub mod revision;

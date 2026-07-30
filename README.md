@@ -85,7 +85,7 @@ Returns commit history as a table.
 
 [^1]: Symmetric differences (`a...b`) are not supported.
 [^2]: If you build with the `gix-backend` feature included, you can also specify `gix`.
-[^3]: The repository is cached as a bare clone in the OS temp directory and refreshed on each query. Only anonymous HTTPS is supported.
+[^3]: The repository is cached as a bare clone in the OS temp directory (`$TMPDIR/duckdb-git/...`) and refreshed on each query. Each backend keeps its own cache directory. Only anonymous HTTP(S) is supported — URLs with embedded credentials (`https://user:token@...`) are rejected. Do not put secrets in the URL; the cache may be readable by other users on shared machines.
 
 #### Output Columns
 

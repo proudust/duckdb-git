@@ -6,8 +6,37 @@ require duckdb_git
 
 require-env GIX_BACKEND 1
 
-# gix backend reads from the cached bare clone
+# Explicit backend; revision omitted so HEAD must resolve after clone
 query I
 SELECT count(*) FROM git_log('https://github.com/proudust/duckdb-git.git', max_count=3, backend='gix');
 ----
 3
+
+# Tip of unresolved HEAD carries the default-branch decorate
+query I
+SELECT list_contains(decorate, 'main')
+FROM git_log('https://github.com/proudust/duckdb-git.git', max_count=1, backend='gix');
+----
+true
+
+# HEAD tip matches the remote default branch tip
+query I
+SELECT (
+  SELECT commit_id FROM git_log('https://github.com/proudust/duckdb-git.git', max_count=1, backend='gix')
+) = (
+  SELECT commit_id FROM git_log('https://github.com/proudust/duckdb-git.git', revision='main', max_count=1, backend='gix')
+);
+----
+true
+
+# Second query exercises fetch against the existing cache
+query I
+SELECT count(*) FROM git_log('https://github.com/proudust/duckdb-git.git', max_count=3, backend='gix');
+----
+3
+
+# Embedded credentials are rejected (anonymous HTTP(S) only)
+statement error
+SELECT count(*) FROM git_log('https://user:token@example.com/repo.git', max_count=1, backend='gix');
+----
+embedded credentials

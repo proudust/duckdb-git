@@ -110,6 +110,31 @@ pub(crate) fn is_remote_url(s: &str) -> bool {
     })
 }
 
+/// Rejects HTTP(S) URLs that embed credentials (`https://user:token@host/...`).
+///
+/// Anonymous HTTPS only: userinfo would otherwise land in error strings and in the
+/// bare-clone `origin` URL under the shared OS temp cache.
+pub(crate) fn validate_remote_url(url: &str) -> Result<(), Box<dyn Error>> {
+    if remote_url_has_userinfo(url) {
+        return Err(
+            "remote URLs with embedded credentials (userinfo) are not supported; only anonymous HTTP(S) is allowed"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn remote_url_has_userinfo(url: &str) -> bool {
+    let Some((_scheme, after_scheme)) = url.split_once("://") else {
+        return false;
+    };
+    let authority = after_scheme
+        .split_once(['/', '?', '#'])
+        .map(|(authority, _)| authority)
+        .unwrap_or(after_scheme);
+    authority.contains('@')
+}
+
 pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Error>> {
     let repo_path = bind.get_parameter(0).to_string();
 
@@ -229,5 +254,30 @@ mod tests {
         assert!(!is_remote_url("ssh://git@github.com/foo/bar"));
         assert!(!is_remote_url("git://github.com/foo/bar"));
         assert!(!is_remote_url("file:///path/to/repo"));
+    }
+
+    #[test]
+    fn validate_remote_url_rejects_userinfo() {
+        assert!(validate_remote_url("https://github.com/foo/bar.git").is_ok());
+        assert!(validate_remote_url("http://example.com/repo").is_ok());
+        for url in [
+            "https://user:token@github.com/foo/bar.git",
+            "https://user@github.com/foo/bar.git",
+            "HTTP://user:pass@EXAMPLE.COM/repo",
+            "https://user:token@host",
+        ] {
+            let err = validate_remote_url(url).unwrap_err().to_string();
+            assert!(err.contains("embedded credentials"), "url={url}, err={err}");
+            assert!(!err.contains("token"), "url={url}, err={err}");
+            assert!(!err.contains("pass"), "url={url}, err={err}");
+        }
+    }
+
+    #[test]
+    fn remote_url_has_userinfo_detection() {
+        assert!(!remote_url_has_userinfo("https://github.com/foo/bar"));
+        assert!(!remote_url_has_userinfo("https://github.com/foo/bar@baz")); // @ in path
+        assert!(remote_url_has_userinfo("https://user:token@github.com/foo"));
+        assert!(remote_url_has_userinfo("https://user@github.com/foo"));
     }
 }

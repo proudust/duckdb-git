@@ -15,6 +15,9 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// reqwest has no idle timeout, so this is the only way to bound a hung response.
 #[cfg(feature = "gix-backend")]
 const GIX_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// Age after which a `{cache}.tmp-{pid}` for a still-"alive" PID is treated as wedged
+/// and reclaimed (cross-process hang / pid reuse edge cases).
+const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Which git engine performs the clone/fetch for remote URLs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,17 +275,97 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 }
 
 fn prepare_tmp_dir(dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
-    std::fs::create_dir_all(dir.parent().unwrap_or(dir))?;
+    let parent = dir.parent().unwrap_or(dir);
+    std::fs::create_dir_all(parent)?;
+    cleanup_orphan_tmp_dirs(dir);
 
     let tmp = dir.with_file_name(format!(
         "{}.tmp-{}",
         dir.file_name().unwrap().to_string_lossy(),
         std::process::id()
     ));
+    // Our own leftover from a previous attempt in this process (same pid is rare after
+    // crash, but covers the "retry after failed clone" path).
     if tmp.exists() {
         std::fs::remove_dir_all(&tmp)?;
     }
     Ok(tmp)
+}
+
+/// Removes `{cache}.tmp-{pid}` siblings left behind by crashed or long-dead installers.
+///
+/// Live PIDs are left alone so a concurrent cross-process clone is not disrupted; those
+/// can still be reclaimed after [`STALE_TMP_AGE`] if the installer wedged.
+fn cleanup_orphan_tmp_dirs(dir: &Path) {
+    let Some(parent) = dir.parent() else {
+        return;
+    };
+    let Some(cache_name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let prefix = format!("{cache_name}.tmp-");
+    let my_pid = std::process::id();
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(fname) = fname.to_str() else {
+            continue;
+        };
+        let Some(suffix) = fname.strip_prefix(&prefix) else {
+            continue;
+        };
+
+        let remove = match suffix.parse::<u32>() {
+            Ok(pid) if pid == my_pid => true,
+            Ok(pid) if !process_seems_alive(pid) => true,
+            Ok(_) => entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|mtime| mtime.elapsed().ok())
+                .is_some_and(|age| age > STALE_TMP_AGE),
+            // Malformed suffix — safe to drop.
+            Err(_) => true,
+        };
+
+        if remove {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Best-effort check used only for orphan tmp reclaim.
+fn process_seems_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // SAFETY: signal 0 performs an existence check and does not deliver a signal.
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        let rc = unsafe { kill(pid as i32, 0) };
+        if rc == 0 {
+            return true;
+        }
+        // ESRCH (3 on macOS/BSD) means the process does not exist. EPERM means it does.
+        const ESRCH: i32 = 3;
+        std::io::Error::last_os_error().raw_os_error() != Some(ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        // No cheap liveness probe; rely on STALE_TMP_AGE instead.
+        true
+    }
 }
 
 fn remove_cache_dir(dir: &Path) -> Result<(), Box<dyn Error>> {
@@ -549,6 +632,37 @@ mod tests {
         let long_url = format!("https://example.com/{}", "a".repeat(100));
         let name = sanitize_name(&long_url);
         assert!(name.len() <= 64);
+    }
+
+    #[test]
+    fn cleanup_orphan_tmp_dirs_removes_dead_pid_and_keeps_live() {
+        let parent = tempfile::tempdir().unwrap();
+        let cache = parent.path().join("repo-deadbeef");
+        std::fs::create_dir_all(&cache).unwrap();
+
+        let dead = parent.path().join("repo-deadbeef.tmp-4294967294");
+        std::fs::create_dir_all(&dead).unwrap();
+
+        // PID 1 is init/launchd and should still be running on unix.
+        let live = parent.path().join("repo-deadbeef.tmp-1");
+        std::fs::create_dir_all(&live).unwrap();
+
+        cleanup_orphan_tmp_dirs(&cache);
+
+        assert!(
+            !dead.exists(),
+            "tmp for a non-existent pid should be removed"
+        );
+        #[cfg(unix)]
+        assert!(live.exists(), "tmp for a live pid should be kept");
+
+        let own = parent
+            .path()
+            .join(format!("repo-deadbeef.tmp-{}", std::process::id()));
+        std::fs::create_dir_all(&own).unwrap();
+        let prepared = prepare_tmp_dir(&cache).unwrap();
+        assert_eq!(prepared, own);
+        assert!(!own.exists(), "prepare_tmp_dir clears our own leftover tmp");
     }
 
     #[test]

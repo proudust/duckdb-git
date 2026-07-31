@@ -6,14 +6,16 @@ require duckdb_git
 
 require-env GIX_BACKEND 1
 
-# Test that parents values are correct per row (regression: offsets were always 0)
+# Multi-row walk: each commit's parents list is independent. Includes root ([]),
+# single-parent commits, and a merge with ordered parents [B, C].
 query II
 SELECT commit_id, parents
-FROM git_log('.', revision='86b5cb415f95c10b06f7623e5cbecb5f92f612ba', backend='gix')
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             backend='gix')
 ORDER BY author_timestamp ASC;
 ----
-b1e7e960fcbee2de7489b7dcca09a9223039521e	[]
-2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5	[b1e7e960fcbee2de7489b7dcca09a9223039521e]
-78ae3ce3e7cb6ee193569710b3213352ed1c857f	[2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5]
-5873dd77bb3d3734a23dab4dc195a2a734e45d03	[78ae3ce3e7cb6ee193569710b3213352ed1c857f]
-86b5cb415f95c10b06f7623e5cbecb5f92f612ba	[5873dd77bb3d3734a23dab4dc195a2a734e45d03]
+ff09a62b129cc936f13bc67c5e2dba84f397c64b	[]
+fc021d9befa4cb7437bc815878ed20fd9ea37a2b	[ff09a62b129cc936f13bc67c5e2dba84f397c64b]
+28264d80ac316c97deb80c3ee52721ed6451e4b2	[ff09a62b129cc936f13bc67c5e2dba84f397c64b]
+42e16c94127de3a9363f8a6f14fa5ca85856d8b4	[fc021d9befa4cb7437bc815878ed20fd9ea37a2b, 28264d80ac316c97deb80c3ee52721ed6451e4b2]

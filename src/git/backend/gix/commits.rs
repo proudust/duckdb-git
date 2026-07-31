@@ -100,3 +100,27 @@ mod tests {
         assert!(!kept.file_changes.is_empty());
     }
 }
+
+#[cfg(test)]
+mod peel_tests {
+    use super::walk_commit_oids;
+    use crate::git::revision::RevisionTerm;
+
+    #[test]
+    fn walk_peels_annotated_tag() {
+        let repo = gix::open("test/fixtures/parity.git").unwrap();
+        let terms = [RevisionTerm {
+            spec: "v1".into(),
+            negate: false,
+            origin: "v1".into(),
+        }];
+        let oids = walk_commit_oids(&repo, Some(&terms), Some(1)).unwrap();
+        assert_eq!(oids.len(), 1);
+        let obj = repo.find_object(oids[0]).unwrap();
+        assert_eq!(obj.kind, gix::object::Kind::Commit);
+        assert_eq!(
+            oids[0].to_string(),
+            "ff09a62b129cc936f13bc67c5e2dba84f397c64b"
+        );
+    }
+}

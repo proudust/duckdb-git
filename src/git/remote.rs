@@ -963,7 +963,7 @@ mod tests {
 
     #[test]
     fn cache_dir_hash_matches_e2e_remote_url() {
-        // Keep in sync with test/sql/{libgit,gix}/remote_url.test cache path.
+        // Keep in sync with test/sql/{libgit,gix}/param_repo_path.test cache path.
         let dir = cache_dir_for("https://github.com/proudust/duckdb-git.git", TEST_ENGINE);
         assert!(
             dir.file_name()

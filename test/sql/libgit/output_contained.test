@@ -4,49 +4,50 @@
 
 require duckdb_git
 
-# KEY distinguishing behavior vs `decorate`: this commit is not a ref tip
-# (decorate is []), but it's an ancestor of every tag below, so it shows up
-# in contained_tags for all of them. Membership only -- a new release tag
-# must not break this.
+# decorate is refs pointing at this commit; contained_tags is all tags that contain it as an ancestor.
+# v1 tip: decorate=[v1], but contained_tags includes every tag whose history reaches this commit.
 query I
-SELECT list_has_all(contained_tags, ['v0.1.1', 'v0.1.2', 'v0.2.0', 'v0.3.0', 'v0.4.0']) FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1);
+SELECT list_sort(decorate)
+FROM git_log('./test/fixtures/parity.git',
+             revision='v1', max_count=1);
 ----
-true
+[v1]
 
-# Same commit: it's an ancestor of main (presence check only -- main's tip
-# moves over time, but it will always still contain this very old commit).
 query I
-SELECT len(contained_branches) > 0 FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1);
+SELECT list_sort(contained_tags)
+FROM git_log('./test/fixtures/parity.git',
+             revision='v1', max_count=1);
 ----
-true
+[amended, binary, deleted, gitlink-bump, left, merged, multipath, note, padded-author, rename, right, typechange, v1, whitespace]
 
-# Remote-tracking branches are always included.
+# Branches containing the root commit (symbolic origin/HEAD excluded)
 query I
-SELECT list_contains(contained_branches, 'origin/main') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1);
+SELECT list_sort(contained_branches)
+FROM git_log('./test/fixtures/parity.git',
+             revision='v1', max_count=1);
 ----
-true
+[master, origin/main, side]
 
-# Bare "origin/HEAD" alias entry is never included (symbolic ref, filtered out).
+# Bare origin/HEAD alias is never included in contained_branches
 query I
-SELECT list_contains(contained_branches, 'origin/HEAD') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1);
+SELECT list_contains(contained_branches, 'origin/HEAD')
+FROM git_log('./test/fixtures/parity.git',
+             revision='v1', max_count=1);
 ----
 false
 
-# Self-inclusion: v0.1.1's own commit contains the v0.1.1 tag.
-query I
-SELECT list_contains(contained_tags, 'v0.1.1') FROM git_log('.', revision='295db8704f2b2e12fe71a1f433b8b17906fedf25', max_count=1);
+# decorate='full' format is reused for full ref paths in contained_* too
+query II
+SELECT list_sort(contained_tags), list_sort(contained_branches)
+FROM git_log('./test/fixtures/parity.git',
+             revision='v1', max_count=1, decorate='full');
 ----
-true
+[refs/tags/amended, refs/tags/binary, refs/tags/deleted, refs/tags/gitlink-bump, refs/tags/left, refs/tags/merged, refs/tags/multipath, refs/tags/note, refs/tags/padded-author, refs/tags/rename, refs/tags/right, refs/tags/typechange, refs/tags/v1, refs/tags/whitespace]	[refs/heads/master, refs/heads/side, refs/remotes/origin/main]
 
-# decorate='full' format is reused for full ref paths in contained_* too.
-query I
-SELECT list_has_all(contained_tags, ['refs/tags/v0.1.1', 'refs/tags/v0.1.2', 'refs/tags/v0.2.0', 'refs/tags/v0.3.0', 'refs/tags/v0.4.0']) FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, decorate='full');
+# Untagged commit: empty decorate, but still contained by later tags and master
+query III
+SELECT list_sort(decorate), list_sort(contained_tags), list_sort(contained_branches)
+FROM git_log('./test/fixtures/parity.git',
+             revision='gitlink-bump~1', max_count=1);
 ----
-true
-
-# Full branch paths: assert refs/remotes/ (stable in CI). Do not require
-# refs/heads/* -- tag/detached checkouts often have only remote-tracking refs.
-query I
-SELECT list_contains(contained_branches, 'refs/remotes/origin/main') FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, decorate='full');
-----
-true
+[]	[amended, gitlink-bump, multipath, padded-author]	[master]

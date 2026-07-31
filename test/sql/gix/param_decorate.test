@@ -6,26 +6,71 @@ require duckdb_git
 
 require-env GIX_BACKEND 1
 
-# Test that decorate is an empty array for a commit with no branch/tag pointing to it
+# Untagged commit has an empty decorate list
 query I
-SELECT decorate FROM git_log('.', revision='2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5', max_count=1, backend='gix');
+SELECT decorate
+FROM git_log('./test/fixtures/parity.git',
+             revision='gitlink-bump~1', max_count=1, backend='gix');
 ----
 []
 
-# Test that decorate includes an annotated tag pointing to the commit (exercises tag peeling)
+# Annotated tag peels to the commit (short)
 query I
-SELECT decorate FROM git_log('.', revision='295db8704f2b2e12fe71a1f433b8b17906fedf25', max_count=1, backend='gix');
+SELECT list_sort(decorate)
+FROM git_log('./test/fixtures/parity.git',
+             revision='v1', max_count=1, backend='gix');
 ----
-[v0.1.1]
+[v1]
 
 # decorate='full' returns full ref paths
 query I
-SELECT decorate FROM git_log('.', revision='295db8704f2b2e12fe71a1f433b8b17906fedf25', max_count=1, decorate='full', backend='gix');
+SELECT list_sort(decorate)
+FROM git_log('./test/fixtures/parity.git',
+             revision='v1', max_count=1, decorate='full', backend='gix');
 ----
-[refs/tags/v0.1.1]
+[refs/tags/v1]
+
+# Merge tip: tags + remote-tracking (+ symbolic origin/HEAD from references())
+query I
+SELECT list_sort(decorate)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged', max_count=1, backend='gix');
+----
+[merged, origin/HEAD, origin/main]
+
+query I
+SELECT list_sort(decorate)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged', max_count=1, decorate='full', backend='gix');
+----
+[refs/remotes/origin/HEAD, refs/remotes/origin/main, refs/tags/merged]
+
+# Multiple tags decorate the same commit
+query I
+SELECT list_sort(decorate)
+FROM git_log('./test/fixtures/parity.git',
+             revision='typechange', max_count=1, backend='gix');
+----
+[binary, deleted, typechange, whitespace]
+
+# Multiple tags decorate the same commit
+query I
+SELECT list_sort(decorate)
+FROM git_log('./test/fixtures/parity.git',
+             revision='gitlink-bump', max_count=1, backend='gix');
+----
+[gitlink-bump, multipath]
+
+# Tags and a branch decorate the same tip
+query I
+SELECT list_sort(decorate)
+FROM git_log('./test/fixtures/parity.git',
+             revision='padded-author', max_count=1, backend='gix');
+----
+[amended, master, padded-author]
 
 # decorate='no' is rejected (use projection pushdown to omit the column)
 statement error
-SELECT decorate FROM git_log('.', decorate='no', backend='gix');
+SELECT decorate FROM git_log('./test/fixtures/parity.git', decorate='no', backend='gix');
 ----
 decorate='no' is not supported; omit the decorate column instead

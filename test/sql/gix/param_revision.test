@@ -6,28 +6,252 @@ require duckdb_git
 
 require-env GIX_BACKEND 1
 
-# range: A..B returns commits reachable from B but not A
+# --- Ranges / LIST / empty tip / symmetric difference ---
+
+# Linear range via tags returns commits reachable from rename but not note
 query I
-SELECT commit_id FROM git_log('.', revision='4314d2e85b2789604122c0972fb54630fd918844..3f9eb76282f6ca05b343858c6adbd081d06a4143', backend='gix') ORDER BY commit_id;
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='note..rename',
+             backend='gix')
+ORDER BY commit_id;
 ----
-3f9eb76282f6ca05b343858c6adbd081d06a4143
+95937d42365c812ebe6893e756cde1d0d86ae10b
 
 # LIST form: a positive tip plus a ^excluded revspec is equivalent to the range above
 query I
-SELECT commit_id FROM git_log('.', revision=['3f9eb76282f6ca05b343858c6adbd081d06a4143', '^4314d2e85b2789604122c0972fb54630fd918844'], backend='gix') ORDER BY commit_id;
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision=['rename', '^note'],
+             backend='gix')
+ORDER BY commit_id;
 ----
-3f9eb76282f6ca05b343858c6adbd081d06a4143
+95937d42365c812ebe6893e756cde1d0d86ae10b
+
+# Merge range: left..merged is merged and the other side (right)
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='left..merged',
+             backend='gix')
+ORDER BY commit_id;
+----
+28264d80ac316c97deb80c3ee52721ed6451e4b2
+42e16c94127de3a9363f8a6f14fa5ca85856d8b4
+
+# LIST form equivalent to left..merged
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision=['merged', '^left'],
+             backend='gix')
+ORDER BY commit_id;
+----
+28264d80ac316c97deb80c3ee52721ed6451e4b2
+42e16c94127de3a9363f8a6f14fa5ca85856d8b4
 
 # Symmetric difference (a...b) is explicitly unsupported
 statement error
-SELECT * FROM git_log('.', revision='4314d2e85b2789604122c0972fb54630fd918844...3f9eb76282f6ca05b343858c6adbd081d06a4143', backend='gix');
+SELECT * FROM git_log('./test/fixtures/parity.git',
+                      revision='note...rename',
+                      backend='gix');
 ----
-symmetric difference ('4314d2e85b2789604122c0972fb54630fd918844...3f9eb76282f6ca05b343858c6adbd081d06a4143') is not supported in revision; see git-log(1)
+symmetric difference ('note...rename') is not supported in revision; see git-log(1)
 
-# Excluding everything with no positive tip has no starting point to walk from,
-# so it returns an empty result (matching `git log ^HEAD~3`, which exits 0 with
-# no output rather than erroring).
+# Excluding everything with no positive tip returns empty (matching `git log ^rev`)
 query I
-SELECT count(*) FROM git_log('.', revision=['^4314d2e85b2789604122c0972fb54630fd918844'], backend='gix');
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision=['^note'],
+             backend='gix');
 ----
 0
+
+# --- Tip resolution kinds (max_count=1) ---
+
+# Lightweight tag
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='rename', max_count=1, backend='gix');
+----
+95937d42365c812ebe6893e756cde1d0d86ae10b
+
+# Annotated tag peels to the underlying commit
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='v1', max_count=1, backend='gix');
+----
+ff09a62b129cc936f13bc67c5e2dba84f397c64b
+
+# Local branch (HEAD)
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='master', max_count=1, backend='gix');
+----
+abe0518abd296b9b9a45755e12ec6ebec26c17a7
+
+# Local branch (side)
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='side', max_count=1, backend='gix');
+----
+28264d80ac316c97deb80c3ee52721ed6451e4b2
+
+# Remote-tracking ref
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='origin/main', max_count=1, backend='gix');
+----
+42e16c94127de3a9363f8a6f14fa5ca85856d8b4
+
+# Full tag ref
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='refs/tags/rename', max_count=1, backend='gix');
+----
+95937d42365c812ebe6893e756cde1d0d86ae10b
+
+# Full branch ref
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='refs/heads/master', max_count=1, backend='gix');
+----
+abe0518abd296b9b9a45755e12ec6ebec26c17a7
+
+# Abbreviated OID
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='95937d4', max_count=1, backend='gix');
+----
+95937d42365c812ebe6893e756cde1d0d86ae10b
+
+# Full SHA
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='95937d42365c812ebe6893e756cde1d0d86ae10b', max_count=1, backend='gix');
+----
+95937d42365c812ebe6893e756cde1d0d86ae10b
+
+# --- Parent / ancestor / peel ---
+
+# First parent via ~
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='rename~1', max_count=1, backend='gix');
+----
+5b05f738e9af3deb3ae4c34cd99d1388b81be9ed
+
+# First-parent walk from a merge (~1 == ^1)
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged~1', max_count=1, backend='gix');
+----
+fc021d9befa4cb7437bc815878ed20fd9ea37a2b
+
+# Second parent of a merge
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged^2', max_count=1, backend='gix');
+----
+28264d80ac316c97deb80c3ee52721ed6451e4b2
+
+# Ancestor operator on a non-merge tip (parent is the merge)
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='typechange~1', max_count=1, backend='gix');
+----
+42e16c94127de3a9363f8a6f14fa5ca85856d8b4
+
+# Explicit peel of an annotated tag
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='v1^{}', max_count=1, backend='gix');
+----
+ff09a62b129cc936f13bc67c5e2dba84f397c64b
+
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='v1^{commit}', max_count=1, backend='gix');
+----
+ff09a62b129cc936f13bc67c5e2dba84f397c64b
+
+# --- Elided ranges (.. defaults to HEAD; HEAD = master in this bare fixture) ---
+
+# merged..HEAD: commits reachable from master but not merged
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged..',
+             backend='gix');
+----
+6
+
+# HEAD..side is empty because side is reachable from master in this fixture
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='..side',
+             backend='gix');
+----
+0
+
+# left..HEAD: hide left, tip is master
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='left..',
+             backend='gix');
+----
+8
+
+# --- Rejects / unresolved ---
+
+statement error
+SELECT * FROM git_log('./test/fixtures/parity.git',
+                      revision='^left..merged',
+                      backend='gix');
+----
+bad revision '^left..merged'
+
+statement error
+SELECT * FROM git_log('./test/fixtures/parity.git',
+                      revision='^',
+                      backend='gix');
+----
+bad revision '^'
+
+statement error
+SELECT * FROM git_log('./test/fixtures/parity.git',
+                      revision='no-such-ref',
+                      backend='gix');
+----
+ambiguous argument 'no-such-ref': unknown revision or path not in the working tree.
+
+statement error
+SELECT * FROM git_log('./test/fixtures/parity.git',
+                      revision='^no-such-ref',
+                      backend='gix');
+----
+bad revision '^no-such-ref'
+
+statement error
+SELECT * FROM git_log('./test/fixtures/parity.git',
+                      revision='left..typo',
+                      backend='gix');
+----
+ambiguous argument 'left..typo': unknown revision or path not in the working tree.

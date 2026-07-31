@@ -4,20 +4,24 @@
 
 require duckdb_git
 
-# Test that ignore_all_space=true reduces diff line counts on a commit with indentation changes
-# Commit 8769ae5 has src/lib.rs with 112 add / 83 del normally, but 64 add / 35 del with -w
+# Mixed whitespace + content change: normal numstat counts both
 query II
 SELECT change.add_lines, change.del_lines FROM (
   SELECT unnest(file_changes) as change
-  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=false)
-) WHERE change.path = 'src/lib.rs';
+  FROM git_log('./test/fixtures/parity.git',
+               revision='whitespace',
+               max_count=1, ignore_all_space=false)
+) WHERE change.path = 'space.txt';
 ----
-112	83
+2	2
 
+# ignore_all_space drops indent-only hunks but keeps the real line change (git log -w)
 query II
 SELECT change.add_lines, change.del_lines FROM (
   SELECT unnest(file_changes) as change
-  FROM git_log('.', revision='8769ae5b08adc556a7fa94077870afe6115acc8d', max_count=1, ignore_all_space=true)
-) WHERE change.path = 'src/lib.rs';
+  FROM git_log('./test/fixtures/parity.git',
+               revision='whitespace',
+               max_count=1, ignore_all_space=true)
+) WHERE change.path = 'space.txt';
 ----
-64	35
+1	1

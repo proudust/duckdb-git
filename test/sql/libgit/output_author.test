@@ -1,0 +1,22 @@
+# name: test/sql/libgit/output_author.test
+# description: author / committer identity columns (libgit backend)
+# group: [git]
+
+require duckdb_git
+
+# author_timestamp uses author seconds (%ai), not committer — amended has differing dates
+query II
+SELECT epoch(author_timestamp)::BIGINT, epoch(committer_timestamp)::BIGINT
+FROM git_log('./test/fixtures/parity.git',
+             revision='amended', max_count=1);
+----
+1700001600	1700001700
+
+# Author: git log %an keeps a leading space from the raw ident
+query II
+SELECT '[' || author || ']', '[' || author_email || ']'
+FROM git_log('./test/fixtures/parity.git',
+             revision='padded-author',
+             max_count=1);
+----
+[ Pad Name]	[pad@ex.com]

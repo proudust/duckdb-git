@@ -1,0 +1,25 @@
+# name: test/sql/gix/param_ignore_all_space.test
+# description: ignore_all_space parameter (gix backend; true not supported)
+# group: [git]
+
+require duckdb_git
+
+require-env GIX_BACKEND 1
+
+# Mixed whitespace + content change: normal numstat counts both
+query II
+SELECT change.add_lines, change.del_lines FROM (
+  SELECT unnest(file_changes) as change
+  FROM git_log('./test/fixtures/parity.git',
+               revision='whitespace',
+               max_count=1, backend='gix', ignore_all_space=false)
+) WHERE change.path = 'space.txt';
+----
+2	2
+
+# gix does not yet honor ignore_all_space (unlike libgit / git log -w)
+statement error
+SELECT * FROM git_log('./test/fixtures/parity.git',
+                      backend='gix', ignore_all_space=true);
+----
+ignore_all_space=true is not supported with the gix backend

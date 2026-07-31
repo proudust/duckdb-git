@@ -1,5 +1,5 @@
-# name: test/sql/gix/remote_url.test
-# description: git_log with remote HTTP(S) URL (gix backend)
+# name: test/sql/gix/param_repo_path.test
+# description: git_log repo_path with remote HTTP(S) URL (gix backend)
 # group: [git]
 
 require duckdb_git
@@ -13,6 +13,7 @@ SELECT count(*) FROM git_log('https://github.com/proudust/duckdb-git.git', max_c
 3
 
 # Tip of unresolved HEAD carries the default-branch decorate
+# (empty decorate here would mean clone left HEAD unset from the remote default branch)
 query I
 SELECT list_contains(decorate, 'main')
 FROM git_log('https://github.com/proudust/duckdb-git.git', max_count=1, backend='gix');

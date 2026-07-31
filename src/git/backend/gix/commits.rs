@@ -15,8 +15,14 @@ pub(crate) fn walk_commit_oids(
             let mut tips = Vec::new();
             let mut hidden = Vec::new();
             for term in terms {
+                // Peel annotated tags like `git log <rev>` (`v1` → underlying commit).
+                let spec = if term.spec.contains("^{") {
+                    term.spec.clone()
+                } else {
+                    format!("{}^{{commit}}", term.spec)
+                };
                 let id = repo
-                    .rev_parse_single(term.spec.as_str())
+                    .rev_parse_single(spec.as_str())
                     .map_err(|_| -> Box<dyn Error> {
                         unresolved_revision_error(&term.origin).into()
                     })?

@@ -21,10 +21,18 @@ pub(crate) fn walk_commit_oids(
                     .map_err(|_| -> Box<dyn Error> {
                         unresolved_revision_error(&term.origin).into()
                     })?;
+                // Peel annotated tags (and anything else) to a commit, like `git log <rev>`.
+                let id = obj.peel_to_commit().map(|c| c.id()).map_err(|e| -> Box<dyn Error> {
+                    format!(
+                        "revision '{}' does not resolve to a commit: {e}",
+                        term.origin
+                    )
+                    .into()
+                })?;
                 if term.negate {
-                    revwalk.hide(obj.id())?;
+                    revwalk.hide(id)?;
                 } else {
-                    revwalk.push(obj.id())?;
+                    revwalk.push(id)?;
                 }
             }
         }

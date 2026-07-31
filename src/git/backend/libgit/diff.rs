@@ -10,43 +10,62 @@ pub(super) fn collect_file_changes(
 
     if commit.parent_count() == 0 {
         let tree = commit.tree()?;
+        let mut walk_err: Option<git2::Error> = None;
         tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+            if walk_err.is_some() {
+                return git2::TreeWalkResult::Abort;
+            }
             if entry.kind() == Some(git2::ObjectType::Tree) {
                 return git2::TreeWalkResult::Ok;
             }
-            if let Some(name) = entry.name() {
-                let oid = entry.id();
-                if entry.kind() == Some(git2::ObjectType::Commit) {
-                    let (add_lines, del_lines) = gitlink_numstat("A");
-                    file_changes.push(FileChange {
-                        path: format!("{}{}", root, name),
-                        old_path: None,
-                        status: "A",
-                        blob_id: oid.to_string(),
-                        file_size: None,
-                        add_lines,
-                        del_lines,
-                    });
-                } else if let Ok(blob) = repo.find_blob(oid) {
-                    let content = std::str::from_utf8(blob.content());
-                    let add_lines = if let Ok(text) = content {
-                        text.lines().count() as i32
-                    } else {
-                        0
-                    };
-                    file_changes.push(FileChange {
-                        path: format!("{}{}", root, name),
-                        old_path: None,
-                        status: "A",
-                        blob_id: oid.to_string(),
-                        file_size: Some(blob.size() as i64),
-                        add_lines,
-                        del_lines: 0,
-                    });
+            let Some(name) = entry.name() else {
+                return git2::TreeWalkResult::Ok;
+            };
+            let oid = entry.id();
+            if entry.kind() == Some(git2::ObjectType::Commit) {
+                let (add_lines, del_lines) = gitlink_numstat("A");
+                file_changes.push(FileChange {
+                    path: format!("{}{}", root, name),
+                    old_path: None,
+                    status: "A",
+                    blob_id: oid.to_string(),
+                    file_size: None,
+                    add_lines: Some(add_lines),
+                    del_lines: Some(del_lines),
+                });
+            } else {
+                match repo.find_blob(oid) {
+                    Ok(blob) => {
+                        let content = blob.content();
+                        let (add_lines, del_lines) = if super::xdiff::is_binary_content(content) {
+                            (None, None)
+                        } else {
+                            match std::str::from_utf8(content) {
+                                Ok(text) => (Some(text.lines().count() as i32), Some(0)),
+                                Err(_) => (None, None),
+                            }
+                        };
+                        file_changes.push(FileChange {
+                            path: format!("{}{}", root, name),
+                            old_path: None,
+                            status: "A",
+                            blob_id: oid.to_string(),
+                            file_size: Some(blob.size() as i64),
+                            add_lines,
+                            del_lines,
+                        });
+                    }
+                    Err(e) => {
+                        walk_err = Some(e);
+                        return git2::TreeWalkResult::Abort;
+                    }
                 }
             }
             git2::TreeWalkResult::Ok
         })?;
+        if let Some(e) = walk_err {
+            return Err(e);
+        }
         return Ok(file_changes);
     }
 
@@ -55,6 +74,7 @@ pub(super) fn collect_file_changes(
     let current_tree = commit.tree()?;
 
     let mut diff_options = git2::DiffOptions::new();
+    diff_options.include_typechange(true);
     if ignore_all_space {
         diff_options.ignore_whitespace(true);
     }
@@ -84,10 +104,12 @@ pub(super) fn collect_file_changes(
             git2::Delta::Modified => "M",
             git2::Delta::Renamed => "R",
             git2::Delta::Copied => "C",
-            git2::Delta::Ignored => "I",
-            git2::Delta::Untracked => "?",
             git2::Delta::Typechange => "T",
-            _ => "U",
+            other => {
+                return Err(git2::Error::from_str(&format!(
+                    "unexpected diff delta status in commit history: {other:?}"
+                )));
+            }
         };
 
         let file_path = if let Some(new_file) = delta.new_file().path() {
@@ -108,8 +130,9 @@ pub(super) fn collect_file_changes(
 
         let is_gitlink = delta.new_file().mode() == git2::FileMode::Commit
             || delta.old_file().mode() == git2::FileMode::Commit;
+        let is_typechange = delta.status() == git2::Delta::Typechange;
 
-        let (blob_id, file_size, add_lines, del_lines) = if is_gitlink {
+        let (blob_id, file_size, add_lines, del_lines) = if is_gitlink || is_typechange {
             let id = if delta.new_file().path().is_some() {
                 delta.new_file().id().to_string()
             } else if delta.old_file().path().is_some() {
@@ -117,8 +140,17 @@ pub(super) fn collect_file_changes(
             } else {
                 "unknown".to_string()
             };
+            let file_size = if is_gitlink {
+                None
+            } else if delta.new_file().path().is_some() {
+                Some(delta.new_file().size() as i64)
+            } else if delta.old_file().path().is_some() {
+                Some(delta.old_file().size() as i64)
+            } else {
+                None
+            };
             let (add, del) = gitlink_numstat(status);
-            (id, None, add, del)
+            (id, file_size, Some(add), Some(del))
         } else {
             let (blob_id, file_size) = if delta.new_file().path().is_some() {
                 (
@@ -134,7 +166,7 @@ pub(super) fn collect_file_changes(
                 ("unknown".to_string(), Some(0))
             };
 
-            let (add, del) = {
+            let line_counts = {
                 let old_id = delta.old_file().id();
                 let new_id = delta.new_file().id();
                 let old_blob;
@@ -153,6 +185,10 @@ pub(super) fn collect_file_changes(
                 };
                 super::xdiff::diff_line_counts(old_content, new_content, ignore_all_space)
                     .map_err(|e| git2::Error::from_str(&e.to_string()))?
+            };
+            let (add, del) = match line_counts {
+                Some((a, d)) => (Some(a), Some(d)),
+                None => (None, None),
             };
 
             (blob_id, file_size, add, del)

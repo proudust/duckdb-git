@@ -91,7 +91,7 @@ unsafe extern "C" fn count_lines_cb(
     0
 }
 
-fn is_binary(content: &[u8]) -> bool {
+pub(super) fn is_binary_content(content: &[u8]) -> bool {
     let len = content.len().min(8000);
     content[..len].contains(&0)
 }
@@ -122,13 +122,15 @@ fn trim_common_tail(a: &[u8], b: &[u8]) -> (usize, usize) {
 }
 
 /// Requires libgit2 to be initialized (xdiff uses git__malloc internally).
+///
+/// Returns `Ok(None)` when either side is binary (matches `git log --numstat` `-`).
 pub fn diff_line_counts(
     old: &[u8],
     new: &[u8],
     ignore_whitespace: bool,
-) -> Result<(i32, i32), Box<dyn Error>> {
-    if is_binary(old) || is_binary(new) {
-        return Ok((0, 0));
+) -> Result<Option<(i32, i32)>, Box<dyn Error>> {
+    if is_binary_content(old) || is_binary_content(new) {
+        return Ok(None);
     }
 
     let (old_len, new_len) = trim_common_tail(old, new);
@@ -180,7 +182,7 @@ pub fn diff_line_counts(
         return Err("xdl_diff failed".into());
     }
 
-    Ok((counter.added, counter.deleted))
+    Ok(Some((counter.added, counter.deleted)))
 }
 
 #[cfg(test)]
@@ -225,40 +227,40 @@ mod tests {
                 &b""[..],
                 &b"line1\nline2\nline3\n"[..],
                 false,
-                (3, 0),
+                Some((3, 0)),
             ),
-            ("deleted", b"line1\nline2\n", b"", false, (0, 2)),
+            ("deleted", b"line1\nline2\n", b"", false, Some((0, 2))),
             (
                 "modified",
                 b"aaa\nbbb\nccc\n",
                 b"aaa\nBBB\nccc\n",
                 false,
-                (1, 1),
+                Some((1, 1)),
             ),
-            ("binary", b"\x00binary", b"text\n", false, (0, 0)),
-            ("identical", b"same\n", b"same\n", false, (0, 0)),
-            ("both empty", b"", b"", false, (0, 0)),
+            ("binary", b"\x00binary", b"text\n", false, None),
+            ("identical", b"same\n", b"same\n", false, Some((0, 0))),
+            ("both empty", b"", b"", false, Some((0, 0))),
             (
                 "inner space, kept",
                 b"hello world\n",
                 b"hello  world\n",
                 false,
-                (1, 1),
+                Some((1, 1)),
             ),
             (
                 "inner space, ignored",
                 b"hello world\n",
                 b"hello  world\n",
                 true,
-                (0, 0),
+                Some((0, 0)),
             ),
-            ("crlf, ignored", b"line\r\n", b"line\n", true, (0, 0)),
+            ("crlf, ignored", b"line\r\n", b"line\n", true, Some((0, 0))),
             (
                 "trailing space, ignored",
                 b"line  \n",
                 b"line\n",
                 true,
-                (0, 0),
+                Some((0, 0)),
             ),
         ] {
             let counts = diff_line_counts(old, new, ignore_ws).unwrap();

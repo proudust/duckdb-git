@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod ident;
 pub mod model;
 pub mod options;
 #[cfg(any(feature = "libgit-backend", feature = "gix-backend"))]

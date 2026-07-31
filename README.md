@@ -111,11 +111,11 @@ The `file_changes` struct contains:
 | ----------- | ------------------ | ----------------------------------------------------------- |
 | `path`      | `VARCHAR NOT NULL` | File path (new path for renames/copies)                     |
 | `old_path`  | `VARCHAR NULL`     | Previous path for renames/copies; `NULL` otherwise          |
-| `status`    | `VARCHAR NOT NULL` | Change status (`A`dd, `D`elete, `M`odify, `R`ename, `C`opy) |
+| `status`    | `VARCHAR NOT NULL` | Change status (`A`dd, `D`elete, `M`odify, `R`ename, `C`opy, `T`ypechange) |
 | `blob_id`   | `VARCHAR NOT NULL` | Git blob object ID                                          |
 | `file_size` | `BIGINT NULL`      | File size in bytes                                          |
-| `add_lines` | `INTEGER NOT NULL` | Lines added                                                 |
-| `del_lines` | `INTEGER NOT NULL` | Lines deleted                                               |
+| `add_lines` | `INTEGER NULL`     | Lines added; `NULL` for binary (`git log --numstat` `-`)    |
+| `del_lines` | `INTEGER NULL`     | Lines deleted; `NULL` for binary (`git log --numstat` `-`)  |
 
 ## Building
 

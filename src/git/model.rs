@@ -15,8 +15,8 @@ pub struct FileChange {
     pub status: &'static str,
     pub blob_id: String,
     pub file_size: Option<i64>,
-    pub add_lines: i32,
-    pub del_lines: i32,
+    pub add_lines: Option<i32>,
+    pub del_lines: Option<i32>,
 }
 
 pub struct CommitData {

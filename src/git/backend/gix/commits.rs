@@ -1,4 +1,5 @@
 use super::diff::collect_file_changes;
+use crate::git::ident::{commit_header, parse_ident};
 use crate::git::model::CommitData;
 use crate::git::options::DiffMerges;
 use crate::git::revision::{unresolved_revision_error, RevisionTerm};
@@ -51,36 +52,10 @@ pub(crate) fn read_commit(
     diff_merges: DiffMerges,
 ) -> Result<CommitData, Box<dyn Error>> {
     let commit = repo.find_commit(oid)?;
-
-    let author_name = commit.author().map(|a| a.name.to_vec()).unwrap_or_default();
-    let author_email = commit
-        .author()
-        .map(|a| a.email.to_vec())
-        .unwrap_or_default();
-    let author_timestamp = commit
-        .author()
-        .ok()
-        .and_then(|a| a.time().ok())
-        .map(|t| t.seconds)
-        .unwrap_or(0);
-
-    let committer_name = commit
-        .committer()
-        .map(|a| a.name.to_vec())
-        .unwrap_or_default();
-    let committer_email = commit
-        .committer()
-        .map(|a| a.email.to_vec())
-        .unwrap_or_default();
-    let committer_timestamp = commit
-        .committer()
-        .ok()
-        .and_then(|a| a.time().ok())
-        .map(|t| t.seconds)
-        .unwrap_or(0);
-
-    let message = commit.message_raw_sloppy().to_vec();
-    let parents = commit.parent_ids().map(|id| id.to_string()).collect();
+    let header = commit_header(commit.data.as_ref());
+    let author = parse_ident(header, b"author")?;
+    let committer = parse_ident(header, b"committer")?;
+    let message = commit.message_raw()?;
 
     let skip =
         skip_file_changes || (diff_merges == DiffMerges::Off && commit.parent_ids().count() > 1);
@@ -91,14 +66,14 @@ pub(crate) fn read_commit(
     };
 
     Ok(CommitData {
-        author_name,
-        author_email,
-        author_timestamp,
-        committer_name,
-        committer_email,
-        committer_timestamp,
-        message,
-        parents,
+        author_name: author.name,
+        author_email: author.email,
+        author_timestamp: author.seconds,
+        committer_name: committer.name,
+        committer_email: committer.email,
+        committer_timestamp: committer.seconds,
+        message: message.to_vec(),
+        parents: commit.parent_ids().map(|id| id.to_string()).collect(),
         file_changes,
     })
 }

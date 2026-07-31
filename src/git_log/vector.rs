@@ -200,9 +200,19 @@ impl<'a> VectorInserter<'a> {
                 } else {
                     file_size.set_null(off + i);
                 }
-                unsafe {
-                    add_lines.as_mut_slice::<i32>()[off + i] = fc.add_lines;
-                    del_lines.as_mut_slice::<i32>()[off + i] = fc.del_lines;
+                if let Some(n) = fc.add_lines {
+                    unsafe {
+                        add_lines.as_mut_slice::<i32>()[off + i] = n;
+                    }
+                } else {
+                    add_lines.set_null(off + i);
+                }
+                if let Some(n) = fc.del_lines {
+                    unsafe {
+                        del_lines.as_mut_slice::<i32>()[off + i] = n;
+                    }
+                } else {
+                    del_lines.set_null(off + i);
                 }
             }
             fc_vec.set_entry(idx, self.file_changes_offset, len);

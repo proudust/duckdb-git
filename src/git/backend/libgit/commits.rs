@@ -1,4 +1,5 @@
 use super::diff::collect_file_changes;
+use crate::git::ident::{commit_header, parse_ident};
 use crate::git::model::CommitData;
 use crate::git::options::DiffMerges;
 use crate::git::revision::{unresolved_revision_error, RevisionTerm};
@@ -53,8 +54,9 @@ pub(crate) fn read_commit(
     diff_merges: DiffMerges,
 ) -> Result<CommitData, Box<dyn Error>> {
     let commit = repo.find_commit(oid)?;
-    let author = commit.author();
-    let committer = commit.committer();
+    let header = commit_header(commit.raw_header_bytes());
+    let author = parse_ident(header, b"author")?;
+    let committer = parse_ident(header, b"committer")?;
 
     let skip = skip_file_changes || (diff_merges == DiffMerges::Off && commit.parent_count() > 1);
     let file_changes = if skip {
@@ -64,13 +66,13 @@ pub(crate) fn read_commit(
     };
 
     Ok(CommitData {
-        author_name: author.name_bytes().to_vec(),
-        author_email: author.email_bytes().to_vec(),
-        author_timestamp: author.when().seconds(),
-        committer_name: committer.name_bytes().to_vec(),
-        committer_email: committer.email_bytes().to_vec(),
-        committer_timestamp: committer.when().seconds(),
-        message: commit.message_bytes().to_vec(),
+        author_name: author.name,
+        author_email: author.email,
+        author_timestamp: author.seconds,
+        committer_name: committer.name,
+        committer_email: committer.email,
+        committer_timestamp: committer.seconds,
+        message: commit.message_raw_bytes().to_vec(),
         parents: (0..commit.parent_count())
             .map(|i| commit.parent_id(i).unwrap().to_string())
             .collect(),

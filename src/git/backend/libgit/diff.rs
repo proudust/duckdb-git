@@ -1,5 +1,15 @@
-use crate::git::model::{gitlink_numstat, FileChange};
+use crate::git::model::{gitlink_numstat, unable_to_read_object, FileChange};
 use git2::Repository;
+
+fn find_blob<'a>(repo: &'a Repository, oid: git2::Oid) -> Result<git2::Blob<'a>, git2::Error> {
+    repo.find_blob(oid).map_err(|e| {
+        if e.code() == git2::ErrorCode::NotFound {
+            git2::Error::from_str(&unable_to_read_object(oid))
+        } else {
+            e
+        }
+    })
+}
 
 pub(super) fn collect_file_changes(
     repo: &Repository,
@@ -11,7 +21,7 @@ pub(super) fn collect_file_changes(
     if commit.parent_count() == 0 {
         let tree = commit.tree()?;
         let mut walk_err: Option<git2::Error> = None;
-        tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+        let walk_result = tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
             if walk_err.is_some() {
                 return git2::TreeWalkResult::Abort;
             }
@@ -34,7 +44,7 @@ pub(super) fn collect_file_changes(
                     del_lines: Some(del_lines),
                 });
             } else {
-                match repo.find_blob(oid) {
+                match find_blob(repo, oid) {
                     Ok(blob) => {
                         let content = blob.content();
                         let (add_lines, del_lines) = if super::xdiff::is_binary_content(content) {
@@ -62,10 +72,12 @@ pub(super) fn collect_file_changes(
                 }
             }
             git2::TreeWalkResult::Ok
-        })?;
+        });
+        // Prefer the blob error over tree-walk's generic Abort (-7).
         if let Some(e) = walk_err {
             return Err(e);
         }
+        walk_result?;
         return Ok(file_changes);
     }
 
@@ -173,14 +185,14 @@ pub(super) fn collect_file_changes(
                 let old_content: &[u8] = if old_id.is_zero() {
                     &[]
                 } else {
-                    old_blob = repo.find_blob(old_id)?;
+                    old_blob = find_blob(repo, old_id)?;
                     old_blob.content()
                 };
                 let new_blob;
                 let new_content: &[u8] = if new_id.is_zero() {
                     &[]
                 } else {
-                    new_blob = repo.find_blob(new_id)?;
+                    new_blob = find_blob(repo, new_id)?;
                     new_blob.content()
                 };
                 super::xdiff::diff_line_counts(old_content, new_content, ignore_all_space)

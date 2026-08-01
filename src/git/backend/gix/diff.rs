@@ -1,4 +1,4 @@
-use crate::git::model::{gitlink_numstat, FileChange};
+use crate::git::model::{gitlink_numstat, unable_to_read_object, FileChange};
 use std::ops::ControlFlow;
 
 fn is_typechange(
@@ -13,6 +13,37 @@ fn is_typechange(
         EntryKind::Tree => 3,
     };
     class(previous) != class(current)
+}
+
+/// OIDs whose blob content `git log --numstat` would need to read for this change.
+fn blob_oids_for_numstat(
+    change: &gix::object::tree::diff::Change<'_, '_, '_>,
+) -> Vec<gix::ObjectId> {
+    use gix::object::tree::diff::Change;
+    match change {
+        Change::Addition { id, .. } | Change::Deletion { id, .. } => vec![id.detach()],
+        Change::Modification {
+            previous_id, id, ..
+        } => vec![previous_id.detach(), id.detach()],
+        Change::Rewrite {
+            source_id, id, ..
+        } => vec![source_id.detach(), id.detach()],
+    }
+}
+
+fn ensure_blobs_readable(
+    repo: &gix::Repository,
+    oids: &[gix::ObjectId],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for oid in oids {
+        if oid.is_null() {
+            continue;
+        }
+        if repo.try_find_object(*oid)?.is_none() {
+            return Err(unable_to_read_object(oid).into());
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn collect_file_changes(
@@ -30,8 +61,11 @@ pub(super) fn collect_file_changes(
     };
 
     let mut resource_cache = repo.diff_resource_cache_for_tree_diff()?;
+    // Captured outside the callback so we can surface git's phrasing without
+    // gix wrapping it as "The user-provided callback failed: …".
+    let mut missing_blob: Option<String> = None;
 
-    parent_tree.changes()?.for_each_to_obtain_tree(
+    let walk = parent_tree.changes()?.for_each_to_obtain_tree(
         &current_tree,
         |change| -> Result<ControlFlow<()>, Box<dyn std::error::Error + Send + Sync>> {
             use gix::object::tree::diff::Change;
@@ -96,6 +130,11 @@ pub(super) fn collect_file_changes(
                 let (a, d) = gitlink_numstat(status);
                 (Some(a), Some(d))
             } else {
+                let oids = blob_oids_for_numstat(&change);
+                if let Err(e) = ensure_blobs_readable(repo, &oids) {
+                    missing_blob = Some(e.to_string());
+                    return Err(e);
+                }
                 let mut platform = change.diff(&mut resource_cache)?;
                 match platform.line_counts()? {
                     Some(counts) => (Some(counts.insertions as i32), Some(counts.removals as i32)),
@@ -117,7 +156,12 @@ pub(super) fn collect_file_changes(
 
             Ok(ControlFlow::Continue(()))
         },
-    )?;
+    );
+
+    if let Some(msg) = missing_blob {
+        return Err(msg.into());
+    }
+    walk?;
 
     Ok(file_changes)
 }

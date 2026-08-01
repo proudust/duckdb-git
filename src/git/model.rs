@@ -8,6 +8,11 @@ pub fn gitlink_numstat(status: &str) -> (i32, i32) {
     }
 }
 
+/// Match `git log --numstat` when a blob object is missing (`diff.c`: `unable to read %s`).
+pub fn unable_to_read_object(oid: impl std::fmt::Display) -> String {
+    format!("unable to read {oid}")
+}
+
 #[derive(Clone)]
 pub struct FileChange {
     pub path: String,

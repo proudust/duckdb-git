@@ -52,8 +52,6 @@ pub(crate) fn walk_commit_oids(
 pub(crate) fn read_commit(
     repo: &gix::Repository,
     oid: gix::ObjectId,
-    // TODO: gix does not yet support ignore_all_space option for diffs
-    _ignore_all_space: bool,
     skip_file_changes: bool,
     diff_merges: DiffMerges,
 ) -> Result<CommitData, Box<dyn Error>> {
@@ -95,10 +93,10 @@ mod tests {
         let repo = gix::open(".").unwrap();
         let oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
 
-        let skipped = read_commit(&repo, oid, false, true, DiffMerges::FirstParent).unwrap();
+        let skipped = read_commit(&repo, oid, true, DiffMerges::FirstParent).unwrap();
         assert!(skipped.file_changes.is_empty());
 
-        let kept = read_commit(&repo, oid, false, false, DiffMerges::FirstParent).unwrap();
+        let kept = read_commit(&repo, oid, false, DiffMerges::FirstParent).unwrap();
         assert!(!kept.file_changes.is_empty());
     }
 }

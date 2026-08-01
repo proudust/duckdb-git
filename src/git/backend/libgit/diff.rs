@@ -144,60 +144,63 @@ pub(super) fn collect_file_changes(
             || delta.old_file().mode() == git2::FileMode::Commit;
         let is_typechange = delta.status() == git2::Delta::Typechange;
 
+        // libgit2 DiffFile.size is often 0 for A/D; prefer blob object size (like root commits).
         let (blob_id, file_size, add_lines, del_lines) = if is_gitlink || is_typechange {
             let id = if delta.new_file().path().is_some() {
-                delta.new_file().id().to_string()
+                delta.new_file().id()
             } else if delta.old_file().path().is_some() {
-                delta.old_file().id().to_string()
+                delta.old_file().id()
             } else {
-                "unknown".to_string()
+                git2::Oid::zero()
             };
             let file_size = if is_gitlink {
                 None
-            } else if delta.new_file().path().is_some() {
-                Some(delta.new_file().size() as i64)
-            } else if delta.old_file().path().is_some() {
-                Some(delta.old_file().size() as i64)
-            } else {
+            } else if id.is_zero() {
                 None
+            } else {
+                Some(find_blob(repo, id)?.size() as i64)
             };
             let (add, del) = gitlink_numstat(status);
-            (id, file_size, Some(add), Some(del))
+            (
+                if id.is_zero() {
+                    "unknown".to_string()
+                } else {
+                    id.to_string()
+                },
+                file_size,
+                Some(add),
+                Some(del),
+            )
         } else {
-            let (blob_id, file_size) = if delta.new_file().path().is_some() {
-                (
-                    delta.new_file().id().to_string(),
-                    Some(delta.new_file().size() as i64),
-                )
-            } else if delta.old_file().path().is_some() {
-                (
-                    delta.old_file().id().to_string(),
-                    Some(delta.old_file().size() as i64),
-                )
+            let old_id = delta.old_file().id();
+            let new_id = delta.new_file().id();
+            let old_blob = if old_id.is_zero() {
+                None
+            } else {
+                Some(find_blob(repo, old_id)?)
+            };
+            let new_blob = if new_id.is_zero() {
+                None
+            } else {
+                Some(find_blob(repo, new_id)?)
+            };
+
+            let (blob_id, file_size) = if let Some(blob) = new_blob.as_ref() {
+                (new_id.to_string(), Some(blob.size() as i64))
+            } else if let Some(blob) = old_blob.as_ref() {
+                (old_id.to_string(), Some(blob.size() as i64))
             } else {
                 ("unknown".to_string(), Some(0))
             };
 
-            let line_counts = {
-                let old_id = delta.old_file().id();
-                let new_id = delta.new_file().id();
-                let old_blob;
-                let old_content: &[u8] = if old_id.is_zero() {
-                    &[]
-                } else {
-                    old_blob = find_blob(repo, old_id)?;
-                    old_blob.content()
-                };
-                let new_blob;
-                let new_content: &[u8] = if new_id.is_zero() {
-                    &[]
-                } else {
-                    new_blob = find_blob(repo, new_id)?;
-                    new_blob.content()
-                };
-                super::xdiff::diff_line_counts(old_content, new_content, ignore_all_space)
-                    .map_err(|e| git2::Error::from_str(&e.to_string()))?
-            };
+            let old_content = old_blob.as_ref().map(|b| b.content()).unwrap_or(&[]);
+            let new_content = new_blob.as_ref().map(|b| b.content()).unwrap_or(&[]);
+            let line_counts = super::xdiff::diff_line_counts(
+                old_content,
+                new_content,
+                ignore_all_space,
+            )
+            .map_err(|e| git2::Error::from_str(&e.to_string()))?;
             let (add, del) = match line_counts {
                 Some((a, d)) => (Some(a), Some(d)),
                 None => (None, None),

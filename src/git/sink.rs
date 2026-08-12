@@ -31,12 +31,14 @@ pub trait CommitSink {
     fn finish_row(&mut self);
 }
 
-/// Format a 20-byte object id as lowercase hex into a stack buffer.
+/// Format a SHA-1 object id (20 bytes) as lowercase hex into a stack buffer.
+///
+/// Panics if `oid.len() != 20`. SHA-256 (32-byte) support would widen this API later.
 pub fn oid_hex(oid: &[u8]) -> [u8; 40] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
+    assert_eq!(oid.len(), 20, "expected SHA-1 object id (20 bytes)");
     let mut out = [0u8; 40];
-    debug_assert_eq!(oid.len(), 20);
-    for (i, &b) in oid.iter().take(20).enumerate() {
+    for (i, &b) in oid.iter().enumerate() {
         out[i * 2] = HEX[(b >> 4) as usize];
         out[i * 2 + 1] = HEX[(b & 0xf) as usize];
     }
@@ -161,4 +163,28 @@ impl CommitSink for CollectingSink {
     }
 
     fn finish_row(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::oid_hex;
+
+    #[test]
+    fn oid_hex_formats_sha1() {
+        let mut oid = [0u8; 20];
+        oid[0] = 0x00;
+        oid[1] = 0x01;
+        oid[2] = 0x0a;
+        oid[3] = 0x0f;
+        oid[4] = 0xff;
+        let hex = oid_hex(&oid);
+        assert_eq!(&hex[..10], b"00010a0fff");
+        assert_eq!(&hex[10..], &[b'0'; 30]);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected SHA-1 object id (20 bytes)")]
+    fn oid_hex_rejects_wrong_length() {
+        let _ = oid_hex(&[0u8; 32]);
+    }
 }

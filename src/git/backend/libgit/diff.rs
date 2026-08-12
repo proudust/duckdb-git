@@ -1,7 +1,6 @@
 use crate::git::model::{gitlink_numstat, unable_to_read_object};
 use crate::git::sink::{oid_hex, CommitSink, FileChangeRef};
 use git2::Repository;
-use std::borrow::Cow;
 
 fn find_blob<'a>(repo: &'a Repository, oid: git2::Oid) -> Result<git2::Blob<'a>, git2::Error> {
     repo.find_blob(oid).map_err(|e| {
@@ -125,21 +124,16 @@ pub(super) fn emit_file_changes(
             }
         };
 
-        let file_path: Cow<'_, str> = if let Some(new_file) = delta.new_file().path() {
-            new_file.to_string_lossy()
-        } else if let Some(old_file) = delta.old_file().path() {
-            old_file.to_string_lossy()
-        } else {
-            Cow::Borrowed("unknown")
-        };
+        let file_path = delta
+            .new_file()
+            .path_bytes()
+            .or_else(|| delta.old_file().path_bytes())
+            .unwrap_or(b"unknown");
 
-        let old_path_cow: Option<Cow<'_, str>> = match delta.status() {
-            git2::Delta::Renamed | git2::Delta::Copied => {
-                delta.old_file().path().map(|p| p.to_string_lossy())
-            }
+        let old_path = match delta.status() {
+            git2::Delta::Renamed | git2::Delta::Copied => delta.old_file().path_bytes(),
             _ => None,
         };
-        let old_path = old_path_cow.as_ref().map(|p| p.as_bytes());
 
         let is_gitlink = delta.new_file().mode() == git2::FileMode::Commit
             || delta.old_file().mode() == git2::FileMode::Commit;
@@ -147,9 +141,9 @@ pub(super) fn emit_file_changes(
 
         // libgit2 DiffFile.size is often 0 for A/D; prefer blob object size (like root commits).
         let (blob_hex, file_size, add_lines, del_lines) = if is_gitlink || is_typechange {
-            let id = if delta.new_file().path().is_some() {
+            let id = if delta.new_file().path_bytes().is_some() {
                 delta.new_file().id()
-            } else if delta.old_file().path().is_some() {
+            } else if delta.old_file().path_bytes().is_some() {
                 delta.old_file().id()
             } else {
                 git2::Oid::zero()
@@ -213,7 +207,7 @@ pub(super) fn emit_file_changes(
         };
 
         sink.file_change(FileChangeRef {
-            path: file_path.as_bytes(),
+            path: file_path,
             old_path,
             status,
             blob_id,

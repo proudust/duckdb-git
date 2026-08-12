@@ -229,7 +229,45 @@ mod tests {
                 false,
                 Some((3, 0)),
             ),
+            (
+                "added, no trailing nl",
+                &b""[..],
+                &b"line1\nline2"[..],
+                false,
+                Some((2, 0)),
+            ),
+            // Pure A/D via xdl_diff: CR-only (no `\n`) → 1 line; invalid UTF-8
+            // is not binary (NUL-only) and still splits on `\n`.
+            (
+                "added, cr only",
+                &b""[..],
+                &b"a\rb\r"[..],
+                false,
+                Some((1, 0)),
+            ),
+            (
+                "added, non-utf8",
+                &b""[..],
+                &b"hello\xff\nworld"[..],
+                false,
+                Some((2, 0)),
+            ),
             ("deleted", b"line1\nline2\n", b"", false, Some((0, 2))),
+            (
+                "deleted, no trailing nl",
+                b"line1\nline2",
+                b"",
+                false,
+                Some((0, 2)),
+            ),
+            ("deleted, cr only", b"a\rb\r", b"", false, Some((0, 1))),
+            (
+                "deleted, non-utf8",
+                b"hello\xff\nworld",
+                b"",
+                false,
+                Some((0, 2)),
+            ),
             (
                 "modified",
                 b"aaa\nbbb\nccc\n",

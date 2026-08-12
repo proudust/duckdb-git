@@ -96,6 +96,26 @@ pub(super) fn is_binary_content(content: &[u8]) -> bool {
     content[..len].contains(&0)
 }
 
+/// Count lines the same way as git's `count_lines` in `diff.c`.
+///
+/// Counts `\n` bytes; if the buffer is non-empty and does not end with `\n`,
+/// adds one for the incomplete final line. Empty input yields 0.
+pub(super) fn count_lines(data: &[u8]) -> i32 {
+    if data.is_empty() {
+        return 0;
+    }
+    let mut count = 0i32;
+    for &b in data {
+        if b == b'\n' {
+            count += 1;
+        }
+    }
+    if data.last() != Some(&b'\n') {
+        count += 1;
+    }
+    count
+}
+
 /// Trim identical bytes from the end of both slices, breaking at a newline.
 /// Ported from git's `trim_common_tail` (xdiff-interface.c).
 fn trim_common_tail(a: &[u8], b: &[u8]) -> (usize, usize) {
@@ -124,6 +144,9 @@ fn trim_common_tail(a: &[u8], b: &[u8]) -> (usize, usize) {
 /// Requires libgit2 to be initialized (xdiff uses git__malloc internally).
 ///
 /// Returns `Ok(None)` when either side is binary (matches `git log --numstat` `-`).
+///
+/// Added/Deleted (one side empty) skip Myers/`xdl_diff` and use [`count_lines`],
+/// matching `git log --numstat` for pure A/D.
 pub fn diff_line_counts(
     old: &[u8],
     new: &[u8],
@@ -131,6 +154,14 @@ pub fn diff_line_counts(
 ) -> Result<Option<(i32, i32)>, Box<dyn Error>> {
     if is_binary_content(old) || is_binary_content(new) {
         return Ok(None);
+    }
+
+    // Fast path: A/D need only a line count of the non-empty side.
+    if old.is_empty() {
+        return Ok(Some((count_lines(new), 0)));
+    }
+    if new.is_empty() {
+        return Ok(Some((0, count_lines(old))));
     }
 
     let (old_len, new_len) = trim_common_tail(old, new);
@@ -214,6 +245,23 @@ mod tests {
             EXPECTED_LIBGIT2_VERSION,
             "update EXPECTED_LIBGIT2_VERSION and xdiff FFI bindings when bumping git2"
         );
+    }
+
+    #[test]
+    fn count_lines_matches_git() {
+        for (label, data, expected) in [
+            ("empty", &b""[..], 0),
+            ("single nl", b"\n", 1),
+            ("no trailing nl", b"a\nb", 2),
+            ("with trailing nl", b"a\nb\n", 2),
+            ("single line no nl", b"hello", 1),
+            ("single line with nl", b"hello\n", 1),
+            ("only incomplete", b"x", 1),
+            ("cr only", b"a\rb\r", 1),
+            ("non-utf8", b"hello\xff\nworld", 2),
+        ] {
+            assert_eq!(count_lines(data), expected, "{label}");
+        }
     }
 
     #[test]

@@ -56,10 +56,7 @@ pub(super) fn emit_file_changes(
                         let (add_lines, del_lines) = if super::xdiff::is_binary_content(content) {
                             (None, None)
                         } else {
-                            match std::str::from_utf8(content) {
-                                Ok(text) => (Some(text.lines().count() as i32), Some(0)),
-                                Err(_) => (None, None),
-                            }
+                            (Some(super::xdiff::count_lines(content)), Some(0))
                         };
                         sink.file_change(FileChangeRef {
                             path: path_buf.as_bytes(),

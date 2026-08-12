@@ -85,6 +85,19 @@ SELECT COUNT(*) FROM (
 ----
 0
 
+# Root commit: all blobs are Added; numstat is line count / 0 (same as git log --numstat)
+query IIII
+SELECT change.path, change.status, change.add_lines, change.del_lines
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('./test/fixtures/parity.git',
+                   revision='v1',
+                   max_count=1))
+ORDER BY change.path;
+----
+base.txt	A	1	0
+space.txt	A	3	0
+tracked.txt	A	1	0
+
 # Ordinary blob: file_size is byte length; numstat is numeric (note.txt is 5 lines / 30 bytes)
 query III
 SELECT change.file_size, change.add_lines, change.del_lines

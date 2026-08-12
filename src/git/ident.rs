@@ -6,14 +6,14 @@ use std::error::Error;
 /// libgit2's `git_signature__parse` trims both sides, so callers should prefer this over
 /// backend signature APIs when matching git.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedIdent {
-    pub name: Vec<u8>,
-    pub email: Vec<u8>,
+pub struct ParsedIdent<'a> {
+    pub name: &'a [u8],
+    pub email: &'a [u8],
     pub seconds: i64,
 }
 
 /// Parse the first `author` or `committer` line from a commit header (bytes before `\n\n`).
-pub fn parse_ident(header: &[u8], field: &[u8]) -> Result<ParsedIdent, Box<dyn Error>> {
+pub fn parse_ident<'a>(header: &'a [u8], field: &[u8]) -> Result<ParsedIdent<'a>, Box<dyn Error>> {
     let prefix = {
         let mut p = field.to_vec();
         p.push(b' ');
@@ -35,7 +35,7 @@ pub fn parse_ident(header: &[u8], field: &[u8]) -> Result<ParsedIdent, Box<dyn E
     .into())
 }
 
-fn parse_ident_line(line: &[u8]) -> Result<ParsedIdent, Box<dyn Error>> {
+fn parse_ident_line(line: &[u8]) -> Result<ParsedIdent<'_>, Box<dyn Error>> {
     let email_start = line
         .iter()
         .rposition(|&b| b == b'<')
@@ -48,11 +48,11 @@ fn parse_ident_line(line: &[u8]) -> Result<ParsedIdent, Box<dyn Error>> {
         return Err("malformed ident: email brackets".into());
     }
 
-    let mut name = line[..email_start].to_vec();
+    let mut name = &line[..email_start];
     while name.last().is_some_and(|b| b.is_ascii_whitespace()) {
-        name.pop();
+        name = &name[..name.len() - 1];
     }
-    let email = line[email_start + 1..email_end].to_vec();
+    let email = &line[email_start + 1..email_end];
 
     let after = line.get(email_end + 1..).unwrap_or_default();
     let after = trim_ascii_start(after);

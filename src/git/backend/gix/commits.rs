@@ -1,8 +1,8 @@
-use super::diff::collect_file_changes;
+use super::diff::emit_file_changes;
 use crate::git::ident::{commit_header, parse_ident};
-use crate::git::model::CommitData;
 use crate::git::options::DiffMerges;
 use crate::git::revision::{unresolved_revision_error, RevisionTerm};
+use crate::git::sink::{oid_hex, CommitSink};
 use std::error::Error;
 
 pub(crate) fn walk_commit_oids(
@@ -49,42 +49,44 @@ pub(crate) fn walk_commit_oids(
     oids
 }
 
-pub(crate) fn read_commit(
+pub(crate) fn emit_commit(
     repo: &gix::Repository,
     oid: gix::ObjectId,
     skip_file_changes: bool,
     diff_merges: DiffMerges,
-) -> Result<CommitData, Box<dyn Error>> {
+    sink: &mut impl CommitSink,
+) -> Result<(), Box<dyn Error>> {
     let commit = repo.find_commit(oid)?;
     let header = commit_header(commit.data.as_ref());
     let author = parse_ident(header, b"author")?;
     let committer = parse_ident(header, b"committer")?;
     let message = commit.message_raw()?;
 
-    let skip =
-        skip_file_changes || (diff_merges == DiffMerges::Off && commit.parent_ids().count() > 1);
-    let file_changes = if skip {
-        Vec::new()
-    } else {
-        collect_file_changes(repo, &commit)?
-    };
+    let hex = oid_hex(oid.as_bytes());
+    sink.commit_id(&hex);
+    sink.author(author.name, author.email, author.seconds);
+    sink.committer(committer.name, committer.email, committer.seconds);
+    sink.message(message);
 
-    Ok(CommitData {
-        author_name: author.name,
-        author_email: author.email,
-        author_timestamp: author.seconds,
-        committer_name: committer.name,
-        committer_email: committer.email,
-        committer_timestamp: committer.seconds,
-        message: message.to_vec(),
-        parents: commit.parent_ids().map(|id| id.to_string()).collect(),
-        file_changes,
-    })
+    let parent_ids: Vec<_> = commit.parent_ids().collect();
+    sink.begin_parents(parent_ids.len());
+    for parent_id in &parent_ids {
+        let parent_hex = oid_hex(parent_id.as_bytes());
+        sink.parent(&parent_hex);
+    }
+
+    let skip = skip_file_changes || (diff_merges == DiffMerges::Off && parent_ids.len() > 1);
+    if !skip {
+        emit_file_changes(repo, &commit, sink)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::sink::CollectingSink;
 
     const SECOND_COMMIT: &str = "2e6d5e79dafd8ff8c09152ac35e32cd26e65efe5";
 
@@ -93,11 +95,17 @@ mod tests {
         let repo = gix::open(".").unwrap();
         let oid = gix::ObjectId::from_hex(SECOND_COMMIT.as_bytes()).unwrap();
 
-        let skipped = read_commit(&repo, oid, true, DiffMerges::FirstParent).unwrap();
-        assert!(skipped.file_changes.is_empty());
+        let mut skipped = CollectingSink::default();
+        skipped.begin_row(0);
+        emit_commit(&repo, oid, true, DiffMerges::FirstParent, &mut skipped).unwrap();
+        skipped.finish_row();
+        assert!(skipped.row.file_changes.is_empty());
 
-        let kept = read_commit(&repo, oid, false, DiffMerges::FirstParent).unwrap();
-        assert!(!kept.file_changes.is_empty());
+        let mut kept = CollectingSink::default();
+        kept.begin_row(0);
+        emit_commit(&repo, oid, false, DiffMerges::FirstParent, &mut kept).unwrap();
+        kept.finish_row();
+        assert!(!kept.row.file_changes.is_empty());
     }
 }
 

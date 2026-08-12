@@ -1,4 +1,5 @@
-use crate::git::model::{gitlink_numstat, unable_to_read_object, FileChange};
+use crate::git::model::{gitlink_numstat, unable_to_read_object};
+use crate::git::sink::{oid_hex, CommitSink, FileChangeRef};
 use std::ops::ControlFlow;
 
 fn is_typechange(
@@ -46,11 +47,11 @@ fn ensure_blobs_readable(
     Ok(())
 }
 
-pub(super) fn collect_file_changes(
+pub(super) fn emit_file_changes(
     repo: &gix::Repository,
     commit: &gix::Commit,
-) -> Result<Vec<FileChange>, Box<dyn std::error::Error>> {
-    let mut file_changes = Vec::new();
+    sink: &mut impl CommitSink,
+) -> Result<(), Box<dyn std::error::Error>> {
     let current_tree = commit.tree()?;
 
     let parent_tree = if commit.parent_ids().count() == 0 {
@@ -93,8 +94,8 @@ pub(super) fn collect_file_changes(
 
             let typechange = previous_mode.is_some_and(|prev| is_typechange(prev, entry_mode));
 
-            let location = change.location().to_string();
-            let (status, old_path): (&'static str, Option<String>) = match &change {
+            let location = change.location();
+            let (status, old_path): (&'static str, Option<&[u8]>) = match &change {
                 Change::Addition { .. } => ("A", None),
                 Change::Deletion { .. } => ("D", None),
                 Change::Modification { .. } if typechange => ("T", None),
@@ -103,18 +104,12 @@ pub(super) fn collect_file_changes(
                     copy: true,
                     source_location,
                     ..
-                } => (
-                    "C",
-                    Some(String::from_utf8_lossy(source_location).into_owned()),
-                ),
+                } => ("C", Some(source_location.as_ref())),
                 Change::Rewrite {
                     copy: false,
                     source_location,
                     ..
-                } => (
-                    "R",
-                    Some(String::from_utf8_lossy(source_location).into_owned()),
-                ),
+                } => ("R", Some(source_location.as_ref())),
             };
 
             let id = change.id();
@@ -144,11 +139,12 @@ pub(super) fn collect_file_changes(
 
             resource_cache.clear_resource_cache_keep_allocation();
 
-            file_changes.push(FileChange {
-                path: location,
+            let hex = oid_hex(id.as_bytes());
+            sink.file_change(FileChangeRef {
+                path: location.as_ref(),
                 old_path,
                 status,
-                blob_id: id.to_string(),
+                blob_id: &hex,
                 file_size,
                 add_lines,
                 del_lines,
@@ -163,5 +159,5 @@ pub(super) fn collect_file_changes(
     }
     walk?;
 
-    Ok(file_changes)
+    Ok(())
 }

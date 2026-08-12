@@ -1,7 +1,8 @@
 use crate::git::backend::gix::{
-    build_contained_index, collect_refs, read_commit, walk_commit_oids, CachedRepo,
+    build_contained_index, collect_refs, emit_commit, walk_commit_oids, CachedRepo,
 };
 use crate::git::ref_index::ContainedIndex;
+use crate::git::sink::CommitSink;
 use crate::git_log::params::GitLogParameter;
 use crate::git_log::schema;
 use crate::git_log::vector::VectorInserter;
@@ -103,11 +104,28 @@ impl GixLogScanner {
         let skip_file_changes = !schema::needs_file_changes(column_indices);
         let oids = &self.inner.commit_oids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
-            let commit = read_commit(repo, *oid, skip_file_changes, params.diff_merges)?;
+            writer.begin_row(batch_idx);
+            emit_commit(repo, *oid, skip_file_changes, params.diff_merges, &mut writer)?;
+
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
+            writer.begin_decorate(refs.len());
+            for name in refs {
+                writer.decorate_name(name);
+            }
+
             let branches: Vec<&str> = self.inner.contained.branches_of(oid).collect();
+            writer.begin_contained_branches(branches.len());
+            for name in &branches {
+                writer.contained_branch(name);
+            }
+
             let tags: Vec<&str> = self.inner.contained.tags_of(oid).collect();
-            writer.push(batch_idx, &oid.to_string(), &commit, refs, &branches, &tags);
+            writer.begin_contained_tags(tags.len());
+            for name in &tags {
+                writer.contained_tag(name);
+            }
+
+            writer.finish_row();
         }
 
         writer.finish();

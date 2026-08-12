@@ -1,5 +1,7 @@
-use crate::git::model::{gitlink_numstat, unable_to_read_object, FileChange};
+use crate::git::model::{gitlink_numstat, unable_to_read_object};
+use crate::git::sink::{oid_hex, CommitSink, FileChangeRef};
 use git2::Repository;
+use std::borrow::Cow;
 
 fn find_blob<'a>(repo: &'a Repository, oid: git2::Oid) -> Result<git2::Blob<'a>, git2::Error> {
     repo.find_blob(oid).map_err(|e| {
@@ -11,16 +13,16 @@ fn find_blob<'a>(repo: &'a Repository, oid: git2::Oid) -> Result<git2::Blob<'a>,
     })
 }
 
-pub(super) fn collect_file_changes(
+pub(super) fn emit_file_changes(
     repo: &Repository,
     commit: &git2::Commit,
     ignore_all_space: bool,
-) -> Result<Vec<FileChange>, git2::Error> {
-    let mut file_changes = Vec::new();
-
+    sink: &mut impl CommitSink,
+) -> Result<(), git2::Error> {
     if commit.parent_count() == 0 {
         let tree = commit.tree()?;
         let mut walk_err: Option<git2::Error> = None;
+        let mut path_buf = String::new();
         let walk_result = tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
             if walk_err.is_some() {
                 return git2::TreeWalkResult::Abort;
@@ -32,13 +34,17 @@ pub(super) fn collect_file_changes(
                 return git2::TreeWalkResult::Ok;
             };
             let oid = entry.id();
+            path_buf.clear();
+            path_buf.push_str(root);
+            path_buf.push_str(name);
+            let hex = oid_hex(oid.as_bytes());
             if entry.kind() == Some(git2::ObjectType::Commit) {
                 let (add_lines, del_lines) = gitlink_numstat("A");
-                file_changes.push(FileChange {
-                    path: format!("{}{}", root, name),
+                sink.file_change(FileChangeRef {
+                    path: path_buf.as_bytes(),
                     old_path: None,
                     status: "A",
-                    blob_id: oid.to_string(),
+                    blob_id: &hex,
                     file_size: None,
                     add_lines: Some(add_lines),
                     del_lines: Some(del_lines),
@@ -55,11 +61,11 @@ pub(super) fn collect_file_changes(
                                 Err(_) => (None, None),
                             }
                         };
-                        file_changes.push(FileChange {
-                            path: format!("{}{}", root, name),
+                        sink.file_change(FileChangeRef {
+                            path: path_buf.as_bytes(),
                             old_path: None,
                             status: "A",
-                            blob_id: oid.to_string(),
+                            blob_id: &hex,
                             file_size: Some(blob.size() as i64),
                             add_lines,
                             del_lines,
@@ -78,7 +84,7 @@ pub(super) fn collect_file_changes(
             return Err(e);
         }
         walk_result?;
-        return Ok(file_changes);
+        return Ok(());
     }
 
     let parent = commit.parent(0)?;
@@ -105,8 +111,6 @@ pub(super) fn collect_file_changes(
 
     diff.find_similar(Some(&mut find_opts))?;
 
-    file_changes.reserve(diff.deltas().len());
-
     for i in 0..diff.deltas().len() {
         let delta = diff.get_delta(i).unwrap();
 
@@ -124,28 +128,28 @@ pub(super) fn collect_file_changes(
             }
         };
 
-        let file_path = if let Some(new_file) = delta.new_file().path() {
-            new_file.to_string_lossy().to_string()
+        let file_path: Cow<'_, str> = if let Some(new_file) = delta.new_file().path() {
+            new_file.to_string_lossy()
         } else if let Some(old_file) = delta.old_file().path() {
-            old_file.to_string_lossy().to_string()
+            old_file.to_string_lossy()
         } else {
-            "unknown".to_string()
+            Cow::Borrowed("unknown")
         };
 
-        let old_path = match delta.status() {
-            git2::Delta::Renamed | git2::Delta::Copied => delta
-                .old_file()
-                .path()
-                .map(|p| p.to_string_lossy().to_string()),
+        let old_path_cow: Option<Cow<'_, str>> = match delta.status() {
+            git2::Delta::Renamed | git2::Delta::Copied => {
+                delta.old_file().path().map(|p| p.to_string_lossy())
+            }
             _ => None,
         };
+        let old_path = old_path_cow.as_ref().map(|p| p.as_bytes());
 
         let is_gitlink = delta.new_file().mode() == git2::FileMode::Commit
             || delta.old_file().mode() == git2::FileMode::Commit;
         let is_typechange = delta.status() == git2::Delta::Typechange;
 
         // libgit2 DiffFile.size is often 0 for A/D; prefer blob object size (like root commits).
-        let (blob_id, file_size, add_lines, del_lines) = if is_gitlink || is_typechange {
+        let (blob_hex, file_size, add_lines, del_lines) = if is_gitlink || is_typechange {
             let id = if delta.new_file().path().is_some() {
                 delta.new_file().id()
             } else if delta.old_file().path().is_some() {
@@ -161,16 +165,12 @@ pub(super) fn collect_file_changes(
                 Some(find_blob(repo, id)?.size() as i64)
             };
             let (add, del) = gitlink_numstat(status);
-            (
-                if id.is_zero() {
-                    "unknown".to_string()
-                } else {
-                    id.to_string()
-                },
-                file_size,
-                Some(add),
-                Some(del),
-            )
+            let hex = if id.is_zero() {
+                None
+            } else {
+                Some(oid_hex(id.as_bytes()))
+            };
+            (hex, file_size, Some(add), Some(del))
         } else {
             let old_id = delta.old_file().id();
             let new_id = delta.new_file().id();
@@ -185,12 +185,12 @@ pub(super) fn collect_file_changes(
                 Some(find_blob(repo, new_id)?)
             };
 
-            let (blob_id, file_size) = if let Some(blob) = new_blob.as_ref() {
-                (new_id.to_string(), Some(blob.size() as i64))
-            } else if let Some(blob) = old_blob.as_ref() {
-                (old_id.to_string(), Some(blob.size() as i64))
+            let (blob_hex, file_size) = if new_blob.is_some() {
+                (Some(oid_hex(new_id.as_bytes())), Some(new_blob.as_ref().unwrap().size() as i64))
+            } else if old_blob.is_some() {
+                (Some(oid_hex(old_id.as_bytes())), Some(old_blob.as_ref().unwrap().size() as i64))
             } else {
-                ("unknown".to_string(), Some(0))
+                (None, Some(0))
             };
 
             let old_content = old_blob.as_ref().map(|b| b.content()).unwrap_or(&[]);
@@ -206,11 +206,17 @@ pub(super) fn collect_file_changes(
                 None => (None, None),
             };
 
-            (blob_id, file_size, add, del)
+            (blob_hex, file_size, add, del)
         };
 
-        file_changes.push(FileChange {
-            path: file_path,
+        let unknown = b"unknown";
+        let blob_id: &[u8] = match &blob_hex {
+            Some(h) => h.as_ref(),
+            None => unknown,
+        };
+
+        sink.file_change(FileChangeRef {
+            path: file_path.as_bytes(),
             old_path,
             status,
             blob_id,
@@ -220,5 +226,5 @@ pub(super) fn collect_file_changes(
         });
     }
 
-    Ok(file_changes)
+    Ok(())
 }

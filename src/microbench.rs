@@ -55,3 +55,14 @@ pub fn fill_file_changes_history(
         done += rows;
     }
 }
+
+/// Forwarder so benches can time the libgit numstat path without depending on
+/// crate-private modules.
+#[cfg(feature = "libgit-backend")]
+pub fn diff_line_counts(
+    old: &[u8],
+    new: &[u8],
+    ignore_whitespace: bool,
+) -> Result<Option<(i32, i32)>, Box<dyn std::error::Error>> {
+    crate::git::backend::libgit::diff_line_counts(old, new, ignore_whitespace)
+}

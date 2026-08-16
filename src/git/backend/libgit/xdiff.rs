@@ -220,8 +220,8 @@ pub fn diff_line_counts(
 mod tests {
     use super::*;
 
-    /// Vendored libgit2 version expected by the xdiff FFI bindings (git2 0.20.2).
-    const EXPECTED_LIBGIT2_VERSION: (i32, i32, i32) = (1, 9, 1);
+    /// Vendored libgit2 version expected by the xdiff FFI bindings (git2 0.21.0).
+    const EXPECTED_LIBGIT2_VERSION: (i32, i32, i32) = (1, 9, 6);
 
     extern "C" {
         fn git_libgit2_version(major: *mut c_int, minor: *mut c_int, rev: *mut c_int) -> c_int;

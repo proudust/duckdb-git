@@ -29,7 +29,7 @@ pub(super) fn emit_file_changes(
             if entry.kind() == Some(git2::ObjectType::Tree) {
                 return git2::TreeWalkResult::Ok;
             }
-            let Some(name) = entry.name() else {
+            let Ok(name) = entry.name() else {
                 return git2::TreeWalkResult::Ok;
             };
             let oid = entry.id();
@@ -149,7 +149,7 @@ pub(super) fn emit_file_changes(
             } else if delta.old_file().path_bytes().is_some() {
                 delta.old_file().id()
             } else {
-                git2::Oid::zero()
+                git2::Oid::ZERO_SHA1
             };
             let file_size = if is_gitlink {
                 None

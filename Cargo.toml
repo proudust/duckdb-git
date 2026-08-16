@@ -30,7 +30,9 @@ gix-backend = ["dep:gix", "gix/max-performance-safe", "gix/basic"]
 
 [dependencies]
 duckdb = { version = "~1.10505.0", features = ["vtab"] }
-git2 = { version = "0.20.2", default-features = false, features = [
+# Fork of git2-rs that vendors libgit2 with a 96 MB pack cache (git-like).
+# https://github.com/proudust/git2-rs/tree/duckdb-git/pack-cache
+git2 = { git = "https://github.com/proudust/git2-rs", branch = "duckdb-git/pack-cache", default-features = false, features = [
     "https",
     "vendored-libgit2",
     "vendored-openssl",
@@ -51,4 +53,8 @@ harness = false
 
 [[bench]]
 name = "file_changes_insert"
+harness = false
+
+[[bench]]
+name = "diff_phases"
 harness = false

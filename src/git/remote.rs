@@ -596,7 +596,7 @@ mod libgit {
             .map_err(|e| format!("failed to determine default branch of '{shown}': {e}"))?;
         let name = head
             .as_str()
-            .ok_or_else(|| format!("default branch of '{shown}' is not valid UTF-8"))?;
+            .map_err(|_| format!("default branch of '{shown}' is not valid UTF-8"))?;
         repo.set_head(name)
             .map_err(|e| format!("failed to set HEAD to '{name}' for '{shown}': {e}"))?;
 

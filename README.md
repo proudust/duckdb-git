@@ -107,15 +107,15 @@ Returns commit history as a table.
 
 The `file_changes` struct contains:
 
-| Field       | Type               | Description                                                 |
-| ----------- | ------------------ | ----------------------------------------------------------- |
-| `path`      | `VARCHAR NOT NULL` | File path (new path for renames/copies)                     |
-| `old_path`  | `VARCHAR NULL`     | Previous path for renames/copies; `NULL` otherwise          |
+| Field       | Type               | Description                                                               |
+| ----------- | ------------------ | ------------------------------------------------------------------------- |
+| `path`      | `VARCHAR NOT NULL` | File path (new path for renames/copies)                                   |
+| `old_path`  | `VARCHAR NULL`     | Previous path for renames/copies; `NULL` otherwise                        |
 | `status`    | `VARCHAR NOT NULL` | Change status (`A`dd, `D`elete, `M`odify, `R`ename, `C`opy, `T`ypechange) |
-| `blob_id`   | `VARCHAR NOT NULL` | Git blob object ID                                          |
-| `file_size` | `BIGINT NULL`      | File size in bytes                                          |
-| `add_lines` | `INTEGER NULL`     | Lines added; `NULL` for binary (`git log --numstat` `-`)    |
-| `del_lines` | `INTEGER NULL`     | Lines deleted; `NULL` for binary (`git log --numstat` `-`)  |
+| `blob_id`   | `VARCHAR NOT NULL` | Git blob object ID                                                        |
+| `file_size` | `BIGINT NULL`      | File size in bytes                                                        |
+| `add_lines` | `INTEGER NULL`     | Lines added; `NULL` for binary (`git log --numstat` `-`)                  |
+| `del_lines` | `INTEGER NULL`     | Lines deleted; `NULL` for binary (`git log --numstat` `-`)                |
 
 ## Building
 
@@ -142,9 +142,8 @@ BENCH_REPO=/path/to/large/repo make bench # Run benchmarks on a specific repo
 
 [MIT License](LICENSE).
 
-The [libgit2](https://github.com/libgit2/libgit2) library is statically linked,
-but remains under its [linking exception](https://github.com/libgit2/libgit2/blob/main/COPYING),
-meaning GPLv2 requirements do not apply to this project.
+It also statically links a modified version of libgit2.
+The modified source code can be found at [proudust/libgit2](https://github.com/proudust/libgit2).
 
 ---
 

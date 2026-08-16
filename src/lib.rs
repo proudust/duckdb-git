@@ -1,5 +1,7 @@
 mod git;
 mod git_log;
+#[doc(hidden)]
+pub mod microbench;
 
 use duckdb::{Connection, Result};
 use std::error::Error;

@@ -81,6 +81,11 @@ fn file_change_struct_type() -> LogicalTypeHandle {
     ])
 }
 
+/// LIST(STRUCT(...)) type for the `file_changes` result column.
+pub(crate) fn file_changes_list_type() -> LogicalTypeHandle {
+    LogicalTypeHandle::list(&file_change_struct_type())
+}
+
 pub fn bind_columns(bind: &BindInfo) -> Result<(), Box<dyn std::error::Error>> {
     bind.add_result_column("commit_id", LogicalTypeHandle::from(LogicalTypeId::Varchar));
     bind.add_result_column("author", LogicalTypeHandle::from(LogicalTypeId::Varchar));
@@ -119,8 +124,7 @@ pub fn bind_columns(bind: &BindInfo) -> Result<(), Box<dyn std::error::Error>> {
         LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
     bind.add_result_column("contained_tags", contained_tags_array_type);
 
-    let file_changes_array_type = LogicalTypeHandle::list(&file_change_struct_type());
-    bind.add_result_column("file_changes", file_changes_array_type);
+    bind.add_result_column("file_changes", file_changes_list_type());
 
     Ok(())
 }

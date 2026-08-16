@@ -3,8 +3,8 @@ mod gix;
 #[cfg(feature = "libgit-backend")]
 mod libgit;
 mod params;
-mod schema;
-mod vector;
+pub(crate) mod schema;
+pub(crate) mod vector;
 
 use params::{BackendKind, GitLogParameter};
 

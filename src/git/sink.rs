@@ -27,6 +27,9 @@ pub trait CommitSink {
     fn contained_branch(&mut self, name: &str);
     fn begin_contained_tags(&mut self, count: usize);
     fn contained_tag(&mut self, name: &str);
+    /// Reserve space for upcoming [`file_change`](Self::file_change) calls when the
+    /// count is known. Default is a no-op; sinks may use this to avoid per-item growth.
+    fn begin_file_changes(&mut self, _count: usize) {}
     fn file_change(&mut self, fc: FileChangeRef<'_>);
     fn finish_row(&mut self);
 }
@@ -146,6 +149,10 @@ impl CommitSink for CollectingSink {
 
     fn contained_tag(&mut self, name: &str) {
         self.row.contained_tags.push(name.to_owned());
+    }
+
+    fn begin_file_changes(&mut self, count: usize) {
+        self.row.file_changes.reserve(count);
     }
 
     fn file_change(&mut self, fc: FileChangeRef<'_>) {

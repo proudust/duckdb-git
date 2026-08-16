@@ -48,3 +48,7 @@ tempfile = "3"
 [[bench]]
 name = "git_log_with_duckdb"
 harness = false
+
+[[bench]]
+name = "file_changes_insert"
+harness = false

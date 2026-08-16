@@ -251,6 +251,12 @@ impl CommitSink for VectorInserter<'_> {
         }
     }
 
+    fn begin_file_changes(&mut self, count: usize) {
+        if let Some(fc_vec) = self.file_changes.as_mut() {
+            let _ = fc_vec.struct_child(self.file_changes_offset + count);
+        }
+    }
+
     fn file_change(&mut self, fc: FileChangeRef<'_>) {
         let Some(fc_vec) = self.file_changes.as_mut() else {
             return;

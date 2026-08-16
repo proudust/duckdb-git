@@ -107,7 +107,10 @@ pub(super) fn emit_file_changes(
 
     diff.find_similar(Some(&mut find_opts))?;
 
-    for i in 0..diff.deltas().len() {
+    let num_deltas = diff.deltas().len();
+    sink.begin_file_changes(num_deltas);
+
+    for i in 0..num_deltas {
         let delta = diff.get_delta(i).unwrap();
 
         let status = match delta.status() {

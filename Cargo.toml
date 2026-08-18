@@ -58,3 +58,7 @@ harness = false
 [[bench]]
 name = "diff_phases"
 harness = false
+
+[[bench]]
+name = "blob_ring_hits"
+harness = false

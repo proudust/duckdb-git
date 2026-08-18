@@ -56,6 +56,31 @@ pub fn fill_file_changes_history(
     }
 }
 
+/// Raise libgit2's process-wide TREE cache eligibility. Blob stays at 0.
+/// Must run before worker threads start.
+#[cfg(feature = "libgit-backend")]
+pub fn set_tree_cache_object_limit(bytes: usize) {
+    unsafe {
+        git2::opts::set_cache_object_limit(git2::ObjectType::Tree, bytes)
+            .expect("GIT_OPT_SET_CACHE_OBJECT_LIMIT");
+    }
+}
+
+#[cfg(feature = "libgit-backend")]
+pub use crate::git::backend::libgit::{BlobRing, BlobRingStats, PendingOlds};
+
+/// Reset process-wide BlobRing lookup counters (call before a measured `git_log`).
+#[cfg(feature = "libgit-backend")]
+pub fn reset_blob_ring_stats() {
+    crate::git::backend::libgit::reset_blob_ring_stats();
+}
+
+/// Snapshot BlobRing lookup counters accumulated since the last reset.
+#[cfg(feature = "libgit-backend")]
+pub fn snapshot_blob_ring_stats() -> BlobRingStats {
+    crate::git::backend::libgit::snapshot_blob_ring_stats()
+}
+
 /// Forwarder so benches can time the libgit numstat path without depending on
 /// crate-private modules.
 #[cfg(feature = "libgit-backend")]

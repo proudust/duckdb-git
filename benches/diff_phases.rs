@@ -3,7 +3,7 @@
 //! Splits each non-merge commit into tree-diff, find_similar, blob inflate,
 //! and xdiff/numstat so we can see what dominates on large histories.
 //!
-//! After warmup, runs three probe passes (blob-cache env is ignored — always off):
+//! After warmup, runs probe passes (blob-cache env is ignored — always off):
 //! - pass 0 (T0): plain `find_blob`
 //! - pass 1 (T1): one-generation `HashMap` (lookup previous olds; insert this
 //!   commit's olds into a separate map; swap at end). `copy_tax` is memcpy of
@@ -11,6 +11,8 @@
 //! - pass 2: always `find_blob`; distance histogram (1, 2, … and 2049+).
 //!   Insert old only, lookup old and new. Do not insert the current generation
 //!   until lookups finish. Same OID keeps the latest insert generation.
+//! - pass 3: production path-LRU `BlobRing` vs a bench-local K=11 generation
+//!   replica, same revwalk oid-index batches as `git_log`.
 //!
 //! ```bash
 //! BENCH_REPO=/path/to/repo cargo bench --bench diff_phases \
@@ -22,8 +24,9 @@
 //! - `DIFF_PHASES_SKIP_SIMILAR=1` — skip `find_similar` (rename/copy)
 //! - `DIFF_PHASES_SKIP_NUMSTAT=1` — tree-diff only (name-status); skips T1/T2
 
+use duckdb_git::microbench::{BlobRing, PendingOlds};
 use git2::{Oid, Repository};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 fn repo_path() -> String {
@@ -130,6 +133,9 @@ fn find_blob<'a>(repo: &'a Repository, oid: git2::Oid) -> Result<git2::Blob<'a>,
 struct DeltaIds {
     old_id: Oid,
     new_id: Oid,
+    /// Rename/copy uses `old_file` path; otherwise new (else old). `None` skips
+    /// path-LRU `note_old` only.
+    cache_path: Option<Vec<u8>>,
 }
 
 fn delta_ids(diff: &git2::Diff<'_>) -> Vec<DeltaIds> {
@@ -142,9 +148,20 @@ fn delta_ids(diff: &git2::Diff<'_>) -> Vec<DeltaIds> {
         if is_gitlink || delta.status() == git2::Delta::Typechange {
             continue;
         }
+        let cache_path = match delta.status() {
+            git2::Delta::Renamed | git2::Delta::Copied => {
+                delta.old_file().path_bytes().map(|p| p.to_vec())
+            }
+            _ => delta
+                .new_file()
+                .path_bytes()
+                .or_else(|| delta.old_file().path_bytes())
+                .map(|p| p.to_vec()),
+        };
         out.push(DeltaIds {
             old_id: delta.old_file().id(),
             new_id: delta.new_file().id(),
+            cache_path,
         });
     }
     out
@@ -509,7 +526,7 @@ fn print_t1(t0_blob: Duration, t1: &T1) {
     gen.sort_unstable();
     let p99 = percentile(&gen, 0.99);
     println!(
-        "  gen_insert p99 × 11 = {:.1} MiB  (production BlobRing K)",
+        "  gen_insert p99 × 11 = {:.1} MiB  (K=11 bench replica)",
         mib(p99.saturating_mul(11))
     );
 }
@@ -594,6 +611,337 @@ fn print_dist(d: &Dist) {
     println!("  d2..64 / all lookup bytes = {:.3}", pct_all(d2k) / 100.0);
 }
 
+/// Bench-local copy of the former production K=11 generation ring. Independent
+/// of `BlobRing`. Empty pending still consumes a generation slot.
+const K11: usize = 11;
+
+struct GenPending {
+    olds: HashMap<Oid, Option<Vec<u8>>>,
+}
+
+impl GenPending {
+    fn contains(&self, oid: Oid) -> bool {
+        self.olds.contains_key(&oid)
+    }
+
+    fn record_hit(&mut self, oid: Oid) {
+        if oid.is_zero() {
+            return;
+        }
+        self.olds.entry(oid).or_insert(None);
+    }
+
+    fn record_miss(&mut self, oid: Oid, bytes: Vec<u8>) {
+        if oid.is_zero() {
+            return;
+        }
+        self.olds.entry(oid).or_insert(Some(bytes));
+    }
+}
+
+struct GenRing {
+    by_oid: HashMap<Oid, (u64, Vec<u8>)>,
+    gens: VecDeque<(u64, Vec<Oid>)>,
+    gen: u64,
+}
+
+impl GenRing {
+    fn new() -> Self {
+        Self {
+            by_oid: HashMap::new(),
+            gens: VecDeque::new(),
+            gen: 0,
+        }
+    }
+
+    fn lookup(&self, oid: Oid) -> Option<&[u8]> {
+        if oid.is_zero() {
+            return None;
+        }
+        self.by_oid.get(&oid).map(|(_, bytes)| bytes.as_slice())
+    }
+
+    fn finish_commit(&mut self, pending: GenPending) {
+        let gen = self.gen;
+        let mut oid_list = Vec::with_capacity(pending.olds.len());
+        for (oid, bytes) in pending.olds {
+            if oid.is_zero() {
+                continue;
+            }
+            match bytes {
+                Some(bytes) => {
+                    self.by_oid.insert(oid, (gen, bytes));
+                }
+                None => {
+                    if let Some((stored_gen, _)) = self.by_oid.get_mut(&oid) {
+                        *stored_gen = gen;
+                    }
+                }
+            }
+            oid_list.push(oid);
+        }
+        self.gens.push_back((gen, oid_list));
+        if self.gens.len() > K11 {
+            let (dropped_gen, dropped) = self.gens.pop_front().expect("len > K");
+            for oid in dropped {
+                if self.by_oid.get(&oid).map(|(g, _)| *g) == Some(dropped_gen) {
+                    self.by_oid.remove(&oid);
+                }
+            }
+        }
+        self.gen += 1;
+    }
+}
+
+#[derive(Default, Clone)]
+struct HitSide {
+    lookups: u64,
+    hits: u64,
+    bytes: u64,
+    hit_bytes: u64,
+}
+
+impl HitSide {
+    fn record(&mut self, hit: bool, n: usize) {
+        self.lookups += 1;
+        self.bytes += n as u64;
+        if hit {
+            self.hits += 1;
+            self.hit_bytes += n as u64;
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+struct HitAcc {
+    old: HitSide,
+    new: HitSide,
+}
+
+fn cpu_cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(4)
+}
+
+fn prod_batch_size(commit_count: usize) -> usize {
+    (commit_count / cpu_cores()).clamp(1, 2048)
+}
+
+fn collect_commit_oids(repo: &Repository) -> Result<Vec<Oid>, Box<dyn std::error::Error>> {
+    let mut revwalk = repo.revwalk()?;
+    revwalk.push_head()?;
+    let mut oids = Vec::new();
+    for oid in revwalk {
+        oids.push(oid?);
+    }
+    Ok(oids)
+}
+
+fn file_change_deltas(
+    repo: &Repository,
+    oid: Oid,
+    skip_similar: bool,
+) -> Result<Option<Vec<DeltaIds>>, Box<dyn std::error::Error>> {
+    let commit = repo.find_commit(oid)?;
+    let parent_count = commit.parent_count();
+    if parent_count > 1 {
+        return Ok(None);
+    }
+    if parent_count == 0 {
+        return Ok(Some(Vec::new()));
+    }
+
+    let parent = commit.parent(0)?;
+    let parent_tree = parent.tree()?;
+    let current_tree = commit.tree()?;
+    let mut diff_options = git2::DiffOptions::new();
+    diff_options.include_typechange(true);
+    let mut diff = repo.diff_tree_to_tree(
+        Some(&parent_tree),
+        Some(&current_tree),
+        Some(&mut diff_options),
+    )?;
+    if !skip_similar {
+        let mut find_opts = git2::DiffFindOptions::new();
+        find_opts.renames(true).rename_threshold(50);
+        diff.find_similar(Some(&mut find_opts))?;
+    }
+    Ok(Some(delta_ids(&diff)))
+}
+
+fn print_hit_side(indent: &str, label: &str, s: &HitSide) {
+    println!(
+        "{indent}{label:<12} lookups={:<10} hits={:<10} {:>5.1}%   bytes={:>8.1} MiB  hit={:>8.1} MiB  {:>5.1}%",
+        s.lookups,
+        s.hits,
+        if s.lookups == 0 {
+            0.0
+        } else {
+            100.0 * s.hits as f64 / s.lookups as f64
+        },
+        mib(s.bytes),
+        mib(s.hit_bytes),
+        if s.bytes == 0 {
+            0.0
+        } else {
+            100.0 * s.hit_bytes as f64 / s.bytes as f64
+        }
+    );
+}
+
+fn print_hit_acc(label: &str, acc: &HitAcc) {
+    println!("  {label}");
+    print_hit_side("    ", "new", &acc.new);
+    print_hit_side("    ", "old", &acc.old);
+}
+
+fn run_cache_probe(
+    path: &str,
+    skip_similar: bool,
+    batch: usize,
+    caps: &[usize],
+    with_k11: bool,
+) -> Result<(Option<HitAcc>, Vec<(usize, HitAcc)>), Box<dyn std::error::Error>> {
+    let repo = Repository::open(path)?;
+    let oids = collect_commit_oids(&repo)?;
+    let batch = batch.max(1);
+
+    let mut k11_acc = HitAcc::default();
+    let mut path_accs: Vec<HitAcc> = caps.iter().map(|_| HitAcc::default()).collect();
+
+    for chunk in oids.chunks(batch) {
+        let mut k11 = GenRing::new();
+        let mut rings: Vec<BlobRing> = caps.iter().map(|&cap| BlobRing::with_cap(cap)).collect();
+
+        for &oid in chunk {
+            let Some(deltas) = file_change_deltas(&repo, oid, skip_similar)? else {
+                continue;
+            };
+            if deltas.is_empty() {
+                if with_k11 {
+                    k11.finish_commit(GenPending {
+                        olds: HashMap::new(),
+                    });
+                }
+                for ring in &mut rings {
+                    ring.finish_commit(PendingOlds::default());
+                }
+                continue;
+            }
+
+            let mut k11_pending = GenPending {
+                olds: HashMap::new(),
+            };
+            let mut path_pendings: Vec<PendingOlds> =
+                caps.iter().map(|_| PendingOlds::default()).collect();
+
+            for d in &deltas {
+                let k11_old = if with_k11 {
+                    k11.lookup(d.old_id).map(|b| b.len())
+                } else {
+                    None
+                };
+                let k11_new = if with_k11 {
+                    k11.lookup(d.new_id).map(|b| b.len())
+                } else {
+                    None
+                };
+                let path_old: Vec<Option<usize>> = rings
+                    .iter()
+                    .map(|r| r.lookup(d.old_id).map(|b| b.len()))
+                    .collect();
+                let path_new: Vec<Option<usize>> = rings
+                    .iter()
+                    .map(|r| r.lookup(d.new_id).map(|b| b.len()))
+                    .collect();
+
+                let load_old = !d.old_id.is_zero()
+                    && ((with_k11 && k11_old.is_none()) || path_old.iter().any(|l| l.is_none()));
+                let load_new = !d.new_id.is_zero()
+                    && ((with_k11 && k11_new.is_none()) || path_new.iter().any(|l| l.is_none()));
+                let old_blob = if load_old {
+                    Some(find_blob(&repo, d.old_id)?)
+                } else {
+                    None
+                };
+                let new_blob = if load_new {
+                    Some(find_blob(&repo, d.new_id)?)
+                } else {
+                    None
+                };
+                let old_loaded = old_blob.as_ref().map(|b| b.size());
+                let new_loaded = new_blob.as_ref().map(|b| b.size());
+
+                if with_k11 && !d.old_id.is_zero() {
+                    let n = k11_old.or(old_loaded).expect("old size");
+                    k11_acc.old.record(k11_old.is_some(), n);
+                }
+                if with_k11 && !d.new_id.is_zero() {
+                    let n = k11_new.or(new_loaded).expect("new size");
+                    k11_acc.new.record(k11_new.is_some(), n);
+                }
+                for i in 0..caps.len() {
+                    if !d.old_id.is_zero() {
+                        let n = path_old[i].or(old_loaded).expect("old size");
+                        path_accs[i].old.record(path_old[i].is_some(), n);
+                    }
+                    if !d.new_id.is_zero() {
+                        let n = path_new[i].or(new_loaded).expect("new size");
+                        path_accs[i].new.record(path_new[i].is_some(), n);
+                    }
+                }
+
+                if with_k11 && !d.old_id.is_zero() && !k11_pending.contains(d.old_id) {
+                    if k11_old.is_some() {
+                        k11_pending.record_hit(d.old_id);
+                    } else if let Some(blob) = &old_blob {
+                        k11_pending.record_miss(d.old_id, blob.content().to_vec());
+                    }
+                }
+                if let Some(cache_path) = &d.cache_path {
+                    if !d.old_id.is_zero() {
+                        for i in 0..caps.len() {
+                            if path_old[i].is_some() {
+                                path_pendings[i].record_hit(cache_path.clone(), d.old_id);
+                            } else if let Some(blob) = &old_blob {
+                                path_pendings[i].record_miss(
+                                    cache_path.clone(),
+                                    d.old_id,
+                                    blob.content().to_vec(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            if with_k11 {
+                k11.finish_commit(k11_pending);
+            }
+            for (ring, pending) in rings.iter_mut().zip(path_pendings) {
+                ring.finish_commit(pending);
+            }
+        }
+    }
+
+    let k11_out = if with_k11 { Some(k11_acc) } else { None };
+    let path_out = caps.iter().copied().zip(path_accs).collect();
+    Ok((k11_out, path_out))
+}
+
+fn print_cache_probe(batch: usize, cores: usize, k11: Option<&HitAcc>, path: &[(usize, HitAcc)]) {
+    println!("=== probe BlobRing K=11 vs path last-old (batch={batch}, cores={cores}) ===");
+    println!("  (merge: walk but skip file_changes+finish; root: empty finish)");
+    if let Some(acc) = k11 {
+        print_hit_acc("K=11 (empty gens consume a slot)", acc);
+    }
+    for (cap, acc) in path {
+        print_hit_acc(&format!("cap={} MiB", cap / (1024 * 1024)), acc);
+    }
+}
+
 fn main() {
     let path = repo_path();
     let skip_similar = env_flag("DIFF_PHASES_SKIP_SIMILAR");
@@ -618,12 +966,37 @@ fn main() {
 
     if skip_numstat {
         println!("skip T1/T2 (DIFF_PHASES_SKIP_NUMSTAT)");
-        return;
+    } else {
+        let t1 = run_t1(&path, skip_similar).expect("T1");
+        print_t1(acc.blob, &t1);
+
+        let dist = run_dist(&path, skip_similar).expect("distance");
+        print_dist(&dist);
     }
 
-    let t1 = run_t1(&path, skip_similar).expect("T1");
-    print_t1(acc.blob, &t1);
+    let mib = 1024 * 1024;
+    let cores = cpu_cores();
+    let n_commits = {
+        let repo = Repository::open(&path).expect("repo");
+        collect_commit_oids(&repo).expect("oids").len()
+    };
+    let batch = prod_batch_size(n_commits);
+    let (k11, path_hits) = run_cache_probe(
+        &path,
+        skip_similar,
+        batch,
+        &[8 * mib, 16 * mib, 32 * mib, 64 * mib],
+        true,
+    )
+    .expect("cache probe");
+    print_cache_probe(batch, cores, k11.as_ref(), &path_hits);
 
-    let dist = run_dist(&path, skip_similar).expect("distance");
-    print_dist(&dist);
+    for extra in [1usize, 2048] {
+        if extra == batch {
+            continue;
+        }
+        let (k11, path_hits) =
+            run_cache_probe(&path, skip_similar, extra, &[32 * mib], true).expect("cache extra");
+        print_cache_probe(extra, cores, k11.as_ref(), &path_hits);
+    }
 }

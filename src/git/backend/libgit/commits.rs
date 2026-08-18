@@ -176,7 +176,7 @@ mod tests {
         let oid = peel_commit(&repo, "note");
         let mut ring = BlobRing::new();
         emit(&repo, oid, false, DiffMerges::Off, &mut ring).unwrap();
-        assert_eq!(ring.generation(), 1);
+        assert!(ring.finish_count() >= 1);
     }
 
     #[test]
@@ -186,7 +186,7 @@ mod tests {
         assert_eq!(repo.find_commit(oid).unwrap().parent_count(), 0);
         let mut ring = BlobRing::new();
         emit(&repo, oid, false, DiffMerges::Off, &mut ring).unwrap();
-        assert_eq!(ring.generation(), 1);
+        assert!(ring.finish_count() >= 1);
         assert_eq!(ring.len(), 0);
     }
 
@@ -202,6 +202,8 @@ mod tests {
         emit(&repo, oid, false, DiffMerges::Off, &mut ring).unwrap();
         assert!(ring.len() >= 1);
         assert_eq!(ring.lookup(old_id), Some(expected.as_slice()));
+        assert!(ring.contains_path(b"note.txt"));
+        assert!(!ring.contains_path(b"renamed.txt"));
     }
 
     #[test]
@@ -210,7 +212,7 @@ mod tests {
         let oid = peel_commit(&repo, "merged");
         let mut ring = BlobRing::new();
         emit(&repo, oid, false, DiffMerges::Off, &mut ring).unwrap();
-        assert_eq!(ring.generation(), 0);
+        assert_eq!(ring.finish_count(), 0);
     }
 
     #[test]
@@ -219,7 +221,7 @@ mod tests {
         let oid = peel_commit(&repo, "note");
         let mut ring = BlobRing::new();
         emit(&repo, oid, true, DiffMerges::Off, &mut ring).unwrap();
-        assert_eq!(ring.generation(), 0);
+        assert_eq!(ring.finish_count(), 0);
     }
 
     #[test]
@@ -228,7 +230,7 @@ mod tests {
         let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
         let mut ring = BlobRing::new();
         assert!(emit(&repo, oid, false, DiffMerges::Off, &mut ring).is_err());
-        assert_eq!(ring.generation(), 0);
+        assert_eq!(ring.finish_count(), 0);
         assert_eq!(ring.len(), 0);
     }
 
@@ -273,9 +275,9 @@ mod tests {
 
         let mut ring = BlobRing::new();
         emit(&repo, c1, false, DiffMerges::Off, &mut ring).unwrap();
-        assert_eq!(ring.generation(), 1);
+        assert_eq!(ring.finish_count(), 1);
         assert!(emit(&repo, c2, false, DiffMerges::Off, &mut ring).is_err());
-        assert_eq!(ring.generation(), 1);
+        assert_eq!(ring.finish_count(), 1);
         assert!(ring.lookup(old_keep).is_none());
     }
 }

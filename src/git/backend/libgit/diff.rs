@@ -1,4 +1,4 @@
-use super::blob_ring::{BlobRing, PendingOlds};
+use super::blob_ring::{record_lookup, BlobRing, LookupKind, PendingOlds};
 use crate::git::model::{gitlink_numstat, unable_to_read_object};
 use crate::git::sink::{oid_hex, CommitSink, FileChangeRef};
 use git2::Repository;
@@ -38,23 +38,40 @@ fn resolve_blob<'a>(
     ring: &'a BlobRing,
     repo: &'a Repository,
     oid: git2::Oid,
+    kind: LookupKind,
 ) -> Result<Option<ResolvedBlob<'a>>, git2::Error> {
     if oid.is_zero() {
         return Ok(None);
     }
-    if let Some(bytes) = ring.lookup(oid) {
-        return Ok(Some(ResolvedBlob::Cached(bytes)));
+    let hit_len = ring.lookup(oid).map(|bytes| bytes.len());
+    if let Some(len) = hit_len {
+        record_lookup(kind, true, len);
+        return Ok(Some(ResolvedBlob::Cached(
+            ring.lookup(oid).expect("hit_len implies present"),
+        )));
     }
-    Ok(Some(ResolvedBlob::Loaded(find_blob(repo, oid)?)))
+    let blob = find_blob(repo, oid)?;
+    record_lookup(kind, false, blob.size());
+    Ok(Some(ResolvedBlob::Loaded(blob)))
 }
 
-fn note_old(pending: &mut PendingOlds, oid: git2::Oid, blob: &Option<ResolvedBlob<'_>>) {
-    if oid.is_zero() || pending.contains(oid) {
+fn note_old(
+    pending: &mut PendingOlds,
+    cache_path: Option<&[u8]>,
+    oid: git2::Oid,
+    blob: &Option<ResolvedBlob<'_>>,
+) {
+    let Some(path) = cache_path else {
+        return;
+    };
+    if oid.is_zero() {
         return;
     }
     match blob {
-        Some(ResolvedBlob::Cached(_)) => pending.record_hit(oid),
-        Some(ResolvedBlob::Loaded(loaded)) => pending.record_miss(oid, loaded.content().to_vec()),
+        Some(ResolvedBlob::Cached(_)) => pending.record_hit(path.to_vec(), oid),
+        Some(ResolvedBlob::Loaded(loaded)) => {
+            pending.record_miss(path.to_vec(), oid, loaded.content().to_vec())
+        }
         None => {}
     }
 }
@@ -67,10 +84,14 @@ fn typechange_size(
     if id.is_zero() {
         return Ok(None);
     }
-    if let Some(bytes) = ring.lookup(id) {
-        return Ok(Some(bytes.len() as i64));
+    let hit_len = ring.lookup(id).map(|bytes| bytes.len());
+    if let Some(len) = hit_len {
+        record_lookup(LookupKind::Typechange, true, len);
+        return Ok(Some(len as i64));
     }
-    Ok(Some(find_blob(repo, id)?.size() as i64))
+    let size = find_blob(repo, id)?.size();
+    record_lookup(LookupKind::Typechange, false, size);
+    Ok(Some(size as i64))
 }
 
 pub(super) fn emit_file_changes(
@@ -182,8 +203,8 @@ fn emit_file_changes_inner(
         } else {
             let old_id = delta.old_file().id();
             let new_id = delta.new_file().id();
-            let old_blob = resolve_blob(ring, repo, old_id)?;
-            let new_blob = resolve_blob(ring, repo, new_id)?;
+            let old_blob = resolve_blob(ring, repo, old_id, LookupKind::Old)?;
+            let new_blob = resolve_blob(ring, repo, new_id, LookupKind::New)?;
 
             let (blob_hex, file_size) = if new_blob.is_some() {
                 (
@@ -209,7 +230,11 @@ fn emit_file_changes_inner(
                 None => (None, None),
             };
 
-            note_old(&mut pending, old_id, &old_blob);
+            let cache_path = match delta.status() {
+                git2::Delta::Renamed | git2::Delta::Copied => delta.old_file().path_bytes(),
+                _ => Some(file_path),
+            };
+            note_old(&mut pending, cache_path, old_id, &old_blob);
 
             (blob_hex, file_size, add, del)
         };
@@ -270,7 +295,7 @@ fn emit_root_file_changes(
                 del_lines: Some(del_lines),
             });
         } else {
-            match resolve_blob(ring, repo, oid) {
+            match resolve_blob(ring, repo, oid, LookupKind::New) {
                 Ok(Some(blob)) => {
                     let content = blob.content();
                     let (add_lines, del_lines) = if super::xdiff::is_binary_content(content) {

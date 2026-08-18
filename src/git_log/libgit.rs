@@ -1,5 +1,5 @@
 use crate::git::backend::libgit::{
-    build_contained_index, collect_refs, emit_commit, walk_commit_oids, CachedRepo,
+    build_contained_index, collect_refs, emit_commit, walk_commit_oids, BlobRing, CachedRepo,
 };
 use crate::git::ref_index::ContainedIndex;
 use crate::git::sink::CommitSink;
@@ -96,6 +96,7 @@ impl LibGitLogScanner {
 
         let empty_refs: Vec<String> = Vec::new();
         let skip_file_changes = !schema::needs_file_changes(column_indices);
+        let mut ring = BlobRing::new();
         let oids = &self.inner.commit_oids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
             writer.begin_row(batch_idx);
@@ -106,6 +107,7 @@ impl LibGitLogScanner {
                 skip_file_changes,
                 params.diff_merges,
                 &mut writer,
+                &mut ring,
             )?;
 
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);

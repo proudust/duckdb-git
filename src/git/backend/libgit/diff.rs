@@ -1,3 +1,4 @@
+use super::blob_ring::{BlobRing, PendingOlds};
 use crate::git::model::{gitlink_numstat, unable_to_read_object};
 use crate::git::sink::{oid_hex, CommitSink, FileChangeRef};
 use git2::Repository;
@@ -12,75 +13,89 @@ fn find_blob<'a>(repo: &'a Repository, oid: git2::Oid) -> Result<git2::Blob<'a>,
     })
 }
 
+enum ResolvedBlob<'a> {
+    Cached(&'a [u8]),
+    Loaded(git2::Blob<'a>),
+}
+
+impl ResolvedBlob<'_> {
+    fn content(&self) -> &[u8] {
+        match self {
+            Self::Cached(bytes) => bytes,
+            Self::Loaded(blob) => blob.content(),
+        }
+    }
+
+    fn size(&self) -> usize {
+        match self {
+            Self::Cached(bytes) => bytes.len(),
+            Self::Loaded(blob) => blob.size(),
+        }
+    }
+}
+
+fn resolve_blob<'a>(
+    ring: &'a BlobRing,
+    repo: &'a Repository,
+    oid: git2::Oid,
+) -> Result<Option<ResolvedBlob<'a>>, git2::Error> {
+    if oid.is_zero() {
+        return Ok(None);
+    }
+    if let Some(bytes) = ring.lookup(oid) {
+        return Ok(Some(ResolvedBlob::Cached(bytes)));
+    }
+    Ok(Some(ResolvedBlob::Loaded(find_blob(repo, oid)?)))
+}
+
+fn note_old(pending: &mut PendingOlds, oid: git2::Oid, blob: &Option<ResolvedBlob<'_>>) {
+    if oid.is_zero() || pending.contains(oid) {
+        return;
+    }
+    match blob {
+        Some(ResolvedBlob::Cached(_)) => pending.record_hit(oid),
+        Some(ResolvedBlob::Loaded(loaded)) => pending.record_miss(oid, loaded.content().to_vec()),
+        None => {}
+    }
+}
+
+fn typechange_size(
+    ring: &BlobRing,
+    repo: &Repository,
+    id: git2::Oid,
+) -> Result<Option<i64>, git2::Error> {
+    if id.is_zero() {
+        return Ok(None);
+    }
+    if let Some(bytes) = ring.lookup(id) {
+        return Ok(Some(bytes.len() as i64));
+    }
+    Ok(Some(find_blob(repo, id)?.size() as i64))
+}
+
 pub(super) fn emit_file_changes(
     repo: &Repository,
     commit: &git2::Commit,
     ignore_all_space: bool,
     sink: &mut impl CommitSink,
+    ring: &mut BlobRing,
 ) -> Result<(), git2::Error> {
+    let pending = emit_file_changes_inner(repo, commit, ignore_all_space, sink, ring)?;
+    ring.finish_commit(pending);
+    Ok(())
+}
+
+fn emit_file_changes_inner(
+    repo: &Repository,
+    commit: &git2::Commit,
+    ignore_all_space: bool,
+    sink: &mut impl CommitSink,
+    ring: &BlobRing,
+) -> Result<PendingOlds, git2::Error> {
+    let pending = PendingOlds::default();
     if commit.parent_count() == 0 {
-        let tree = commit.tree()?;
-        let mut walk_err: Option<git2::Error> = None;
-        let mut path_buf = String::new();
-        let walk_result = tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
-            if walk_err.is_some() {
-                return git2::TreeWalkResult::Abort;
-            }
-            if entry.kind() == Some(git2::ObjectType::Tree) {
-                return git2::TreeWalkResult::Ok;
-            }
-            let Ok(name) = entry.name() else {
-                return git2::TreeWalkResult::Ok;
-            };
-            let oid = entry.id();
-            path_buf.clear();
-            path_buf.push_str(root);
-            path_buf.push_str(name);
-            let hex = oid_hex(oid.as_bytes());
-            if entry.kind() == Some(git2::ObjectType::Commit) {
-                let (add_lines, del_lines) = gitlink_numstat("A");
-                sink.file_change(FileChangeRef {
-                    path: path_buf.as_bytes(),
-                    old_path: None,
-                    status: "A",
-                    blob_id: &hex,
-                    file_size: None,
-                    add_lines: Some(add_lines),
-                    del_lines: Some(del_lines),
-                });
-            } else {
-                match find_blob(repo, oid) {
-                    Ok(blob) => {
-                        let content = blob.content();
-                        let (add_lines, del_lines) = if super::xdiff::is_binary_content(content) {
-                            (None, None)
-                        } else {
-                            (Some(super::xdiff::count_lines(content)), Some(0))
-                        };
-                        sink.file_change(FileChangeRef {
-                            path: path_buf.as_bytes(),
-                            old_path: None,
-                            status: "A",
-                            blob_id: &hex,
-                            file_size: Some(blob.size() as i64),
-                            add_lines,
-                            del_lines,
-                        });
-                    }
-                    Err(e) => {
-                        walk_err = Some(e);
-                        return git2::TreeWalkResult::Abort;
-                    }
-                }
-            }
-            git2::TreeWalkResult::Ok
-        });
-        // Prefer the blob error over tree-walk's generic Abort (-7).
-        if let Some(e) = walk_err {
-            return Err(e);
-        }
-        walk_result?;
-        return Ok(());
+        emit_root_file_changes(repo, commit, sink, ring)?;
+        return Ok(pending);
     }
 
     let parent = commit.parent(0)?;
@@ -110,6 +125,7 @@ pub(super) fn emit_file_changes(
     let num_deltas = diff.deltas().len();
     sink.begin_file_changes(num_deltas);
 
+    let mut pending = PendingOlds::default();
     for i in 0..num_deltas {
         let delta = diff.get_delta(i).unwrap();
 
@@ -153,10 +169,8 @@ pub(super) fn emit_file_changes(
             };
             let file_size = if is_gitlink {
                 None
-            } else if id.is_zero() {
-                None
             } else {
-                Some(find_blob(repo, id)?.size() as i64)
+                typechange_size(ring, repo, id)?
             };
             let (add, del) = gitlink_numstat(status);
             let hex = if id.is_zero() {
@@ -168,37 +182,34 @@ pub(super) fn emit_file_changes(
         } else {
             let old_id = delta.old_file().id();
             let new_id = delta.new_file().id();
-            let old_blob = if old_id.is_zero() {
-                None
-            } else {
-                Some(find_blob(repo, old_id)?)
-            };
-            let new_blob = if new_id.is_zero() {
-                None
-            } else {
-                Some(find_blob(repo, new_id)?)
-            };
+            let old_blob = resolve_blob(ring, repo, old_id)?;
+            let new_blob = resolve_blob(ring, repo, new_id)?;
 
             let (blob_hex, file_size) = if new_blob.is_some() {
-                (Some(oid_hex(new_id.as_bytes())), Some(new_blob.as_ref().unwrap().size() as i64))
+                (
+                    Some(oid_hex(new_id.as_bytes())),
+                    Some(new_blob.as_ref().unwrap().size() as i64),
+                )
             } else if old_blob.is_some() {
-                (Some(oid_hex(old_id.as_bytes())), Some(old_blob.as_ref().unwrap().size() as i64))
+                (
+                    Some(oid_hex(old_id.as_bytes())),
+                    Some(old_blob.as_ref().unwrap().size() as i64),
+                )
             } else {
                 (None, Some(0))
             };
 
             let old_content = old_blob.as_ref().map(|b| b.content()).unwrap_or(&[]);
             let new_content = new_blob.as_ref().map(|b| b.content()).unwrap_or(&[]);
-            let line_counts = super::xdiff::diff_line_counts(
-                old_content,
-                new_content,
-                ignore_all_space,
-            )
-            .map_err(|e| git2::Error::from_str(&e.to_string()))?;
+            let line_counts =
+                super::xdiff::diff_line_counts(old_content, new_content, ignore_all_space)
+                    .map_err(|e| git2::Error::from_str(&e.to_string()))?;
             let (add, del) = match line_counts {
                 Some((a, d)) => (Some(a), Some(d)),
                 None => (None, None),
             };
+
+            note_old(&mut pending, old_id, &old_blob);
 
             (blob_hex, file_size, add, del)
         };
@@ -220,5 +231,76 @@ pub(super) fn emit_file_changes(
         });
     }
 
+    Ok(pending)
+}
+
+fn emit_root_file_changes(
+    repo: &Repository,
+    commit: &git2::Commit,
+    sink: &mut impl CommitSink,
+    ring: &BlobRing,
+) -> Result<(), git2::Error> {
+    let tree = commit.tree()?;
+    let mut walk_err: Option<git2::Error> = None;
+    let mut path_buf = String::new();
+    let walk_result = tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+        if walk_err.is_some() {
+            return git2::TreeWalkResult::Abort;
+        }
+        if entry.kind() == Some(git2::ObjectType::Tree) {
+            return git2::TreeWalkResult::Ok;
+        }
+        let Ok(name) = entry.name() else {
+            return git2::TreeWalkResult::Ok;
+        };
+        let oid = entry.id();
+        path_buf.clear();
+        path_buf.push_str(root);
+        path_buf.push_str(name);
+        let hex = oid_hex(oid.as_bytes());
+        if entry.kind() == Some(git2::ObjectType::Commit) {
+            let (add_lines, del_lines) = gitlink_numstat("A");
+            sink.file_change(FileChangeRef {
+                path: path_buf.as_bytes(),
+                old_path: None,
+                status: "A",
+                blob_id: &hex,
+                file_size: None,
+                add_lines: Some(add_lines),
+                del_lines: Some(del_lines),
+            });
+        } else {
+            match resolve_blob(ring, repo, oid) {
+                Ok(Some(blob)) => {
+                    let content = blob.content();
+                    let (add_lines, del_lines) = if super::xdiff::is_binary_content(content) {
+                        (None, None)
+                    } else {
+                        (Some(super::xdiff::count_lines(content)), Some(0))
+                    };
+                    sink.file_change(FileChangeRef {
+                        path: path_buf.as_bytes(),
+                        old_path: None,
+                        status: "A",
+                        blob_id: &hex,
+                        file_size: Some(blob.size() as i64),
+                        add_lines,
+                        del_lines,
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    walk_err = Some(e);
+                    return git2::TreeWalkResult::Abort;
+                }
+            }
+        }
+        git2::TreeWalkResult::Ok
+    });
+    // Prefer the blob error over tree-walk's generic Abort (-7).
+    if let Some(e) = walk_err {
+        return Err(e);
+    }
+    walk_result?;
     Ok(())
 }

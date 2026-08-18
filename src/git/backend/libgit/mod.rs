@@ -1,3 +1,4 @@
+mod blob_ring;
 mod commits;
 mod contained;
 mod decorate;
@@ -5,6 +6,7 @@ mod diff;
 mod repo;
 mod xdiff;
 
+pub(crate) use blob_ring::BlobRing;
 pub(crate) use commits::{emit_commit, walk_commit_oids};
 pub(crate) use contained::build_contained_index;
 pub(crate) use decorate::collect_refs;

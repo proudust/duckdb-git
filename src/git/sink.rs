@@ -158,9 +158,7 @@ impl CommitSink for CollectingSink {
     fn file_change(&mut self, fc: FileChangeRef<'_>) {
         self.row.file_changes.push(FileChange {
             path: String::from_utf8_lossy(fc.path).into_owned(),
-            old_path: fc
-                .old_path
-                .map(|p| String::from_utf8_lossy(p).into_owned()),
+            old_path: fc.old_path.map(|p| String::from_utf8_lossy(p).into_owned()),
             status: fc.status,
             blob_id: String::from_utf8_lossy(fc.blob_id).into_owned(),
             file_size: fc.file_size,

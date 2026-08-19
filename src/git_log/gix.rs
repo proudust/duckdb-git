@@ -33,9 +33,7 @@ impl GixLogScanner {
         column_indices: &[u64],
     ) -> Result<Self, Box<dyn Error>> {
         if params.ignore_all_space {
-            return Err(
-                "ignore_all_space=true is not supported with the gix backend".into(),
-            );
+            return Err("ignore_all_space=true is not supported with the gix backend".into());
         }
 
         let handle = CachedRepo::open(repo_path)?;
@@ -105,7 +103,13 @@ impl GixLogScanner {
         let oids = &self.inner.commit_oids[start_index..end_index];
         for (batch_idx, oid) in oids.iter().enumerate() {
             writer.begin_row(batch_idx);
-            emit_commit(repo, *oid, skip_file_changes, params.diff_merges, &mut writer)?;
+            emit_commit(
+                repo,
+                *oid,
+                skip_file_changes,
+                params.diff_merges,
+                &mut writer,
+            )?;
 
             let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
             writer.begin_decorate(refs.len());

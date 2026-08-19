@@ -241,10 +241,7 @@ impl std::fmt::Display for ReplayMode {
     }
 }
 
-const REPLAY_MODES: &[ReplayMode] = &[
-    ReplayMode { reserve: false },
-    ReplayMode { reserve: true },
-];
+const REPLAY_MODES: &[ReplayMode] = &[ReplayMode { reserve: false }, ReplayMode { reserve: true }];
 
 /// Full-history insert replay sized from `BENCH_REPO`.
 #[divan::bench(args = REPLAY_MODES, sample_count = 20)]

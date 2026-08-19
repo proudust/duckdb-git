@@ -26,9 +26,7 @@ fn blob_oids_for_numstat(
         Change::Modification {
             previous_id, id, ..
         } => vec![previous_id.detach(), id.detach()],
-        Change::Rewrite {
-            source_id, id, ..
-        } => vec![source_id.detach(), id.detach()],
+        Change::Rewrite { source_id, id, .. } => vec![source_id.detach(), id.detach()],
     }
 }
 

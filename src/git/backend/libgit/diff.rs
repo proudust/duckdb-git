@@ -43,12 +43,9 @@ fn resolve_blob<'a>(
     if oid.is_zero() {
         return Ok(None);
     }
-    let hit_len = ring.lookup(oid).map(|bytes| bytes.len());
-    if let Some(len) = hit_len {
-        record_lookup(kind, true, len);
-        return Ok(Some(ResolvedBlob::Cached(
-            ring.lookup(oid).expect("hit_len implies present"),
-        )));
+    if let Some(bytes) = ring.lookup(oid) {
+        record_lookup(kind, true, bytes.len());
+        return Ok(Some(ResolvedBlob::Cached(bytes)));
     }
     let blob = find_blob(repo, oid)?;
     record_lookup(kind, false, blob.size());

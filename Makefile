@@ -46,7 +46,7 @@ BENCH_COMPARE_FILE ?= $(BENCH_RESULTS_DIR)/compare.md
 
 bench:
 	@mkdir -p $(BENCH_RESULTS_DIR)
-	cargo bench -q --no-default-features --features bundled,libgit-backend,gix-backend 2>&1 \
+	cargo bench -q --no-default-features --features bundled,libgit-backend,gix-backend,blob-ring-stats 2>&1 \
 		| tee $(BENCH_RESULTS_RAW_FILE) | python3 scripts/format_divan_table.py | tee $(BENCH_RESULTS_FILE)
 
 bench_baseline: bench

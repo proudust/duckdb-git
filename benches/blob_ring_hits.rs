@@ -2,7 +2,7 @@
 //!
 //! ```bash
 //! BENCH_REPO=/path/to/repo cargo bench --bench blob_ring_hits \
-//!   --no-default-features --features bundled,libgit-backend
+//!   --no-default-features --features bundled,libgit-backend,blob-ring-stats
 //! ```
 //!
 //! Optional: `ONESHOT_THREADS=1,4` (default `1,4`).

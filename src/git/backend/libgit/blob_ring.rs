@@ -1,6 +1,10 @@
 use git2::Oid;
+#[cfg(feature = "blob-ring-stats")]
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(feature = "blob-ring-stats")]
+use std::collections::HashSet;
+use std::collections::{HashMap, VecDeque};
+#[cfg(feature = "blob-ring-stats")]
 use std::sync::Mutex;
 
 /// Per-batch stored-blob cap after `finish_commit` eviction.
@@ -58,6 +62,7 @@ impl BlobRingStats {
         commits: 0,
     };
 
+    #[cfg(feature = "blob-ring-stats")]
     fn add(&mut self, other: Self) {
         self.lookups += other.lookups;
         self.hits += other.hits;
@@ -89,52 +94,62 @@ pub(super) enum LookupKind {
     Typechange,
 }
 
+#[cfg(feature = "blob-ring-stats")]
 thread_local! {
     static BATCH_STATS: Cell<BlobRingStats> = const { Cell::new(BlobRingStats::ZERO) };
 }
 
+#[cfg(feature = "blob-ring-stats")]
 static GLOBAL: Mutex<BlobRingStats> = Mutex::new(BlobRingStats::ZERO);
 
 pub(super) fn record_lookup(kind: LookupKind, hit: bool, bytes: usize) {
-    let bytes = bytes as u64;
-    BATCH_STATS.with(|cell| {
-        let mut s = cell.get();
-        s.lookups += 1;
-        s.lookup_bytes += bytes;
-        if hit {
-            s.hits += 1;
-            s.hit_bytes += bytes;
-        }
-        match kind {
-            LookupKind::Old => {
-                s.old_lookups += 1;
-                s.old_bytes += bytes;
-                if hit {
-                    s.old_hits += 1;
-                    s.old_hit_bytes += bytes;
+    #[cfg(feature = "blob-ring-stats")]
+    {
+        let bytes = bytes as u64;
+        BATCH_STATS.with(|cell| {
+            let mut s = cell.get();
+            s.lookups += 1;
+            s.lookup_bytes += bytes;
+            if hit {
+                s.hits += 1;
+                s.hit_bytes += bytes;
+            }
+            match kind {
+                LookupKind::Old => {
+                    s.old_lookups += 1;
+                    s.old_bytes += bytes;
+                    if hit {
+                        s.old_hits += 1;
+                        s.old_hit_bytes += bytes;
+                    }
+                }
+                LookupKind::New => {
+                    s.new_lookups += 1;
+                    s.new_bytes += bytes;
+                    if hit {
+                        s.new_hits += 1;
+                        s.new_hit_bytes += bytes;
+                    }
+                }
+                LookupKind::Typechange => {
+                    s.typechange_lookups += 1;
+                    s.typechange_bytes += bytes;
+                    if hit {
+                        s.typechange_hits += 1;
+                        s.typechange_hit_bytes += bytes;
+                    }
                 }
             }
-            LookupKind::New => {
-                s.new_lookups += 1;
-                s.new_bytes += bytes;
-                if hit {
-                    s.new_hits += 1;
-                    s.new_hit_bytes += bytes;
-                }
-            }
-            LookupKind::Typechange => {
-                s.typechange_lookups += 1;
-                s.typechange_bytes += bytes;
-                if hit {
-                    s.typechange_hits += 1;
-                    s.typechange_hit_bytes += bytes;
-                }
-            }
-        }
-        cell.set(s);
-    });
+            cell.set(s);
+        });
+    }
+    #[cfg(not(feature = "blob-ring-stats"))]
+    {
+        let _ = (kind, hit, bytes);
+    }
 }
 
+#[cfg(feature = "blob-ring-stats")]
 fn record_finish(inserts: u64, insert_bytes: u64, bumps: u64) {
     BATCH_STATS.with(|cell| {
         let mut s = cell.get();
@@ -147,18 +162,31 @@ fn record_finish(inserts: u64, insert_bytes: u64, bumps: u64) {
 }
 
 pub(crate) fn flush_blob_ring_stats() {
-    let batch = BATCH_STATS.with(|cell| cell.replace(BlobRingStats::ZERO));
-    GLOBAL.lock().expect("blob ring stats").add(batch);
+    #[cfg(feature = "blob-ring-stats")]
+    {
+        let batch = BATCH_STATS.with(|cell| cell.replace(BlobRingStats::ZERO));
+        GLOBAL.lock().expect("blob ring stats").add(batch);
+    }
 }
 
 pub(crate) fn reset_blob_ring_stats() {
-    BATCH_STATS.with(|cell| cell.set(BlobRingStats::ZERO));
-    *GLOBAL.lock().expect("blob ring stats") = BlobRingStats::ZERO;
+    #[cfg(feature = "blob-ring-stats")]
+    {
+        BATCH_STATS.with(|cell| cell.set(BlobRingStats::ZERO));
+        *GLOBAL.lock().expect("blob ring stats") = BlobRingStats::ZERO;
+    }
 }
 
 pub(crate) fn snapshot_blob_ring_stats() -> BlobRingStats {
-    flush_blob_ring_stats();
-    *GLOBAL.lock().expect("blob ring stats")
+    #[cfg(feature = "blob-ring-stats")]
+    {
+        flush_blob_ring_stats();
+        *GLOBAL.lock().expect("blob ring stats")
+    }
+    #[cfg(not(feature = "blob-ring-stats"))]
+    {
+        BlobRingStats::ZERO
+    }
 }
 
 struct CachedBlob {
@@ -210,6 +238,7 @@ pub struct BlobRing {
     bytes: usize,
     cap: usize,
     tick: u64,
+    #[cfg(test)]
     finish_count: u64,
 }
 
@@ -226,6 +255,7 @@ impl BlobRing {
             bytes: 0,
             cap,
             tick: 0,
+            #[cfg(test)]
             finish_count: 0,
         }
     }
@@ -250,6 +280,7 @@ impl BlobRing {
         self.bytes
     }
 
+    #[cfg(test)]
     pub fn contains_path(&self, path: &[u8]) -> bool {
         self.by_path.contains_key(path)
     }
@@ -266,10 +297,13 @@ impl BlobRing {
     /// counts as a finish (`commits` / `finish_count`).
     pub fn finish_commit(&mut self, pending: PendingOlds) {
         if pending.paths.is_empty() {
+            #[cfg(feature = "blob-ring-stats")]
             record_finish(0, 0, 0);
-            self.finish_count += 1;
             #[cfg(test)]
-            self.assert_invariants();
+            {
+                self.finish_count += 1;
+                self.assert_invariants();
+            }
             return;
         }
 
@@ -297,22 +331,30 @@ impl BlobRing {
 
         // 2. Ensure by_oid for surviving OIDs (len <= cap). Leftover Some with
         // no surviving path is not inserted.
+        #[cfg(feature = "blob-ring-stats")]
         let mut inserts = 0u64;
+        #[cfg(feature = "blob-ring-stats")]
         let mut insert_bytes = 0u64;
-        let mut bump_oids = HashSet::new();
-        for (_, oid) in &surviving {
-            if self.by_oid.contains_key(oid) {
-                bump_oids.insert(*oid);
+        #[cfg(feature = "blob-ring-stats")]
+        let bumps = {
+            let mut bump_oids = HashSet::new();
+            for (_, oid) in &surviving {
+                if self.by_oid.contains_key(oid) {
+                    bump_oids.insert(*oid);
+                }
             }
-        }
-        let bumps = bump_oids.len() as u64;
+            bump_oids.len() as u64
+        };
         for &(_, oid) in &surviving {
             if self.by_oid.contains_key(&oid) {
                 continue;
             }
             if let Some(Some(v)) = oid_bytes.remove(&oid) {
-                inserts += 1;
-                insert_bytes += v.len() as u64;
+                #[cfg(feature = "blob-ring-stats")]
+                {
+                    inserts += 1;
+                    insert_bytes += v.len() as u64;
+                }
                 self.bytes += v.len();
                 self.by_oid.insert(
                     oid,
@@ -354,10 +396,13 @@ impl BlobRing {
         // 5. Lazy LRU until bytes <= cap.
         self.evict_to_cap(&mut this_finish_paths);
 
+        #[cfg(feature = "blob-ring-stats")]
         record_finish(inserts, insert_bytes, bumps);
-        self.finish_count += 1;
         #[cfg(test)]
-        self.assert_invariants();
+        {
+            self.finish_count += 1;
+            self.assert_invariants();
+        }
     }
 
     fn touch_path(&mut self, path: &[u8]) {
@@ -504,6 +549,21 @@ mod tests {
 
     fn finish_empty(ring: &mut BlobRing) {
         ring.finish_commit(PendingOlds::default());
+    }
+
+    #[cfg(not(feature = "blob-ring-stats"))]
+    #[test]
+    fn snapshot_is_zero_without_stats_feature() {
+        reset_blob_ring_stats();
+        let mut ring = BlobRing::with_cap(1024);
+        let _ = ring.lookup(oid(1));
+        finish_miss(&mut ring, b"a", oid(1), b"now");
+        let s = snapshot_blob_ring_stats();
+        assert_eq!(s.lookups, 0);
+        assert_eq!(s.hits, 0);
+        assert_eq!(s.inserts, 0);
+        assert_eq!(s.bumps, 0);
+        assert_eq!(s.commits, 0);
     }
 
     #[test]
@@ -670,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn current_gen_olds_not_visible_until_finish() {
+    fn pending_olds_not_visible_until_finish() {
         let mut ring = BlobRing::with_cap(1024);
         let mut pending = PendingOlds::default();
         pending.record_miss(b"a".to_vec(), oid(1), b"now".to_vec());

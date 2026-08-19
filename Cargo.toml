@@ -27,6 +27,8 @@ bundled = ["duckdb/bundled"]                       # For benchmark
 libgit-backend = ["dep:git2"]
 # Additive: can be combined with libgit-backend (default) for runtime backend selection.
 gix-backend = ["dep:gix", "gix/max-performance-safe", "gix/basic"]
+# Record BlobRing hit/insert counters (off by default; type/reset/snapshot stay).
+blob-ring-stats = []
 
 [dependencies]
 duckdb = { version = "~1.10505.0", features = ["vtab"] }
@@ -62,3 +64,4 @@ harness = false
 [[bench]]
 name = "blob_ring_hits"
 harness = false
+required-features = ["libgit-backend", "blob-ring-stats"]

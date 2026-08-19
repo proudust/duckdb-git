@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn note_commit_advances_ring_generation() {
+    fn note_commit_finishes_ring() {
         let repo = Repository::open(PARITY).unwrap();
         let oid = peel_commit(&repo, "note");
         let mut ring = BlobRing::new();
@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_off_does_not_advance_generation() {
+    fn merge_off_does_not_touch_ring() {
         let repo = Repository::open(PARITY).unwrap();
         let oid = peel_commit(&repo, "merged");
         let mut ring = BlobRing::new();
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_file_changes_does_not_advance_generation() {
+    fn skip_file_changes_does_not_finish_ring() {
         let repo = Repository::open(PARITY).unwrap();
         let oid = peel_commit(&repo, "note");
         let mut ring = BlobRing::new();

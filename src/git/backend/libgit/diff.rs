@@ -1,7 +1,5 @@
 use super::blob_ring::{record_lookup, BlobRing, LookupKind, PendingOlds};
-use crate::git::model::{
-    gitlink_numstat, is_binary_content, same_oid_numstat, unable_to_read_object,
-};
+use crate::git::model::{gitlink_numstat, same_oid_numstat, unable_to_read_object};
 use crate::git::sink::{oid_hex, CommitSink, FileChangeRef};
 use git2::Repository;
 
@@ -112,15 +110,12 @@ fn emit_file_changes_inner(
     sink: &mut impl CommitSink,
     ring: &BlobRing,
 ) -> Result<PendingOlds, git2::Error> {
-    let pending = PendingOlds::default();
-    if commit.parent_count() == 0 {
-        emit_root_file_changes(repo, commit, sink, ring)?;
-        return Ok(pending);
-    }
-
-    let parent = commit.parent(0)?;
-    let parent_tree = parent.tree()?;
     let current_tree = commit.tree()?;
+    let parent_tree = if commit.parent_count() == 0 {
+        None
+    } else {
+        Some(commit.parent(0)?.tree()?)
+    };
 
     let mut diff_options = git2::DiffOptions::new();
     diff_options.include_typechange(true);
@@ -129,18 +124,20 @@ fn emit_file_changes_inner(
     }
 
     let mut diff = repo.diff_tree_to_tree(
-        Some(&parent_tree),
+        parent_tree.as_ref(),
         Some(&current_tree),
         Some(&mut diff_options),
     )?;
 
-    let mut find_opts = git2::DiffFindOptions::new();
-    find_opts
-        .renames(true)
-        .rename_threshold(50)
-        .ignore_whitespace(ignore_all_space);
-
-    diff.find_similar(Some(&mut find_opts))?;
+    // Root commits are all Added; rename detection needs A+D pairs.
+    if parent_tree.is_some() {
+        let mut find_opts = git2::DiffFindOptions::new();
+        find_opts
+            .renames(true)
+            .rename_threshold(50)
+            .ignore_whitespace(ignore_all_space);
+        diff.find_similar(Some(&mut find_opts))?;
+    }
 
     let num_deltas = diff.deltas().len();
     sink.begin_file_changes(num_deltas);
@@ -178,7 +175,7 @@ fn emit_file_changes_inner(
             || delta.old_file().mode() == git2::FileMode::Commit;
         let is_typechange = delta.status() == git2::Delta::Typechange;
 
-        // libgit2 DiffFile.size is often 0 for A/D; prefer blob object size (like root commits).
+        // libgit2 DiffFile.size is often 0 for A/D; prefer blob object size.
         let (blob_hex, file_size, add_lines, del_lines) = if is_gitlink || is_typechange {
             let id = if delta.new_file().path_bytes().is_some() {
                 delta.new_file().id()
@@ -268,75 +265,4 @@ fn emit_file_changes_inner(
     }
 
     Ok(pending)
-}
-
-fn emit_root_file_changes(
-    repo: &Repository,
-    commit: &git2::Commit,
-    sink: &mut impl CommitSink,
-    ring: &BlobRing,
-) -> Result<(), git2::Error> {
-    let tree = commit.tree()?;
-    let mut walk_err: Option<git2::Error> = None;
-    let mut path_buf = String::new();
-    let walk_result = tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
-        if walk_err.is_some() {
-            return git2::TreeWalkResult::Abort;
-        }
-        if entry.kind() == Some(git2::ObjectType::Tree) {
-            return git2::TreeWalkResult::Ok;
-        }
-        let Ok(name) = entry.name() else {
-            return git2::TreeWalkResult::Ok;
-        };
-        let oid = entry.id();
-        path_buf.clear();
-        path_buf.push_str(root);
-        path_buf.push_str(name);
-        let hex = oid_hex(oid.as_bytes());
-        if entry.kind() == Some(git2::ObjectType::Commit) {
-            let (add_lines, del_lines) = gitlink_numstat("A");
-            sink.file_change(FileChangeRef {
-                path: path_buf.as_bytes(),
-                old_path: None,
-                status: "A",
-                blob_id: &hex,
-                file_size: None,
-                add_lines: Some(add_lines),
-                del_lines: Some(del_lines),
-            });
-        } else {
-            match resolve_blob(ring, repo, oid, LookupKind::New) {
-                Ok(Some(blob)) => {
-                    let content = blob.content();
-                    let (add_lines, del_lines) = if is_binary_content(content) {
-                        (None, None)
-                    } else {
-                        (Some(super::xdiff::count_lines(content)), Some(0))
-                    };
-                    sink.file_change(FileChangeRef {
-                        path: path_buf.as_bytes(),
-                        old_path: None,
-                        status: "A",
-                        blob_id: &hex,
-                        file_size: Some(blob.size() as i64),
-                        add_lines,
-                        del_lines,
-                    });
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    walk_err = Some(e);
-                    return git2::TreeWalkResult::Abort;
-                }
-            }
-        }
-        git2::TreeWalkResult::Ok
-    });
-    // Prefer the blob error over tree-walk's generic Abort (-7).
-    if let Some(e) = walk_err {
-        return Err(e);
-    }
-    walk_result?;
-    Ok(())
 }

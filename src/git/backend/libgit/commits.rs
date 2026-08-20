@@ -190,6 +190,122 @@ mod tests {
         assert_eq!(ring.len(), 0);
     }
 
+    /// Invalid UTF-8 filename used to contrast root tree-walk vs parent-diff.
+    const NON_UTF8_PATH: &[u8] = b"\xff.txt";
+
+    fn index_entry(path: &[u8]) -> git2::IndexEntry {
+        git2::IndexEntry {
+            ctime: git2::IndexTime::new(0, 0),
+            mtime: git2::IndexTime::new(0, 0),
+            dev: 0,
+            ino: 0,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            file_size: 0,
+            id: git2::Oid::ZERO_SHA1,
+            flags: 0,
+            flags_extended: 0,
+            path: path.to_vec(),
+        }
+    }
+
+    /// Keeps raw `file_change` paths (CollectingSink is UTF-8-lossy).
+    #[derive(Default)]
+    struct PathSink {
+        paths: Vec<Vec<u8>>,
+    }
+
+    impl CommitSink for PathSink {
+        fn begin_row(&mut self, _idx: usize) {}
+        fn commit_id(&mut self, _hex: &[u8]) {}
+        fn author(&mut self, _name: &[u8], _email: &[u8], _seconds: i64) {}
+        fn committer(&mut self, _name: &[u8], _email: &[u8], _seconds: i64) {}
+        fn message(&mut self, _msg: &[u8]) {}
+        fn begin_parents(&mut self, _count: usize) {}
+        fn parent(&mut self, _hex: &[u8]) {}
+        fn begin_decorate(&mut self, _count: usize) {}
+        fn decorate_name(&mut self, _name: &str) {}
+        fn begin_contained_branches(&mut self, _count: usize) {}
+        fn contained_branch(&mut self, _name: &str) {}
+        fn begin_contained_tags(&mut self, _count: usize) {}
+        fn contained_tag(&mut self, _name: &str) {}
+        fn file_change(&mut self, fc: crate::git::sink::FileChangeRef<'_>) {
+            self.paths.push(fc.path.to_vec());
+        }
+        fn finish_row(&mut self) {}
+    }
+
+    fn emit_paths(repo: &Repository, oid: git2::Oid) -> Result<Vec<Vec<u8>>, Box<dyn Error>> {
+        let mut sink = PathSink::default();
+        sink.begin_row(0);
+        emit_commit(
+            repo,
+            oid,
+            false,
+            false,
+            DiffMerges::Off,
+            &mut sink,
+            &mut BlobRing::new(),
+        )?;
+        sink.finish_row();
+        Ok(sink.paths)
+    }
+
+    /// Control: parent-diff uses `path_bytes()`, so a non-UTF-8 Added path is kept.
+    #[test]
+    fn non_root_commit_emits_non_utf8_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+
+        let empty = repo.treebuilder(None).unwrap().write().unwrap();
+        let empty_tree = repo.find_tree(empty).unwrap();
+        let root = repo
+            .commit(None, &sig, &sig, "empty root", &empty_tree, &[])
+            .unwrap();
+        let root_commit = repo.find_commit(root).unwrap();
+
+        let mut index = repo.index().unwrap();
+        index
+            .add_frombuffer(&index_entry(NON_UTF8_PATH), b"hello\n")
+            .unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let child = repo
+            .commit(None, &sig, &sig, "add non-utf8", &tree, &[&root_commit])
+            .unwrap();
+
+        let paths = emit_paths(&repo, child).unwrap();
+        assert!(
+            paths.iter().any(|p| p.as_slice() == NON_UTF8_PATH),
+            "parent-diff must keep non-UTF-8 paths; got {paths:?}"
+        );
+    }
+
+    /// Reproduction: root walk calls `entry.name()` and skips invalid UTF-8.
+    #[test]
+    fn root_commit_emits_non_utf8_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+
+        let mut index = repo.index().unwrap();
+        index
+            .add_frombuffer(&index_entry(NON_UTF8_PATH), b"hello\n")
+            .unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let root = repo
+            .commit(None, &sig, &sig, "root with non-utf8", &tree, &[])
+            .unwrap();
+        assert_eq!(repo.find_commit(root).unwrap().parent_count(), 0);
+
+        let paths = emit_paths(&repo, root).unwrap();
+        assert!(
+            paths.iter().any(|p| p.as_slice() == NON_UTF8_PATH),
+            "root commit must emit non-UTF-8 paths like parent-diff; got {paths:?}"
+        );
+    }
+
     #[test]
     fn rename_inserts_old_blob_bytes() {
         let repo = Repository::open(PARITY).unwrap();

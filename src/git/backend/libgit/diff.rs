@@ -162,13 +162,13 @@ fn emit_file_changes_inner(
     for i in 0..num_deltas {
         let delta = diff.get_delta(i).unwrap();
 
-        let status = match delta.status() {
-            git2::Delta::Added => "A",
-            git2::Delta::Deleted => "D",
-            git2::Delta::Modified => "M",
-            git2::Delta::Renamed => "R",
-            git2::Delta::Copied => "C",
-            git2::Delta::Typechange => "T",
+        let (status, old_path) = match delta.status() {
+            git2::Delta::Added => ("A", None),
+            git2::Delta::Deleted => ("D", None),
+            git2::Delta::Modified => ("M", None),
+            git2::Delta::Renamed => ("R", delta.old_file().path_bytes()),
+            git2::Delta::Copied => ("C", delta.old_file().path_bytes()),
+            git2::Delta::Typechange => ("T", None),
             other => {
                 return Err(git2::Error::from_str(&format!(
                     "unexpected diff delta status in commit history: {other:?}"
@@ -182,14 +182,9 @@ fn emit_file_changes_inner(
             .or_else(|| delta.old_file().path_bytes())
             .unwrap_or(b"unknown");
 
-        let old_path = match delta.status() {
-            git2::Delta::Renamed | git2::Delta::Copied => delta.old_file().path_bytes(),
-            _ => None,
-        };
-
         let is_gitlink = delta.new_file().mode() == git2::FileMode::Commit
             || delta.old_file().mode() == git2::FileMode::Commit;
-        let is_typechange = delta.status() == git2::Delta::Typechange;
+        let is_typechange = status == "T";
 
         // libgit2 DiffFile.size is often 0 for A/D; prefer blob object size.
         let (blob_hex, file_size, add_lines, del_lines) = if is_gitlink || is_typechange {
@@ -215,9 +210,10 @@ fn emit_file_changes_inner(
         } else {
             let old_id = delta.old_file().id();
             let new_id = delta.new_file().id();
-            let cache_path = match delta.status() {
-                git2::Delta::Renamed | git2::Delta::Copied => delta.old_file().path_bytes(),
-                _ => Some(file_path),
+            let cache_path = if matches!(status, "R" | "C") {
+                old_path
+            } else {
+                Some(file_path)
             };
 
             // chmod / content-identical rename: same blob OID. Open one side

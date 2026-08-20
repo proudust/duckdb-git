@@ -45,17 +45,11 @@ pub(crate) fn walk_commit_oids(
         }
     }
 
-    let revwalk_iter: Box<dyn Iterator<Item = _>> = match max_count {
-        Some(count) => Box::new(revwalk.take(count)),
-        None => Box::new(revwalk),
+    let commit_oids: Result<Vec<git2::Oid>, _> = match max_count {
+        Some(count) => revwalk.take(count).collect(),
+        None => revwalk.collect(),
     };
-
-    let mut commit_oids = Vec::new();
-    for oid in revwalk_iter {
-        commit_oids.push(oid?);
-    }
-
-    Ok(commit_oids)
+    Ok(commit_oids?)
 }
 
 pub(crate) fn emit_commit(

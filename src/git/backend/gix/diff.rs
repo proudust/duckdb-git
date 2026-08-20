@@ -1,4 +1,4 @@
-use crate::git::model::{gitlink_numstat, unable_to_read_object};
+use crate::git::model::{gitlink_numstat, same_oid_numstat, unable_to_read_object};
 use crate::git::sink::{oid_hex, CommitSink, FileChangeRef};
 use std::ops::ControlFlow;
 
@@ -14,6 +14,29 @@ fn is_typechange(
         EntryKind::Tree => 3,
     };
     class(previous) != class(current)
+}
+
+/// When old and new blob OIDs are equal (chmod / content-identical rename),
+/// `git log --numstat` skips Myers. `Id<'_>` is not `Eq`; compare `detach()`.
+fn same_oid_for_numstat(
+    change: &gix::object::tree::diff::Change<'_, '_, '_>,
+) -> Option<gix::ObjectId> {
+    use gix::object::tree::diff::Change;
+    match change {
+        Change::Modification {
+            previous_id, id, ..
+        } => {
+            let prev = previous_id.detach();
+            let cur = id.detach();
+            (prev == cur && !prev.is_null()).then_some(cur)
+        }
+        Change::Rewrite { source_id, id, .. } => {
+            let src = source_id.detach();
+            let cur = id.detach();
+            (src == cur && !src.is_null()).then_some(cur)
+        }
+        _ => None,
+    }
 }
 
 /// OIDs whose blob content `git log --numstat` would need to read for this change.
@@ -122,6 +145,13 @@ pub(super) fn emit_file_changes(
             let (add_lines, del_lines) = if is_gitlink || typechange {
                 let (a, d) = gitlink_numstat(status);
                 (Some(a), Some(d))
+            } else if let Some(oid) = same_oid_for_numstat(&change) {
+                if let Err(e) = ensure_blobs_readable(repo, &[oid]) {
+                    missing_blob = Some(e.to_string());
+                    return Err(e);
+                }
+                let obj = repo.find_object(oid)?;
+                same_oid_numstat(obj.data.as_ref())
             } else {
                 let oids = blob_oids_for_numstat(&change);
                 if let Err(e) = ensure_blobs_readable(repo, &oids) {

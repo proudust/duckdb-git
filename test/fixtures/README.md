@@ -13,6 +13,8 @@ Prefer **tag / branch names** in SQL tests (`revision='rename'`, `revision='merg
 ```text
 A (root) ── B (left) ── D (merge) ── F ── H ── I ── K ── L ── O (tip)
          └── C (right) ─┘
+
+P (chmod base) ── Q (chmod +x)     [orphan; not on master]
 ```
 
 Root `A` already includes `tracked.txt` and `space.txt` so typechange / whitespace
@@ -37,6 +39,7 @@ parents share a commit (multi tags, path-filtered in tests):
 | *(untagged)* `gitlink-bump~1`                   | K          | decorate=`[]` coverage             |
 | `refs/tags/gitlink-bump` / `refs/tags/multipath` | L         | same commit                        |
 | `refs/tags/padded-author` / `refs/tags/amended` | O          | same commit; tip                   |
+| `chmod-text` / `chmod-binary`                   | Q          | orphan chmod; not in `contained_tags` of A–O |
 | `refs/heads/master`                             | O (tip)    |                                    |
 
 ### Commits
@@ -53,6 +56,7 @@ parents share a commit (multi tags, path-filtered in tests):
 | `gitlink-bump~1`                                 | add gitlink vendor              | untagged; gitlink `A`, numstat `1 0`, `file_size` NULL               |
 | `gitlink-bump` / `multipath`                     | bump gitlink + multi files      | gitlink `M`; within-list `file_changes` (vendor + 2 paths)           |
 | `padded-author` / `amended`                      | amended                         | same tree as L; `%an` keeps leading space; author ≠ committer        |
+| `chmod-text` / `chmod-binary`                    | chmod +x text and binary        | same-OID `M`: text numstat `0/0`, binary NULL/NULL (chmod-only)      |
 
 ## `missing-blob.git`
 

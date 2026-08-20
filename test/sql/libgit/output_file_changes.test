@@ -142,6 +142,28 @@ WHERE change.path = 'vendor';
 ----
 M	1	1	NULL
 
+# chmod-only text: same blob OID; git log --numstat is 0/0
+query IIII
+SELECT change.status, change.add_lines, change.del_lines, change.file_size
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('./test/fixtures/parity.git',
+                   revision='chmod-text',
+                   max_count=1))
+WHERE change.path = 'mode.txt';
+----
+M	0	0	5
+
+# chmod-only binary: same blob OID; git log --numstat is -/- (NULL/NULL)
+query IIII
+SELECT change.status, change.add_lines, change.del_lines, change.file_size
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('./test/fixtures/parity.git',
+                   revision='chmod-binary',
+                   max_count=1))
+WHERE change.path = 'mode.bin';
+----
+M	NULL	NULL	8
+
 # Missing blob while reading file_changes: same as git log --numstat
 statement error
 SELECT len(file_changes)

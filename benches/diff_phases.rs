@@ -277,6 +277,19 @@ fn run_t0(
             let old_id = delta.old_file().id();
             let new_id = delta.new_file().id();
 
+            // chmod / content-identical rename: one inflate, no Myers.
+            if old_id == new_id && !old_id.is_zero() {
+                let t2 = Instant::now();
+                let blob = find_blob(&repo, new_id)?;
+                Acc::add_timed(&mut acc.blob, t2);
+                let content = blob.content();
+                acc.blob_bytes += content.len() as u64;
+                let t3 = Instant::now();
+                let _ = duckdb_git::microbench::same_oid_numstat(content);
+                Acc::add_timed(&mut acc.numstat, t3);
+                continue;
+            }
+
             let t2 = Instant::now();
             let old_blob = if old_id.is_zero() {
                 None
@@ -322,6 +335,32 @@ fn run_t1(path: &str, skip_similar: bool) -> Result<T1, Box<dyn std::error::Erro
     walk_non_merge(&repo, skip_similar, |_, _, deltas| {
         next.clear();
         for d in deltas {
+            // Same blob OID: prev.get or find_blob once; skip keep[0]/keep[len-1].
+            if d.old_id == d.new_id && !d.old_id.is_zero() {
+                if let Some(s) = prev.get(&d.old_id) {
+                    blob_sizes.push(s.len() as u64);
+                    let _ = duckdb_git::microbench::same_oid_numstat(s);
+                    if !next.contains_key(&d.old_id) {
+                        let t = Instant::now();
+                        next.insert(d.old_id, s.to_vec());
+                        copy_tax += t.elapsed();
+                    }
+                } else {
+                    let t = Instant::now();
+                    let keep = find_blob(&repo, d.old_id)?;
+                    blob += t.elapsed();
+                    let s = keep.content();
+                    blob_sizes.push(s.len() as u64);
+                    let _ = duckdb_git::microbench::same_oid_numstat(s);
+                    if !next.contains_key(&d.old_id) {
+                        let t = Instant::now();
+                        next.insert(d.old_id, s.to_vec());
+                        copy_tax += t.elapsed();
+                    }
+                }
+                continue;
+            }
+
             let mut keep: Vec<git2::Blob<'_>> = Vec::new();
 
             let old_hit = if d.old_id.is_zero() {

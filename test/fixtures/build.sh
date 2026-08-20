@@ -173,6 +173,19 @@ git tag multipath "$L"
 git tag padded-author "$O"
 git tag amended "$O"
 
+# Orphan chmod: not a descendant of O (contained_tags / master stay put).
+# Text + binary chmod-only (not rename — D+A before find_similar has a zero OID).
+git read-tree "$EMPTY_TREE"
+rm -rf ./*
+printf 'mode\n' >mode.txt
+printf 'mode\0bin' >mode.bin
+git add mode.txt mode.bin
+P=$(commit_tree 1700002000 'chmod base')
+git update-index --chmod=+x -- mode.txt mode.bin
+Q=$(commit_tree 1700002100 'chmod +x text and binary' "$P")
+git tag chmod-text "$Q"
+git tag chmod-binary "$Q"
+
 # ── Publish parity.git ───────────────────────────────────────────────
 BARE="$ROOT/parity.git"
 TAG_OID=$(git --git-dir="$WORKDIR/work/.git" rev-parse refs/tags/v1)
@@ -194,6 +207,8 @@ publish_bare "$WORKDIR/work" "$BARE" \
   "refs/tags/multipath=$L" \
   "refs/tags/padded-author=$O" \
   "refs/tags/amended=$O" \
+  "refs/tags/chmod-text=$Q" \
+  "refs/tags/chmod-binary=$Q" \
   "refs/remotes/origin/main=$D" \
   "refs/remotes/origin/HEAD=ref: refs/remotes/origin/main"
 
@@ -228,6 +243,8 @@ rm -f "$MISSING/objects/${MISSING_BLOB:0:2}/${MISSING_BLOB:2}"
   echo "K (gitlink A, untagged) $K"
   echo "L (gitlink M+multipath) $L"
   echo "O (padded+amended tip) $O"
+  echo "P (chmod base, orphan) $P"
+  echo "Q (chmod +x)           $Q"
   echo "missing-blob commit   $MISSING_COMMIT"
   echo "missing-blob blob     $MISSING_BLOB"
 }
@@ -246,6 +263,9 @@ echo "--- gitlink-bump+multipath ---"
 git --git-dir="$BARE" show --name-status --format='' "$L"
 echo "--- amended (empty diff) ---"
 git --git-dir="$BARE" show --name-status --format='' "$O"
+echo "--- chmod-only (M 0/0 text, M -/- binary) ---"
+git --git-dir="$BARE" show --name-status --format='' "$Q"
+git --git-dir="$BARE" show --numstat --format='' "$Q"
 echo "--- missing-blob (expect fatal) ---"
 if git --git-dir="$MISSING" log --numstat -1 >/dev/null 2>&1; then
   echo "expected missing blob to fail" >&2

@@ -1,5 +1,7 @@
 use super::blob_ring::{record_lookup, BlobRing, LookupKind, PendingOlds};
-use crate::git::model::{gitlink_numstat, unable_to_read_object};
+use crate::git::model::{
+    gitlink_numstat, is_binary_content, same_oid_numstat, unable_to_read_object,
+};
 use crate::git::sink::{oid_hex, CommitSink, FileChangeRef};
 use git2::Repository;
 
@@ -200,40 +202,52 @@ fn emit_file_changes_inner(
         } else {
             let old_id = delta.old_file().id();
             let new_id = delta.new_file().id();
-            let old_blob = resolve_blob(ring, repo, old_id, LookupKind::Old)?;
-            let new_blob = resolve_blob(ring, repo, new_id, LookupKind::New)?;
-
-            let (blob_hex, file_size) = if new_blob.is_some() {
-                (
-                    Some(oid_hex(new_id.as_bytes())),
-                    Some(new_blob.as_ref().unwrap().size() as i64),
-                )
-            } else if old_blob.is_some() {
-                (
-                    Some(oid_hex(old_id.as_bytes())),
-                    Some(old_blob.as_ref().unwrap().size() as i64),
-                )
-            } else {
-                (None, Some(0))
-            };
-
-            let old_content = old_blob.as_ref().map(|b| b.content()).unwrap_or(&[]);
-            let new_content = new_blob.as_ref().map(|b| b.content()).unwrap_or(&[]);
-            let line_counts =
-                super::xdiff::diff_line_counts(old_content, new_content, ignore_all_space)
-                    .map_err(|e| git2::Error::from_str(&e.to_string()))?;
-            let (add, del) = match line_counts {
-                Some((a, d)) => (Some(a), Some(d)),
-                None => (None, None),
-            };
-
             let cache_path = match delta.status() {
                 git2::Delta::Renamed | git2::Delta::Copied => delta.old_file().path_bytes(),
                 _ => Some(file_path),
             };
-            note_old(&mut pending, cache_path, old_id, &old_blob);
 
-            (blob_hex, file_size, add, del)
+            // chmod / content-identical rename: same blob OID. Open one side
+            // for binary+size; skip Myers (`git` `may_differ = !oideq`).
+            if old_id == new_id && !old_id.is_zero() {
+                let blob = resolve_blob(ring, repo, new_id, LookupKind::New)?;
+                let loaded = blob.as_ref().expect("non-zero oid");
+                let file_size = Some(loaded.size() as i64);
+                let (add, del) = same_oid_numstat(loaded.content());
+                note_old(&mut pending, cache_path, old_id, &blob);
+                (Some(oid_hex(new_id.as_bytes())), file_size, add, del)
+            } else {
+                let old_blob = resolve_blob(ring, repo, old_id, LookupKind::Old)?;
+                let new_blob = resolve_blob(ring, repo, new_id, LookupKind::New)?;
+
+                let (blob_hex, file_size) = if new_blob.is_some() {
+                    (
+                        Some(oid_hex(new_id.as_bytes())),
+                        Some(new_blob.as_ref().unwrap().size() as i64),
+                    )
+                } else if old_blob.is_some() {
+                    (
+                        Some(oid_hex(old_id.as_bytes())),
+                        Some(old_blob.as_ref().unwrap().size() as i64),
+                    )
+                } else {
+                    (None, Some(0))
+                };
+
+                let old_content = old_blob.as_ref().map(|b| b.content()).unwrap_or(&[]);
+                let new_content = new_blob.as_ref().map(|b| b.content()).unwrap_or(&[]);
+                let line_counts =
+                    super::xdiff::diff_line_counts(old_content, new_content, ignore_all_space)
+                        .map_err(|e| git2::Error::from_str(&e.to_string()))?;
+                let (add, del) = match line_counts {
+                    Some((a, d)) => (Some(a), Some(d)),
+                    None => (None, None),
+                };
+
+                note_old(&mut pending, cache_path, old_id, &old_blob);
+
+                (blob_hex, file_size, add, del)
+            }
         };
 
         let unknown = b"unknown";
@@ -295,7 +309,7 @@ fn emit_root_file_changes(
             match resolve_blob(ring, repo, oid, LookupKind::New) {
                 Ok(Some(blob)) => {
                     let content = blob.content();
-                    let (add_lines, del_lines) = if super::xdiff::is_binary_content(content) {
+                    let (add_lines, del_lines) = if is_binary_content(content) {
                         (None, None)
                     } else {
                         (Some(super::xdiff::count_lines(content)), Some(0))

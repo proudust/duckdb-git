@@ -91,3 +91,8 @@ pub fn diff_line_counts(
 ) -> Result<Option<(i32, i32)>, Box<dyn std::error::Error>> {
     crate::git::backend::libgit::diff_line_counts(old, new, ignore_whitespace)
 }
+
+/// Numstat for a same-OID delta (chmod / identical rename). No Myers.
+pub fn same_oid_numstat(content: &[u8]) -> (Option<i32>, Option<i32>) {
+    crate::git::model::same_oid_numstat(content)
+}

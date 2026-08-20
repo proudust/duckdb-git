@@ -1,3 +1,4 @@
+use crate::git::model::is_binary_content;
 use std::error::Error;
 use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
 
@@ -89,11 +90,6 @@ unsafe extern "C" fn count_lines_cb(
         counter.deleted += 1;
     }
     0
-}
-
-pub(super) fn is_binary_content(content: &[u8]) -> bool {
-    let len = content.len().min(8000);
-    content[..len].contains(&0)
 }
 
 /// Count lines the same way as git's `count_lines` in `diff.c`.

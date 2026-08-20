@@ -13,6 +13,22 @@ fn find_blob<'a>(repo: &'a Repository, oid: git2::Oid) -> Result<git2::Blob<'a>,
     })
 }
 
+/// Blob size without inflating content. Missing or non-blob OIDs map to
+/// [`unable_to_read_object`] (same observable as local [`find_blob`]).
+fn blob_odb_size(repo: &Repository, oid: git2::Oid) -> Result<usize, git2::Error> {
+    let (size, kind) = repo.odb()?.read_header(oid).map_err(|e| {
+        if e.code() == git2::ErrorCode::NotFound {
+            git2::Error::from_str(&unable_to_read_object(oid))
+        } else {
+            e
+        }
+    })?;
+    if kind != git2::ObjectType::Blob {
+        return Err(git2::Error::from_str(&unable_to_read_object(oid)));
+    }
+    Ok(size)
+}
+
 enum ResolvedBlob<'a> {
     Cached(&'a [u8]),
     Loaded(git2::Blob<'a>),
@@ -86,7 +102,7 @@ fn typechange_size(
         record_lookup(LookupKind::Typechange, true, len);
         return Ok(Some(len as i64));
     }
-    let size = find_blob(repo, id)?.size();
+    let size = blob_odb_size(repo, id)?;
     record_lookup(LookupKind::Typechange, false, size);
     Ok(Some(size as i64))
 }

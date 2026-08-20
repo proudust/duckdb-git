@@ -117,15 +117,15 @@ impl GixLogScanner {
                 writer.decorate_name(name);
             }
 
-            let branches: Vec<&str> = self.inner.contained.branches_of(oid).collect();
-            writer.begin_contained_branches(branches.len());
-            for name in &branches {
+            let n = self.inner.contained.branches_of(oid).count();
+            writer.begin_contained_branches(n);
+            for name in self.inner.contained.branches_of(oid) {
                 writer.contained_branch(name);
             }
 
-            let tags: Vec<&str> = self.inner.contained.tags_of(oid).collect();
-            writer.begin_contained_tags(tags.len());
-            for name in &tags {
+            let n = self.inner.contained.tags_of(oid).count();
+            writer.begin_contained_tags(n);
+            for name in self.inner.contained.tags_of(oid) {
                 writer.contained_tag(name);
             }
 

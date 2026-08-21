@@ -140,6 +140,9 @@ impl LibGitLogScanner {
     }
 }
 
+/// Soft cap on DuckDB worker threads for libgit scans. Matches the "up to 4
+/// parallel `read()` calls" assumption in BlobRing's `DEFAULT_CAP` RSS notes;
+/// gix has no equivalent cap. Revisit if thread-scaling benches move the cliff.
 const MAX_LIBGIT_THREADS: usize = 4;
 
 fn compute_parallelism(commit_count: usize) -> (u64, usize) {

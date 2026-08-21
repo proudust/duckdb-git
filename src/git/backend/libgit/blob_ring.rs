@@ -9,9 +9,10 @@ use std::sync::Mutex;
 
 /// Per-batch stored-blob cap after `finish_commit` eviction.
 ///
-/// `read()` uses at most 4 threads, each with its own ring. Cap is not divided
-/// by thread count. Peak RSS can exceed `4 × DEFAULT_CAP`: miss `to_vec` lives
-/// in `PendingOlds` until finish, and surviving OIDs are inserted before evict.
+/// DuckDB may call `read()` on up to 4 workers in parallel; each call owns one
+/// ring. Cap is not divided by thread count. Peak RSS can exceed
+/// `4 × DEFAULT_CAP`: miss `to_vec` lives in `PendingOlds` until finish, and
+/// surviving OIDs are inserted before evict.
 pub const DEFAULT_CAP: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -227,6 +228,9 @@ impl PendingOlds {
 }
 
 /// Path last-old cache: lookup by OID, evict by path LRU until `bytes <= cap`.
+///
+/// Within one `read()` batch, newest-first scan order means a commit's old blob
+/// is often the next commit's new, so caching last-old by path feeds later lookups.
 ///
 /// Lifetime is one DuckDB batch (`BlobRing::new()` in `LibGitLogScanner::read`).
 #[doc(hidden)]

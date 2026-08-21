@@ -184,7 +184,7 @@ mod tests {
         assert_eq!(ring.len(), 0);
     }
 
-    /// Invalid UTF-8 filename used to contrast root tree-walk vs parent-diff.
+    /// Invalid UTF-8 filename; both root and parent diffs must keep raw bytes.
     const NON_UTF8_PATH: &[u8] = b"\xff.txt";
 
     fn index_entry(path: &[u8]) -> git2::IndexEntry {
@@ -246,7 +246,7 @@ mod tests {
         Ok(sink.paths)
     }
 
-    /// Control: parent-diff uses `path_bytes()`, so a non-UTF-8 Added path is kept.
+    /// Parent-diff emits non-UTF-8 paths via `path_bytes()`.
     #[test]
     fn non_root_commit_emits_non_utf8_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -276,7 +276,7 @@ mod tests {
         );
     }
 
-    /// Reproduction: root walk calls `entry.name()` and skips invalid UTF-8.
+    /// Root commits also go through tree-to-tree + `path_bytes()` (not `entry.name()`).
     #[test]
     fn root_commit_emits_non_utf8_path() {
         let dir = tempfile::tempdir().unwrap();

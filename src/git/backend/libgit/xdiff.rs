@@ -137,7 +137,8 @@ fn trim_common_tail(a: &[u8], b: &[u8]) -> (usize, usize) {
     (a.len() - trimmed + recovered, b.len() - trimmed + recovered)
 }
 
-/// Requires libgit2 to be initialized (xdiff uses git__malloc internally).
+/// Myers/`xdl_diff` path requires libgit2 to be initialized (xdiff uses
+/// git__malloc internally). Pure A/D uses [`count_lines`] only.
 ///
 /// Returns `Ok(None)` when either side is binary (matches `git log --numstat` `-`).
 ///
@@ -280,8 +281,8 @@ mod tests {
                 false,
                 Some((2, 0)),
             ),
-            // Pure A/D via xdl_diff: CR-only (no `\n`) → 1 line; invalid UTF-8
-            // is not binary (NUL-only) and still splits on `\n`.
+            // Pure A/D uses count_lines (skips xdl_diff): CR-only (no `\n`) → 1 line;
+            // invalid UTF-8 is not binary (NUL-only) and still splits on `\n`.
             (
                 "added, cr only",
                 &b""[..],

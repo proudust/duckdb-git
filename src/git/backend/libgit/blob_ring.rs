@@ -295,6 +295,9 @@ impl BlobRing {
     /// Apply this commit's olds. Call only after lookups/xdiff have dropped
     /// ring borrows. Empty pending does not touch paths or the LRU, but still
     /// counts as a finish (`commits` / `finish_count`).
+    ///
+    /// After insert→bind, every path has a live LRU entry, so same-finish
+    /// over-cap is resolved by the deque alone (`evict_to_cap`).
     pub fn finish_commit(&mut self, pending: PendingOlds) {
         if pending.paths.is_empty() {
             #[cfg(feature = "blob-ring-stats")]
@@ -368,7 +371,6 @@ impl BlobRing {
 
         // 3. Bind paths (attach before unlink so a hit on an OID that another
         // path is leaving still sees the bytes).
-        let mut this_finish_paths: Vec<Vec<u8>> = Vec::new();
         let mut unlinks: Vec<Oid> = Vec::new();
         for (path, oid) in surviving {
             if !self.by_oid.contains_key(&oid) {
@@ -380,10 +382,10 @@ impl BlobRing {
                 }
                 Some(old_oid) => {
                     unlinks.push(old_oid);
-                    self.bind_path(path, oid, &mut this_finish_paths);
+                    self.bind_path(path, oid);
                 }
                 None => {
-                    self.bind_path(path, oid, &mut this_finish_paths);
+                    self.bind_path(path, oid);
                 }
             }
         }
@@ -394,7 +396,7 @@ impl BlobRing {
         }
 
         // 5. Lazy LRU until bytes <= cap.
-        self.evict_to_cap(&mut this_finish_paths);
+        self.evict_to_cap();
 
         #[cfg(feature = "blob-ring-stats")]
         record_finish(inserts, insert_bytes, bumps);
@@ -413,7 +415,7 @@ impl BlobRing {
         self.lru.push_back((path.to_vec(), self.tick));
     }
 
-    fn bind_path(&mut self, path: Vec<u8>, oid: Oid, this_finish_paths: &mut Vec<Vec<u8>>) {
+    fn bind_path(&mut self, path: Vec<u8>, oid: Oid) {
         self.tick += 1;
         self.by_path.insert(
             path.clone(),
@@ -422,10 +424,9 @@ impl BlobRing {
                 tick: self.tick,
             },
         );
-        self.lru.push_back((path.clone(), self.tick));
+        self.lru.push_back((path, self.tick));
         let cached = self.by_oid.get_mut(&oid).expect("oid ensured in by_oid");
         cached.npaths += 1;
-        this_finish_paths.push(path);
     }
 
     fn dec_npaths(&mut self, oid: Oid) {
@@ -452,36 +453,24 @@ impl BlobRing {
         self.dec_npaths(slot.oid);
     }
 
-    fn evict_to_cap(&mut self, this_finish_paths: &mut Vec<Vec<u8>>) {
+    /// Evict by lazy LRU until `bytes <= cap`. Insert→bind guarantees every
+    /// path has a live deque entry, so same-finish over-cap needs no other
+    /// fallback. Stale ticks are no-ops (do not assert progress per pop).
+    fn evict_to_cap(&mut self) {
         while self.bytes > self.cap {
-            if let Some((path, tick)) = self.lru.pop_front() {
-                match self.by_path.get(&path) {
-                    Some(slot) if slot.tick == tick => {
-                        this_finish_paths.retain(|p| p != &path);
+            match self.lru.pop_front() {
+                Some((path, tick)) => {
+                    if self.by_path.get(&path).is_some_and(|s| s.tick == tick) {
                         self.unlink_path(&path);
                     }
-                    _ => {}
                 }
-            } else if !this_finish_paths.is_empty() {
-                let path = this_finish_paths.remove(0);
-                if self.by_path.contains_key(&path) {
-                    self.unlink_path(&path);
+                None => {
+                    debug_assert!(false, "deque empty but over cap");
+                    break;
                 }
-            } else {
-                let orphans: Vec<Oid> = self
-                    .by_oid
-                    .iter()
-                    .filter(|(_, cached)| cached.npaths == 0)
-                    .map(|(oid, _)| *oid)
-                    .collect();
-                for oid in orphans {
-                    if let Some(cached) = self.by_oid.remove(&oid) {
-                        self.bytes -= cached.bytes.len();
-                    }
-                }
-                break;
             }
         }
+        debug_assert!(self.bytes <= self.cap);
     }
 
     #[cfg(test)]

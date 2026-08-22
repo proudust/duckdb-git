@@ -5,49 +5,74 @@ use crate::git::revision::{unresolved_revision_error, RevisionTerm};
 use crate::git::sink::{oid_hex, CommitSink};
 use std::error::Error;
 
+fn collect_all_tips(repo: &gix::Repository) -> Result<Vec<gix::ObjectId>, Box<dyn Error>> {
+    let mut tips = Vec::new();
+    // Unborn HEAD: skip and still walk other ref tips (like `git log --all`).
+    if let Ok(head) = repo.head_id() {
+        tips.push(head.detach());
+    }
+    let platform = repo.references()?;
+    for reference in platform.all()? {
+        let mut reference = reference.map_err(|e| e.to_string())?;
+        let name = reference.name().as_bstr().to_string();
+        if !crate::git::all_refs::is_log_all_ref(&name) {
+            continue;
+        }
+        if let Ok(commit) = reference.peel_to_commit() {
+            tips.push(commit.id);
+        }
+    }
+    Ok(tips)
+}
+
 pub(crate) fn walk_commit_oids(
     repo: &gix::Repository,
     revision: Option<&[RevisionTerm]>,
     max_count: Option<usize>,
     first_parent: bool,
+    all_refs: bool,
 ) -> Result<Vec<gix::ObjectId>, Box<dyn Error>> {
-    let (tips, hidden) = match revision {
-        Some(terms) => {
-            let mut tips = Vec::new();
-            let mut hidden = Vec::new();
-            for term in terms {
-                // Peel annotated tags like `git log <rev>` (`v1` → underlying commit).
-                let spec = if term.spec.contains("^{") {
-                    term.spec.clone()
-                } else {
-                    format!("{}^{{commit}}", term.spec)
-                };
-                let id = repo
-                    .rev_parse_single(spec.as_str())
-                    .map_err(|_| -> Box<dyn Error> {
-                        unresolved_revision_error(&term.origin).into()
-                    })?
-                    .detach();
-                if term.negate {
-                    hidden.push(id);
-                } else {
-                    tips.push(id);
-                }
-            }
-            (tips, hidden)
-        }
-        None => (vec![repo.head_id()?.detach()], Vec::new()),
+    // Same two-stage order as libgit: all_refs tips first, then revision push/hide.
+    let (mut tips, mut hidden) = if all_refs {
+        (collect_all_tips(repo)?, Vec::new())
+    } else if revision.is_none() {
+        (vec![repo.head_id()?.detach()], Vec::new())
+    } else {
+        (Vec::new(), Vec::new())
     };
+
+    if let Some(terms) = revision {
+        for term in terms {
+            // Peel annotated tags like `git log <rev>` (`v1` → underlying commit).
+            let spec = if term.spec.contains("^{") {
+                term.spec.clone()
+            } else {
+                format!("{}^{{commit}}", term.spec)
+            };
+            let id = repo
+                .rev_parse_single(spec.as_str())
+                .map_err(|_| -> Box<dyn Error> {
+                    unresolved_revision_error(&term.origin).into()
+                })?
+                .detach();
+            if term.negate {
+                hidden.push(id);
+            } else {
+                tips.push(id);
+            }
+        }
+    }
 
     let mut walk = repo.rev_walk(tips).with_hidden(hidden);
     if first_parent {
         walk = walk.first_parent_only();
     }
-    let all = walk.all()?;
+    // Rename iterator binding so it does not shadow the `all_refs` parameter.
+    let walk_iter = walk.all()?;
 
     let oids: Result<Vec<gix::ObjectId>, Box<dyn Error>> = match max_count {
-        Some(count) => all.take(count).map(|info| Ok(info?.id)).collect(),
-        None => all.map(|info| Ok(info?.id)).collect(),
+        Some(count) => walk_iter.take(count).map(|info| Ok(info?.id)).collect(),
+        None => walk_iter.map(|info| Ok(info?.id)).collect(),
     };
 
     oids
@@ -126,7 +151,7 @@ mod peel_tests {
             negate: false,
             origin: "v1".into(),
         }];
-        let oids = walk_commit_oids(&repo, Some(&terms), Some(1), false).unwrap();
+        let oids = walk_commit_oids(&repo, Some(&terms), Some(1), false, false).unwrap();
         assert_eq!(oids.len(), 1);
         let obj = repo.find_object(oids[0]).unwrap();
         assert_eq!(obj.kind, gix::object::Kind::Commit);
@@ -134,5 +159,26 @@ mod peel_tests {
             oids[0].to_string(),
             "ff09a62b129cc936f13bc67c5e2dba84f397c64b"
         );
+    }
+
+    #[test]
+    fn walk_all_refs_matches_rev_list_all() {
+        let repo = gix::open("test/fixtures/parity.git").unwrap();
+        let oids = walk_commit_oids(&repo, None, None, false, true).unwrap();
+        assert_eq!(oids.len(), 14);
+        let default = walk_commit_oids(&repo, None, None, false, false).unwrap();
+        assert_eq!(default.len(), 10);
+        // Orphan tip `common-tail` is only reachable via --all.
+        let orphan = gix::ObjectId::from_hex(b"8a2afdc773a23dcd4aeb85aee134cd884f9463f9").unwrap();
+        assert!(oids.contains(&orphan));
+        assert!(!default.contains(&orphan));
+    }
+
+    #[test]
+    fn walk_all_refs_peels_annotated_tag_tip() {
+        let repo = gix::open("test/fixtures/parity.git").unwrap();
+        let oids = walk_commit_oids(&repo, None, None, false, true).unwrap();
+        let v1 = gix::ObjectId::from_hex(b"ff09a62b129cc936f13bc67c5e2dba84f397c64b").unwrap();
+        assert!(oids.contains(&v1));
     }
 }

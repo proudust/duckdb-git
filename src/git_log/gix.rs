@@ -44,6 +44,7 @@ impl GixLogScanner {
             params.revision.as_deref(),
             params.max_count,
             params.first_parent,
+            params.all_refs,
         )?;
         let decorations = if schema::needs_refs(column_indices) {
             collect_refs(repo, params.decorate)?

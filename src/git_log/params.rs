@@ -46,6 +46,7 @@ const BACKEND: &str = "backend";
 const DECORATE: &str = "decorate";
 const DIFF_MERGES: &str = "diff_merges";
 const FIRST_PARENT: &str = "first_parent";
+const ALL_REFS: &str = "all_refs";
 const RENAME_THRESHOLD: &str = "rename_threshold";
 
 fn extract_revision_tokens(value: &Value) -> Result<Vec<String>, Box<dyn Error>> {
@@ -70,6 +71,8 @@ pub(crate) struct GitLogParameter {
     pub decorate: DecorateFormat,
     pub diff_merges: DiffMerges,
     pub first_parent: bool,
+    /// Walk heads/tags/remotes (+ HEAD when resolvable), like `git log --all`.
+    pub all_refs: bool,
     /// Rename similarity threshold (0–100). `None` uses libgit2 default (50).
     /// `0` disables rename detection (tree diff only: separate A/D).
     pub rename_threshold: Option<u16>,
@@ -109,6 +112,10 @@ pub fn named_parameters() -> Vec<(String, LogicalTypeHandle)> {
         ),
         (
             FIRST_PARENT.to_string(),
+            LogicalTypeHandle::from(LogicalTypeId::Boolean),
+        ),
+        (
+            ALL_REFS.to_string(),
             LogicalTypeHandle::from(LogicalTypeId::Boolean),
         ),
         (
@@ -193,6 +200,11 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Erro
         .map(|value| parse_first_parent(&value.to_string()))
         .unwrap_or(false);
 
+    let all_refs = bind
+        .get_named_parameter(ALL_REFS)
+        .map(|value| parse_all_refs(&value.to_string()))
+        .unwrap_or(false);
+
     let diff_merges = resolve_diff_merges(first_parent, diff_merges_explicit, diff_merges);
 
     let rename_threshold = bind
@@ -209,6 +221,7 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Erro
         decorate,
         diff_merges,
         first_parent,
+        all_refs,
         rename_threshold,
     })
 }
@@ -224,6 +237,10 @@ fn parse_ignore_all_space(value: &str) -> bool {
 }
 
 fn parse_first_parent(value: &str) -> bool {
+    value.eq_ignore_ascii_case("true")
+}
+
+fn parse_all_refs(value: &str) -> bool {
     value.eq_ignore_ascii_case("true")
 }
 
@@ -308,6 +325,14 @@ mod tests {
         assert!(parse_first_parent("TRUE"));
         assert!(!parse_first_parent("false"));
         assert!(!parse_first_parent(""));
+    }
+
+    #[test]
+    fn parse_all_refs_test() {
+        assert!(parse_all_refs("true"));
+        assert!(parse_all_refs("TRUE"));
+        assert!(!parse_all_refs("false"));
+        assert!(!parse_all_refs(""));
     }
 
     #[test]

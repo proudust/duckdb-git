@@ -7,42 +7,61 @@ use crate::git::sink::{oid_hex, CommitSink};
 use git2::Repository;
 use std::error::Error;
 
+fn push_all_tips(repo: &Repository, revwalk: &mut git2::Revwalk<'_>) -> Result<(), Box<dyn Error>> {
+    // Unborn HEAD: skip and still walk other ref tips (like `git log --all`).
+    let _ = revwalk.push_head();
+    for reference in repo.references()? {
+        let reference = reference?;
+        let name = reference.name().unwrap_or("");
+        if !crate::git::all_refs::is_log_all_ref(name) {
+            continue;
+        }
+        // Symbolic refs (e.g. refs/remotes/origin/HEAD) and non-commit tips: skip.
+        if let Ok(commit) = reference.peel_to_commit() {
+            revwalk.push(commit.id())?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn walk_commit_oids(
     repo: &Repository,
     revision: Option<&[RevisionTerm]>,
     max_count: Option<usize>,
     first_parent: bool,
+    all_refs: bool,
 ) -> Result<Vec<git2::Oid>, Box<dyn Error>> {
     let mut revwalk = repo.revwalk()?;
 
-    match revision {
-        Some(terms) => {
-            for term in terms {
-                let obj = repo
-                    .revparse_single(&term.spec)
-                    .map_err(|_| -> Box<dyn Error> {
-                        unresolved_revision_error(&term.origin).into()
-                    })?;
-                // Peel annotated tags (and anything else) to a commit, like `git log <rev>`.
-                let id = obj
-                    .peel_to_commit()
-                    .map(|c| c.id())
-                    .map_err(|e| -> Box<dyn Error> {
-                        format!(
-                            "revision '{}' does not resolve to a commit: {e}",
-                            term.origin
-                        )
-                        .into()
-                    })?;
-                if term.negate {
-                    revwalk.hide(id)?;
-                } else {
-                    revwalk.push(id)?;
-                }
+    if all_refs {
+        push_all_tips(repo, &mut revwalk)?;
+    } else if revision.is_none() {
+        revwalk.push_head()?;
+    }
+
+    if let Some(terms) = revision {
+        for term in terms {
+            let obj = repo
+                .revparse_single(&term.spec)
+                .map_err(|_| -> Box<dyn Error> {
+                    unresolved_revision_error(&term.origin).into()
+                })?;
+            // Peel annotated tags (and anything else) to a commit, like `git log <rev>`.
+            let id = obj
+                .peel_to_commit()
+                .map(|c| c.id())
+                .map_err(|e| -> Box<dyn Error> {
+                    format!(
+                        "revision '{}' does not resolve to a commit: {e}",
+                        term.origin
+                    )
+                    .into()
+                })?;
+            if term.negate {
+                revwalk.hide(id)?;
+            } else {
+                revwalk.push(id)?;
             }
-        }
-        None => {
-            revwalk.push_head()?;
         }
     }
 
@@ -406,5 +425,33 @@ mod tests {
         assert!(emit(&repo, c2, false, DiffMerges::Off, &mut ring).is_err());
         assert_eq!(ring.finish_count(), 1);
         assert!(ring.lookup(old_keep).is_none());
+    }
+}
+
+#[cfg(test)]
+mod walk_all_refs_tests {
+    use super::walk_commit_oids;
+    use git2::Repository;
+
+    const PARITY: &str = "test/fixtures/parity.git";
+
+    #[test]
+    fn walk_all_refs_matches_rev_list_all() {
+        let repo = Repository::open(PARITY).unwrap();
+        let oids = walk_commit_oids(&repo, None, None, false, true).unwrap();
+        assert_eq!(oids.len(), 14);
+        let default = walk_commit_oids(&repo, None, None, false, false).unwrap();
+        assert_eq!(default.len(), 10);
+        let orphan = git2::Oid::from_str("8a2afdc773a23dcd4aeb85aee134cd884f9463f9").unwrap();
+        assert!(oids.contains(&orphan));
+        assert!(!default.contains(&orphan));
+    }
+
+    #[test]
+    fn walk_all_refs_peels_annotated_tag_tip() {
+        let repo = Repository::open(PARITY).unwrap();
+        let oids = walk_commit_oids(&repo, None, None, false, true).unwrap();
+        let v1 = git2::Oid::from_str("ff09a62b129cc936f13bc67c5e2dba84f397c64b").unwrap();
+        assert!(oids.contains(&v1));
     }
 }

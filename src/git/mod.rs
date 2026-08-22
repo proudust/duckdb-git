@@ -1,3 +1,4 @@
+pub mod all_refs;
 pub mod backend;
 pub mod ident;
 pub mod model;

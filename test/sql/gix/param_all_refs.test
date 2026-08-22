@@ -1,0 +1,123 @@
+# name: test/sql/gix/param_all_refs.test
+# description: all_refs parameter (gix backend)
+# group: [git]
+
+require duckdb_git
+
+require-env GIX_BACKEND 1
+
+# Default walk is HEAD only (master tip lineage): 10 commits
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git', backend='gix');
+----
+10
+
+# all_refs=true matches `git log --all` on this fixture: 14 commits
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git', all_refs=true, backend='gix');
+----
+14
+
+# Orphan tips are excluded by default
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git', backend='gix')
+WHERE commit_id IN (
+  'f855169da2255f746299b29dae8121882c92afca',
+  '8a2afdc773a23dcd4aeb85aee134cd884f9463f9'
+);
+----
+0
+
+# Orphan tips appear when all_refs=true
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git', all_refs=true, backend='gix')
+WHERE commit_id IN (
+  'f855169da2255f746299b29dae8121882c92afca',
+  '8a2afdc773a23dcd4aeb85aee134cd884f9463f9'
+);
+----
+2
+
+# Hide combines with all_refs (git log --all ^note → 8)
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             all_refs=true,
+             revision=['^note'],
+             backend='gix');
+----
+8
+
+# Range without all_refs
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='left..merged',
+             backend='gix');
+----
+2
+
+# Range + all_refs (git rev-list --all left..merged → 12)
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             all_refs=true,
+             revision='left..merged',
+             backend='gix');
+----
+12
+
+# first_parent alone (HEAD first-parent): 9
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             first_parent=true,
+             backend='gix');
+----
+9
+
+# all_refs + first_parent count is 14 (same as all_refs alone on this fixture)
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             all_refs=true,
+             first_parent=true,
+             backend='gix');
+----
+14
+
+# Distinguisher: side/right tip is reachable via its own ref under --all --first-parent
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             all_refs=true,
+             first_parent=true,
+             backend='gix')
+WHERE commit_id = '28264d80ac316c97deb80c3ee52721ed6451e4b2';
+----
+1
+
+# Without all_refs, merged --first-parent excludes the second-parent tip
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             first_parent=true,
+             backend='gix')
+WHERE commit_id = '28264d80ac316c97deb80c3ee52721ed6451e4b2';
+----
+0
+
+# max_count applies after all_refs walk
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             all_refs=true,
+             max_count=5,
+             backend='gix');
+----
+5

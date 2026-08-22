@@ -298,4 +298,16 @@ if git --git-dir="$MISSING" log --numstat -1 >/dev/null 2>&1; then
   echo "expected missing blob to fail" >&2
   exit 1
 fi
+echo "--- commit counts ---"
+head_count=$(git --git-dir="$BARE" rev-list --count HEAD)
+all_count=$(git --git-dir="$BARE" rev-list --count --all)
+echo "HEAD count: $head_count"
+echo "--all count: $all_count"
+case "$head_count/$all_count" in
+  10/14) ;;
+  *)
+    echo "expected HEAD=10 and --all=14, got HEAD=$head_count --all=$all_count" >&2
+    exit 1
+    ;;
+esac
 echo "Done."

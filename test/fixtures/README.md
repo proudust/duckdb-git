@@ -42,6 +42,15 @@ parents share a commit (multi tags, path-filtered in tests):
 - F: `typechange` / `binary` / `whitespace` / `deleted`
 - L: `gitlink-bump` / `multipath`
 
+### Commit counts
+
+| Walk | Count |
+| ---- | ----- |
+| HEAD (`git log` / default `git_log`) | **10** |
+| `--all` / `all_refs=true` | **14** |
+
+Orphan lineages (`chmod-text`, `common-tail`) are included only in the `--all` walk.
+
 ### Refs
 
 | Ref                                             | Tip        | Notes                              |

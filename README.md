@@ -66,6 +66,9 @@ from (
 
 -- git log --first-parent
 select commit_id, message from git_log('.', first_parent=true);
+
+-- Walk all heads/tags/remotes (like `git log --all`)
+select commit_id, message from git_log('.', all_refs=true);
 ```
 
 ## Function Reference
@@ -83,6 +86,7 @@ Returns commit history as a table.
 | `max_count`        | `INTEGER`                    | `NULL` (all)  | Maximum number of commits to return                           |
 | `ignore_all_space` | `BOOLEAN`                    | `false`       | Ignore whitespace changes in diffs                            |
 | `first_parent`     | `BOOLEAN`                    | `false`       | Follow only the first parent at merge commits (history walk). Defaults merge diffs to first-parent unless `diff_merges` is set explicitly. |
+| `all_refs`         | `BOOLEAN`                    | `false`       | Walk refs under `refs/heads`, `refs/tags`, and `refs/remotes`, plus HEAD when resolvable (`git log --all`). Combines with `revision` like git. |
 | `diff_merges`      | `VARCHAR`                    | `'off'` [^1]  | How to show diffs for merge commits (`off`, `first-parent`). When omitted with `first_parent=true`, behaves as `'first-parent'`. |
 | `decorate`         | `VARCHAR`                    | `'short'`     | Ref name format in the `decorate` column (`short` or `full`). |
 | `backend`          | `VARCHAR`                    | `'libgit'`    | Determines how history is retrieved. [^2]                     |

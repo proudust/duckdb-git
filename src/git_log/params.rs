@@ -45,6 +45,8 @@ const IGNORE_ALL_SPACE: &str = "ignore_all_space";
 const BACKEND: &str = "backend";
 const DECORATE: &str = "decorate";
 const DIFF_MERGES: &str = "diff_merges";
+const FIRST_PARENT: &str = "first_parent";
+const RENAME_THRESHOLD: &str = "rename_threshold";
 
 fn extract_revision_tokens(value: &Value) -> Result<Vec<String>, Box<dyn Error>> {
     match value.logical_type_id() {
@@ -67,6 +69,10 @@ pub(crate) struct GitLogParameter {
     pub backend: BackendKind,
     pub decorate: DecorateFormat,
     pub diff_merges: DiffMerges,
+    pub first_parent: bool,
+    /// Rename similarity threshold (0–100). `None` uses libgit2 default (50).
+    /// `0` disables rename detection (tree diff only: separate A/D).
+    pub rename_threshold: Option<u16>,
 }
 
 pub fn parameters() -> Vec<LogicalTypeHandle> {
@@ -100,6 +106,14 @@ pub fn named_parameters() -> Vec<(String, LogicalTypeHandle)> {
         (
             DIFF_MERGES.to_string(),
             LogicalTypeHandle::from(LogicalTypeId::Varchar),
+        ),
+        (
+            FIRST_PARENT.to_string(),
+            LogicalTypeHandle::from(LogicalTypeId::Boolean),
+        ),
+        (
+            RENAME_THRESHOLD.to_string(),
+            LogicalTypeHandle::from(LogicalTypeId::Integer),
         ),
     ]
 }
@@ -167,11 +181,24 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Erro
         .transpose()?
         .unwrap_or_else(DecorateFormat::default);
 
+    let diff_merges_explicit = bind.get_named_parameter(DIFF_MERGES).is_some();
     let diff_merges = bind
         .get_named_parameter(DIFF_MERGES)
         .map(|value| DiffMerges::parse(&value.to_string()))
         .transpose()?
-        .unwrap_or_else(DiffMerges::default);
+        .unwrap_or(DiffMerges::Off);
+
+    let first_parent = bind
+        .get_named_parameter(FIRST_PARENT)
+        .map(|value| parse_first_parent(&value.to_string()))
+        .unwrap_or(false);
+
+    let diff_merges = resolve_diff_merges(first_parent, diff_merges_explicit, diff_merges);
+
+    let rename_threshold = bind
+        .get_named_parameter(RENAME_THRESHOLD)
+        .map(|value| parse_rename_threshold(&value.to_string()))
+        .transpose()?;
 
     Ok(GitLogParameter {
         repo_path,
@@ -181,6 +208,8 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Erro
         backend,
         decorate,
         diff_merges,
+        first_parent,
+        rename_threshold,
     })
 }
 
@@ -192,6 +221,35 @@ fn parse_max_count(value: &str) -> Result<usize, Box<dyn Error>> {
 
 fn parse_ignore_all_space(value: &str) -> bool {
     value.eq_ignore_ascii_case("true")
+}
+
+fn parse_first_parent(value: &str) -> bool {
+    value.eq_ignore_ascii_case("true")
+}
+
+/// When `first_parent` is enabled and `diff_merges` was omitted, match `git log
+/// --first-parent` by defaulting merge diffs to first-parent as well. An explicit
+/// `diff_merges='off'` still wins (same as `--first-parent --diff-merges=off`).
+fn resolve_diff_merges(
+    first_parent: bool,
+    diff_merges_explicit: bool,
+    diff_merges: DiffMerges,
+) -> DiffMerges {
+    if first_parent && !diff_merges_explicit {
+        DiffMerges::FirstParent
+    } else {
+        diff_merges
+    }
+}
+
+fn parse_rename_threshold(value: &str) -> Result<u16, Box<dyn Error>> {
+    let n: i64 = value
+        .parse()
+        .map_err(|_| format!("invalid rename_threshold: '{value}'"))?;
+    if !(0..=100).contains(&n) {
+        return Err(format!("rename_threshold must be 0–100, got {n}").into());
+    }
+    Ok(n as u16)
 }
 
 #[cfg(test)]
@@ -228,11 +286,52 @@ mod tests {
     }
 
     #[test]
+    fn parse_rename_threshold_test() {
+        assert_eq!(parse_rename_threshold("0").unwrap(), 0);
+        assert_eq!(parse_rename_threshold("50").unwrap(), 50);
+        assert_eq!(parse_rename_threshold("100").unwrap(), 100);
+        assert!(parse_rename_threshold("101").is_err());
+        assert!(parse_rename_threshold("-1").is_err());
+    }
+
+    #[test]
     fn parse_ignore_all_space_test() {
         assert!(parse_ignore_all_space("true"));
         assert!(parse_ignore_all_space("TRUE"));
         assert!(!parse_ignore_all_space("false"));
         assert!(!parse_ignore_all_space(""));
+    }
+
+    #[test]
+    fn parse_first_parent_test() {
+        assert!(parse_first_parent("true"));
+        assert!(parse_first_parent("TRUE"));
+        assert!(!parse_first_parent("false"));
+        assert!(!parse_first_parent(""));
+    }
+
+    #[test]
+    fn resolve_diff_merges_test() {
+        assert_eq!(
+            resolve_diff_merges(true, false, DiffMerges::Off),
+            DiffMerges::FirstParent
+        );
+        assert_eq!(
+            resolve_diff_merges(true, true, DiffMerges::Off),
+            DiffMerges::Off
+        );
+        assert_eq!(
+            resolve_diff_merges(true, true, DiffMerges::FirstParent),
+            DiffMerges::FirstParent
+        );
+        assert_eq!(
+            resolve_diff_merges(false, false, DiffMerges::Off),
+            DiffMerges::Off
+        );
+        assert_eq!(
+            resolve_diff_merges(false, true, DiffMerges::FirstParent),
+            DiffMerges::FirstParent
+        );
     }
 
     #[test]

@@ -35,7 +35,12 @@ impl LibGitLogScanner {
         let handle = CachedRepo::open(repo_path)?;
         let repo = handle.repo();
 
-        let commit_oids = walk_commit_oids(repo, params.revision.as_deref(), params.max_count)?;
+        let commit_oids = walk_commit_oids(
+            repo,
+            params.revision.as_deref(),
+            params.max_count,
+            params.first_parent,
+        )?;
         let decorations = if schema::needs_refs(column_indices) {
             collect_refs(repo, params.decorate)?
         } else {
@@ -107,6 +112,7 @@ impl LibGitLogScanner {
                     params.ignore_all_space,
                     skip_file_changes,
                     params.diff_merges,
+                    params.rename_threshold,
                     &mut writer,
                     &mut ring,
                 )?;

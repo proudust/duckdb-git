@@ -9,6 +9,7 @@ pub(crate) fn walk_commit_oids(
     repo: &gix::Repository,
     revision: Option<&[RevisionTerm]>,
     max_count: Option<usize>,
+    first_parent: bool,
 ) -> Result<Vec<gix::ObjectId>, Box<dyn Error>> {
     let (tips, hidden) = match revision {
         Some(terms) => {
@@ -38,7 +39,10 @@ pub(crate) fn walk_commit_oids(
         None => (vec![repo.head_id()?.detach()], Vec::new()),
     };
 
-    let walk = repo.rev_walk(tips).with_hidden(hidden);
+    let mut walk = repo.rev_walk(tips).with_hidden(hidden);
+    if first_parent {
+        walk = walk.first_parent_only();
+    }
     let all = walk.all()?;
 
     let oids: Result<Vec<gix::ObjectId>, Box<dyn Error>> = match max_count {
@@ -122,7 +126,7 @@ mod peel_tests {
             negate: false,
             origin: "v1".into(),
         }];
-        let oids = walk_commit_oids(&repo, Some(&terms), Some(1)).unwrap();
+        let oids = walk_commit_oids(&repo, Some(&terms), Some(1), false).unwrap();
         assert_eq!(oids.len(), 1);
         let obj = repo.find_object(oids[0]).unwrap();
         assert_eq!(obj.kind, gix::object::Kind::Commit);

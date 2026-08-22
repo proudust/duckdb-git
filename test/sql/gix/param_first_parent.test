@@ -1,0 +1,162 @@
+# name: test/sql/gix/param_first_parent.test
+# description: first_parent parameter (gix backend)
+# group: [git]
+
+require duckdb_git
+
+require-env GIX_BACKEND 1
+
+# first-parent walk from merge: 3 commits, excludes second-parent side (right)
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             first_parent=true,
+             backend='gix');
+----
+3
+
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             first_parent=true,
+             backend='gix')
+WHERE commit_id = '28264d80ac316c97deb80c3ee52721ed6451e4b2';
+----
+0
+
+# max_count applies after first-parent simplification
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             first_parent=true,
+             max_count=2,
+             backend='gix');
+----
+2
+
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             first_parent=true,
+             max_count=2,
+             backend='gix')
+WHERE commit_id = '28264d80ac316c97deb80c3ee52721ed6451e4b2';
+----
+0
+
+# default walk unchanged (4 commits including right branch)
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             backend='gix');
+----
+4
+
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             backend='gix')
+WHERE commit_id IN (
+  '42e16c94127de3a9363f8a6f14fa5ca85856d8b4',
+  '28264d80ac316c97deb80c3ee52721ed6451e4b2',
+  'fc021d9befa4cb7437bc815878ed20fd9ea37a2b',
+  'ff09a62b129cc936f13bc67c5e2dba84f397c64b'
+);
+----
+4
+
+# explicit false matches default
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             first_parent=false,
+             backend='gix');
+----
+4
+
+# first-parent chain via revision anchors
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             first_parent=true,
+             max_count=1,
+             backend='gix');
+----
+42e16c94127de3a9363f8a6f14fa5ca85856d8b4
+
+# first-parent walk still reports all parents on merge commits (like git log --first-parent)
+query I
+SELECT len(parents)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             first_parent=true,
+             max_count=1,
+             backend='gix');
+----
+2
+
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged~1',
+             first_parent=true,
+             max_count=1,
+             backend='gix');
+----
+fc021d9befa4cb7437bc815878ed20fd9ea37a2b
+
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged~2',
+             first_parent=true,
+             max_count=1,
+             backend='gix');
+----
+ff09a62b129cc936f13bc67c5e2dba84f397c64b
+
+# first_parent=true defaults merge diffs to first-parent (like git log --first-parent)
+query II
+SELECT change.path, change.status
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('./test/fixtures/parity.git',
+                   revision='merged',
+                   first_parent=true,
+                   max_count=1,
+                   backend='gix'))
+ORDER BY change.path;
+----
+right.txt	A
+
+# non-merge commits still emit file_changes when first_parent=true
+query II
+SELECT change.path, change.status
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('./test/fixtures/parity.git',
+                   revision='note',
+                   first_parent=true,
+                   max_count=1,
+                   backend='gix'))
+ORDER BY change.path;
+----
+note.txt	A
+
+# explicit diff_merges='off' overrides
+query I
+SELECT len(file_changes)
+FROM git_log('./test/fixtures/parity.git',
+             revision='merged',
+             first_parent=true,
+             diff_merges='off',
+             max_count=1,
+             backend='gix');
+----
+0

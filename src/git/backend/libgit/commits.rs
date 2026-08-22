@@ -11,6 +11,7 @@ pub(crate) fn walk_commit_oids(
     repo: &Repository,
     revision: Option<&[RevisionTerm]>,
     max_count: Option<usize>,
+    first_parent: bool,
 ) -> Result<Vec<git2::Oid>, Box<dyn Error>> {
     let mut revwalk = repo.revwalk()?;
 
@@ -45,6 +46,10 @@ pub(crate) fn walk_commit_oids(
         }
     }
 
+    if first_parent {
+        revwalk.simplify_first_parent()?;
+    }
+
     let commit_oids: Result<Vec<git2::Oid>, _> = match max_count {
         Some(count) => revwalk.take(count).collect(),
         None => revwalk.collect(),
@@ -58,6 +63,7 @@ pub(crate) fn emit_commit(
     ignore_all_space: bool,
     skip_file_changes: bool,
     diff_merges: DiffMerges,
+    rename_threshold: Option<u16>,
     sink: &mut impl CommitSink,
     ring: &mut BlobRing,
 ) -> Result<(), Box<dyn Error>> {
@@ -81,7 +87,14 @@ pub(crate) fn emit_commit(
 
     let skip = skip_file_changes || (diff_merges == DiffMerges::Off && parent_count > 1);
     if !skip {
-        emit_file_changes(repo, &commit, ignore_all_space, sink, ring)?;
+        emit_file_changes(
+            repo,
+            &commit,
+            ignore_all_space,
+            rename_threshold,
+            sink,
+            ring,
+        )?;
     }
 
     Ok(())
@@ -119,6 +132,7 @@ mod tests {
             false,
             skip_file_changes,
             diff_merges,
+            None,
             &mut sink,
             ring,
         );
@@ -140,6 +154,7 @@ mod tests {
             false,
             true,
             DiffMerges::FirstParent,
+            None,
             &mut skipped,
             &mut skip_ring,
         )
@@ -156,6 +171,7 @@ mod tests {
             false,
             false,
             DiffMerges::FirstParent,
+            None,
             &mut kept,
             &mut keep_ring,
         )
@@ -239,6 +255,7 @@ mod tests {
             false,
             false,
             DiffMerges::Off,
+            None,
             &mut sink,
             &mut BlobRing::new(),
         )?;

@@ -111,10 +111,12 @@ pub(super) fn emit_file_changes(
     repo: &Repository,
     commit: &git2::Commit,
     ignore_all_space: bool,
+    rename_threshold: Option<u16>,
     sink: &mut impl CommitSink,
     ring: &mut BlobRing,
 ) -> Result<(), git2::Error> {
-    let pending = emit_file_changes_inner(repo, commit, ignore_all_space, sink, ring)?;
+    let pending =
+        emit_file_changes_inner(repo, commit, ignore_all_space, rename_threshold, sink, ring)?;
     ring.finish_commit(pending);
     Ok(())
 }
@@ -123,6 +125,7 @@ fn emit_file_changes_inner(
     repo: &Repository,
     commit: &git2::Commit,
     ignore_all_space: bool,
+    rename_threshold: Option<u16>,
     sink: &mut impl CommitSink,
     ring: &BlobRing,
 ) -> Result<PendingOlds, git2::Error> {
@@ -147,12 +150,15 @@ fn emit_file_changes_inner(
 
     // Root commits are all Added; rename detection needs A+D pairs.
     if parent_tree.is_some() {
-        let mut find_opts = git2::DiffFindOptions::new();
-        find_opts
-            .renames(true)
-            .rename_threshold(50)
-            .ignore_whitespace(ignore_all_space);
-        diff.find_similar(Some(&mut find_opts))?;
+        let threshold = rename_threshold.unwrap_or(50);
+        if threshold > 0 {
+            let mut find_opts = git2::DiffFindOptions::new();
+            find_opts
+                .renames(true)
+                .rename_threshold(threshold)
+                .ignore_whitespace(ignore_all_space);
+            diff.find_similar(Some(&mut find_opts))?;
+        }
     }
 
     let num_deltas = diff.deltas().len();

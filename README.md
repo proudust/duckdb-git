@@ -63,6 +63,9 @@ select commit_id, change.path, change.add_lines, change.del_lines
 from (
   select commit_id, unnest(file_changes) as change from git_log('.', max_count=10, diff_merges='first_parent')
 );
+
+-- git log --first-parent
+select commit_id, message from git_log('.', first_parent=true);
 ```
 
 ## Function Reference
@@ -79,11 +82,12 @@ Returns commit history as a table.
 | `revision`         | `VARCHAR` or `LIST(VARCHAR)` | `NULL` (HEAD) | One or more revspecs, same syntax as `git log`. [^1]          |
 | `max_count`        | `INTEGER`                    | `NULL` (all)  | Maximum number of commits to return                           |
 | `ignore_all_space` | `BOOLEAN`                    | `false`       | Ignore whitespace changes in diffs                            |
-| `diff_merges`      | `VARCHAR`                    | `'off'`       | How to show diffs for merge commits (`off`, `first-parent`).  |
+| `first_parent`     | `BOOLEAN`                    | `false`       | Follow only the first parent at merge commits (history walk). Defaults merge diffs to first-parent unless `diff_merges` is set explicitly. |
+| `diff_merges`      | `VARCHAR`                    | `'off'` [^1]  | How to show diffs for merge commits (`off`, `first-parent`). When omitted with `first_parent=true`, behaves as `'first-parent'`. |
 | `decorate`         | `VARCHAR`                    | `'short'`     | Ref name format in the `decorate` column (`short` or `full`). |
 | `backend`          | `VARCHAR`                    | `'libgit'`    | Determines how history is retrieved. [^2]                     |
 
-[^1]: Symmetric differences (`a...b`) are not supported.
+[^1]: Symmetric differences (`a...b`) are not supported. With `first_parent=true`, merge diffs default to first-parent (like `git log --first-parent`); pass `diff_merges='off'` for `--diff-merges=off`.
 [^2]: If you build with the `gix-backend` feature included, you can also specify `gix`.
 [^3]: The repository is cached as a bare clone in the OS temp directory (`$TMPDIR/duckdb-git/...`) and refreshed on each query. Each backend keeps its own cache directory. Concurrent queries for the same URL — including from separate DuckDB processes — are serialized by an advisory lock on `$TMPDIR/duckdb-git/<backend>/<cache-dir>.lock`, so one waits while the other fetches or clones. Cache identity collapses scheme/host case, default ports, `.git`, query/fragment, and percent-encoding; path letter-case and `http` vs `https` stay distinct. Only anonymous HTTP(S) is supported — URLs with embedded credentials (`https://user:token@...`) are rejected. Do not put secrets in the URL; the cache may be readable by other users on shared machines.
 

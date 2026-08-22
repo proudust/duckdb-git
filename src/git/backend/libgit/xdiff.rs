@@ -11,6 +11,8 @@ const XDF_WHITESPACE_FLAGS: c_ulong = XDF_IGNORE_WHITESPACE
     | XDF_IGNORE_WHITESPACE_AT_EOL
     | XDF_IGNORE_CR_AT_EOL;
 const XDL_EMIT_NO_HUNK_HDR: c_ulong = 1 << 1;
+/// git `diff.context` default used by `git log --numstat` (`builtin_diffstat`).
+const GIT_NUMSTAT_CONTEXT: c_long = 3;
 
 #[repr(C)]
 struct mmfile_t {
@@ -112,31 +114,6 @@ pub(super) fn count_lines(data: &[u8]) -> i32 {
     count
 }
 
-/// Trim identical bytes from the end of both slices, breaking at a newline.
-/// Ported from git's `trim_common_tail` (xdiff-interface.c).
-fn trim_common_tail(a: &[u8], b: &[u8]) -> (usize, usize) {
-    const BLK: usize = 1024;
-    let smaller = a.len().min(b.len());
-    let mut trimmed: usize = 0;
-
-    while trimmed + BLK <= smaller
-        && a[a.len() - trimmed - BLK..a.len() - trimmed]
-            == b[b.len() - trimmed - BLK..b.len() - trimmed]
-    {
-        trimmed += BLK;
-    }
-
-    let mut recovered: usize = 0;
-    while recovered < trimmed {
-        recovered += 1;
-        if a[a.len() - trimmed + recovered - 1] == b'\n' {
-            break;
-        }
-    }
-
-    (a.len() - trimmed + recovered, b.len() - trimmed + recovered)
-}
-
 /// Myers/`xdl_diff` path requires libgit2 to be initialized (xdiff uses
 /// git__malloc internally). Pure A/D uses [`count_lines`] only.
 ///
@@ -144,6 +121,9 @@ fn trim_common_tail(a: &[u8], b: &[u8]) -> (usize, usize) {
 ///
 /// Added/Deleted (one side empty) skip Myers/`xdl_diff` and use [`count_lines`],
 /// matching `git log --numstat` for pure A/D.
+///
+/// Modified blobs use full content (no pre-trim) with `ctxlen=3`, matching git's
+/// `--numstat` path where `xdi_diff` skips `trim_common_tail` when context > 0.
 pub fn diff_line_counts(
     old: &[u8],
     new: &[u8],
@@ -161,15 +141,13 @@ pub fn diff_line_counts(
         return Ok(Some((0, count_lines(old))));
     }
 
-    let (old_len, new_len) = trim_common_tail(old, new);
-
     let mut mf1 = mmfile_t {
         ptr: old.as_ptr() as *mut c_char,
-        size: old_len as c_long,
+        size: old.len() as c_long,
     };
     let mut mf2 = mmfile_t {
         ptr: new.as_ptr() as *mut c_char,
-        size: new_len as c_long,
+        size: new.len() as c_long,
     };
 
     let xpp = xpparam_t {
@@ -185,7 +163,7 @@ pub fn diff_line_counts(
     };
 
     let xecfg = xdemitconf_t {
-        ctxlen: 0,
+        ctxlen: GIT_NUMSTAT_CONTEXT,
         interhunkctxlen: 0,
         flags: XDL_EMIT_NO_HUNK_HDR,
         find_func: None,
@@ -349,5 +327,18 @@ mod tests {
             let counts = diff_line_counts(old, new, ignore_ws).unwrap();
             assert_eq!(counts, expected, "{label}");
         }
+    }
+
+    #[test]
+    fn diff_line_counts_common_tail_suffix_matches_git_numstat() {
+        let _ = git2::Repository::open(".");
+        let old =
+            std::fs::read("test/fixtures/blobs/trim_repro_old.bin").expect("trim_repro_old.bin");
+        let new =
+            std::fs::read("test/fixtures/blobs/trim_repro_new.bin").expect("trim_repro_new.bin");
+        assert_eq!(old.len(), 6203);
+        assert_eq!(new.len(), 6679);
+        let counts = diff_line_counts(&old, &new, false).unwrap();
+        assert_eq!(counts, Some((60, 42)));
     }
 }

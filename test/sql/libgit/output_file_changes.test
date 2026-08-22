@@ -164,6 +164,17 @@ WHERE change.path = 'mode.bin';
 ----
 M	NULL	NULL	8
 
+# Long common suffix: git log --numstat is 60/42 (pre-trim xdiff gave 58/40)
+query III
+SELECT change.status, change.add_lines, change.del_lines
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('./test/fixtures/parity.git',
+                   revision='common-tail',
+                   max_count=1))
+WHERE change.path = 'trim_repro.txt';
+----
+M	60	42
+
 # Missing blob while reading file_changes: same as git log --numstat
 statement error
 SELECT len(file_changes)

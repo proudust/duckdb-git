@@ -186,6 +186,21 @@ Q=$(commit_tree 1700002100 'chmod +x text and binary' "$P")
 git tag chmod-text "$Q"
 git tag chmod-binary "$Q"
 
+# Orphan common-tail: long shared suffix where pre-trim changes numstat (60/42 vs 58/40).
+if [[ ! -f "$ROOT/blobs/trim_repro_old.bin" || ! -f "$ROOT/blobs/trim_repro_new.bin" ]]; then
+  echo "missing test/fixtures/blobs/trim_repro_{old,new}.bin (see test/fixtures/README.md)" >&2
+  exit 1
+fi
+git read-tree "$EMPTY_TREE"
+rm -rf ./*
+cp "$ROOT/blobs/trim_repro_old.bin" trim_repro.txt
+git add trim_repro.txt
+S=$(commit_tree 1700002200 'common-tail base')
+cp "$ROOT/blobs/trim_repro_new.bin" trim_repro.txt
+git add trim_repro.txt
+R=$(commit_tree 1700002300 'common-tail modified' "$S")
+git tag common-tail "$R"
+
 # ── Publish parity.git ───────────────────────────────────────────────
 BARE="$ROOT/parity.git"
 TAG_OID=$(git --git-dir="$WORKDIR/work/.git" rev-parse refs/tags/v1)
@@ -209,6 +224,7 @@ publish_bare "$WORKDIR/work" "$BARE" \
   "refs/tags/amended=$O" \
   "refs/tags/chmod-text=$Q" \
   "refs/tags/chmod-binary=$Q" \
+  "refs/tags/common-tail=$R" \
   "refs/remotes/origin/main=$D" \
   "refs/remotes/origin/HEAD=ref: refs/remotes/origin/main"
 
@@ -245,6 +261,7 @@ rm -f "$MISSING/objects/${MISSING_BLOB:0:2}/${MISSING_BLOB:2}"
   echo "O (padded+amended tip) $O"
   echo "P (chmod base, orphan) $P"
   echo "Q (chmod +x)           $Q"
+  echo "R (common-tail)        $R"
   echo "missing-blob commit   $MISSING_COMMIT"
   echo "missing-blob blob     $MISSING_BLOB"
 }
@@ -266,6 +283,16 @@ git --git-dir="$BARE" show --name-status --format='' "$O"
 echo "--- chmod-only (M 0/0 text, M -/- binary) ---"
 git --git-dir="$BARE" show --name-status --format='' "$Q"
 git --git-dir="$BARE" show --numstat --format='' "$Q"
+echo "--- common-tail (M 60/42; pre-trim regression) ---"
+common_tail_numstat=$(git --git-dir="$BARE" show --numstat --format='' "$R" -- trim_repro.txt)
+echo "$common_tail_numstat"
+case "$common_tail_numstat" in
+  $'60\t42\ttrim_repro.txt') ;;
+  *)
+    echo "expected 60/42 for trim_repro.txt, got: $common_tail_numstat" >&2
+    exit 1
+    ;;
+esac
 echo "--- missing-blob (expect fatal) ---"
 if git --git-dir="$MISSING" log --numstat -1 >/dev/null 2>&1; then
   echo "expected missing blob to fail" >&2

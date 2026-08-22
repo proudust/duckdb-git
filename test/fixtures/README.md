@@ -5,6 +5,23 @@
 Bare repository used by E2E tests under `test/sql/{libgit,gix}/`. Rebuild with
 `./test/fixtures/build.sh` (fixed author/committer timestamps → stable OIDs).
 
+### `blobs/`
+
+Binary inputs checked in for fixture builds (not fetched at CI time):
+
+| File | Role |
+| ---- | ---- |
+| `trim_repro_old.bin` / `trim_repro_new.bin` | recharts `DefaultTooltipContent.tsx` pair; `common-tail` orphan commit; unit test for numstat `60/42` |
+
+Obtain from recharts if missing:
+
+```bash
+COMMIT=265bb5b012cd265a0b2b659e352aef4c9e853c91
+FILE=src/component/DefaultTooltipContent.tsx
+git cat-file blob ${COMMIT}^:${FILE} > test/fixtures/blobs/trim_repro_old.bin
+git cat-file blob ${COMMIT}:${FILE} > test/fixtures/blobs/trim_repro_new.bin
+```
+
 Prefer **tag / branch names** in SQL tests (`revision='rename'`, `revision='merged'`,
 …). Keep raw SHAs mainly in `param_revision.test`, which exercises revspec syntax.
 
@@ -15,6 +32,7 @@ A (root) ── B (left) ── D (merge) ── F ── H ── I ── K �
          └── C (right) ─┘
 
 P (chmod base) ── Q (chmod +x)     [orphan; not on master]
+S (common-tail base) ── R (common-tail modified)   [orphan; trim_repro numstat 60/42]
 ```
 
 Root `A` already includes `tracked.txt` and `space.txt` so typechange / whitespace
@@ -40,6 +58,7 @@ parents share a commit (multi tags, path-filtered in tests):
 | `refs/tags/gitlink-bump` / `refs/tags/multipath` | L         | same commit                        |
 | `refs/tags/padded-author` / `refs/tags/amended` | O          | same commit; tip                   |
 | `chmod-text` / `chmod-binary`                   | Q          | orphan chmod; not in `contained_tags` of A–O |
+| `common-tail`                                   | R          | orphan; long common suffix; numstat `60/42` on `trim_repro.txt` |
 | `refs/heads/master`                             | O (tip)    |                                    |
 
 ### Commits
@@ -57,6 +76,7 @@ parents share a commit (multi tags, path-filtered in tests):
 | `gitlink-bump` / `multipath`                     | bump gitlink + multi files      | gitlink `M`; within-list `file_changes` (vendor + 2 paths)           |
 | `padded-author` / `amended`                      | amended                         | same tree as L; `%an` keeps leading space; author ≠ committer        |
 | `chmod-text` / `chmod-binary`                    | chmod +x text and binary        | same-OID `M`: text numstat `0/0`, binary NULL/NULL (chmod-only)      |
+| `common-tail`                                    | common-tail modified            | `trim_repro.txt` `M`; numstat `60/42` (git default; pre-trim was 58/40) |
 
 ## `missing-blob.git`
 

@@ -59,13 +59,20 @@ FROM git_log('./test/fixtures/parity.git',
 ----
 [gitlink-bump, multipath]
 
-# Tags and a branch decorate the same tip
+# Tags and a branch decorate the same tip (includes HEAD — tip is current HEAD)
 query I
 SELECT list_sort(decorate)
 FROM git_log('./test/fixtures/parity.git',
              revision='padded-author', max_count=1);
 ----
-[amended, master, padded-author]
+[HEAD, amended, master, padded-author]
+
+query I
+SELECT list_sort(decorate)
+FROM git_log('./test/fixtures/parity.git',
+             revision='padded-author', max_count=1, decorate='full');
+----
+[HEAD, refs/heads/master, refs/tags/amended, refs/tags/padded-author]
 
 # decorate='no' is rejected (use projection pushdown to omit the column)
 statement error

@@ -42,8 +42,12 @@ impl PartialOrd for HeapEntry {
     }
 }
 
-/// Walk commits reachable from `tips` that are also in `interesting`, in
-/// committer-date priority-queue order (git log default-like).
+/// Walk commits reachable from `tips` in committer-date priority-queue order
+/// (git log default-like).
+///
+/// When `interesting` is `Some`, only OIDs in that set are enqueued (hide /
+/// revision-range filtering). When `None`, every parent of an emitted commit
+/// is eligible (no precomputed interesting set).
 ///
 /// `max_count` is applied as streaming `take(N)`: do not pop once `N` results
 /// have been emitted (`Some(0)` yields an empty vec immediately).
@@ -51,7 +55,7 @@ impl PartialOrd for HeapEntry {
 /// `parents` should already respect `first_parent` if that mode is active.
 pub fn walk_by_commit_date(
     tips: impl IntoIterator<Item = OidBytes>,
-    interesting: &HashSet<OidBytes>,
+    interesting: Option<&HashSet<OidBytes>>,
     max_count: Option<usize>,
     mut parents: impl FnMut(OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>>,
     mut committer_seconds: impl FnMut(OidBytes) -> Result<i64, Box<dyn Error>>,
@@ -60,6 +64,8 @@ pub fn walk_by_commit_date(
         return Ok(Vec::new());
     }
 
+    let is_interesting = |oid: &OidBytes| interesting.map_or(true, |s| s.contains(oid));
+
     let mut heap = BinaryHeap::new();
     let mut queued = HashSet::new();
     let mut visited = HashSet::new();
@@ -67,7 +73,7 @@ pub fn walk_by_commit_date(
     let mut next_ctr: u64 = 0;
 
     for tip in tips {
-        if !interesting.contains(&tip) || !queued.insert(tip) {
+        if !is_interesting(&tip) || !queued.insert(tip) {
             continue;
         }
         let seconds = committer_seconds(tip)?;
@@ -94,7 +100,7 @@ pub fn walk_by_commit_date(
         }
 
         for parent in parents(oid)? {
-            if !interesting.contains(&parent) || !queued.insert(parent) {
+            if !is_interesting(&parent) || !queued.insert(parent) {
                 continue;
             }
             let seconds = committer_seconds(parent)?;
@@ -144,7 +150,7 @@ mod tests {
 
         let got = walk_by_commit_date(
             [c],
-            &interesting,
+            Some(&interesting),
             Some(1),
             |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
             |id| Ok(*times.get(&id).unwrap()),
@@ -173,7 +179,7 @@ mod tests {
 
         let got = walk_by_commit_date(
             [m, o],
-            &interesting,
+            Some(&interesting),
             None,
             |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
             |id| Ok(*times.get(&id).unwrap()),
@@ -194,7 +200,7 @@ mod tests {
         // Seed lo before hi: FIFO must emit lo first despite smaller OID bytes.
         let got = walk_by_commit_date(
             [lo, hi],
-            &interesting,
+            Some(&interesting),
             None,
             |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
             |id| Ok(*times.get(&id).unwrap()),
@@ -204,7 +210,7 @@ mod tests {
 
         let got_rev = walk_by_commit_date(
             [hi, lo],
-            &interesting,
+            Some(&interesting),
             None,
             |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
             |id| Ok(*times.get(&id).unwrap()),
@@ -228,7 +234,7 @@ mod tests {
 
         let got = walk_by_commit_date(
             [c],
-            &interesting,
+            Some(&interesting),
             None,
             |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
             |id| Ok(*times.get(&id).unwrap()),
@@ -243,7 +249,7 @@ mod tests {
         let interesting = HashSet::from([t]);
         let got = walk_by_commit_date(
             [t],
-            &interesting,
+            Some(&interesting),
             Some(0),
             |_| Ok(vec![]),
             |_| Ok(1),
@@ -259,13 +265,31 @@ mod tests {
         let interesting = HashSet::from([in_set]);
         let got = walk_by_commit_date(
             [out_set, in_set],
-            &interesting,
+            Some(&interesting),
             None,
             |_| Ok(vec![]),
             |_| Ok(10),
         )
         .unwrap();
         assert_eq!(got, vec![in_set]);
+    }
+
+    #[test]
+    fn none_interesting_walks_tip_to_parent() {
+        let c = oid(1);
+        let p = oid(2);
+        let parents: HashMap<_, _> = [(c, vec![p]), (p, vec![])].into();
+        let times: HashMap<_, _> = [(c, 100i64), (p, 50)].into();
+
+        let got = walk_by_commit_date(
+            [c],
+            None,
+            None,
+            |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
+            |id| Ok(*times.get(&id).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(got, vec![c, p]);
     }
 
     #[test]

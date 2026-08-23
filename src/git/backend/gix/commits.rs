@@ -53,6 +53,7 @@ pub(crate) fn walk_commit_oids(
 ) -> Result<Vec<gix::ObjectId>, Box<dyn Error>> {
     // Same two-stage order as libgit: all_refs tips first, then revision push/hide.
     // Only `tips` seed the date PQ; `hidden` is used solely for interesting-set construction.
+    let has_hide = revision.is_some_and(|t| t.iter().any(|x| x.negate));
     let (mut tips, mut hidden) = if all_refs {
         (collect_all_tips(repo)?, Vec::new())
     } else if revision.is_none() {
@@ -84,23 +85,28 @@ pub(crate) fn walk_commit_oids(
         }
     }
 
-    let tips_for_pq = tips.clone();
-    let mut walk = repo.rev_walk(tips).with_hidden(hidden);
-    if first_parent {
-        walk = walk.first_parent_only();
-    }
-    let walk_iter = walk.all()?;
+    let tip_bytes: Vec<OidBytes> = tips.iter().copied().map(oid_to_bytes).collect();
 
-    // Interesting set: full revwalk, never truncated by max_count.
-    let interesting: HashSet<OidBytes> = walk_iter
-        .map(|info| Ok(oid_to_bytes(info?.id)))
-        .collect::<Result<HashSet<_>, Box<dyn Error>>>()?;
-
-    let tip_bytes: Vec<OidBytes> = tips_for_pq.into_iter().map(oid_to_bytes).collect();
+    let interesting = if has_hide {
+        let mut walk = repo.rev_walk(tips).with_hidden(hidden);
+        if first_parent {
+            walk = walk.first_parent_only();
+        }
+        let walk_iter = walk.all()?;
+        // Interesting set: full revwalk, never truncated by max_count.
+        Some(
+            walk_iter
+                .map(|info| Ok(oid_to_bytes(info?.id)))
+                .collect::<Result<HashSet<_>, Box<dyn Error>>>()?,
+        )
+    } else {
+        drop(hidden);
+        None
+    };
 
     let ordered = walk_by_commit_date(
         tip_bytes,
-        &interesting,
+        interesting.as_ref(),
         max_count,
         |id| {
             let commit = repo.find_commit(bytes_to_oid(id))?;
@@ -181,6 +187,29 @@ mod tests {
         let oids = walk_commit_oids(&repo, Some(&terms), Some(1), false, false).unwrap();
         assert_eq!(oids.len(), 1);
         assert_eq!(oids[0].to_string(), V1_COMMIT);
+    }
+
+    #[test]
+    fn walk_with_hide_keeps_interesting_filter() {
+        let repo = gix::open(PARITY).unwrap();
+        let terms = [
+            RevisionTerm {
+                spec: "rename".into(),
+                negate: false,
+                origin: "rename".into(),
+            },
+            RevisionTerm {
+                spec: "note".into(),
+                negate: true,
+                origin: "^note".into(),
+            },
+        ];
+        let oids = walk_commit_oids(&repo, Some(&terms), None, false, false).unwrap();
+        assert_eq!(oids.len(), 1);
+        assert_eq!(
+            oids[0].to_string(),
+            "95937d42365c812ebe6893e756cde1d0d86ae10b"
+        );
     }
 
     #[test]

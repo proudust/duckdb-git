@@ -17,10 +17,10 @@ fn bytes_to_oid(bytes: OidBytes) -> Oid {
     Oid::from_bytes(&bytes).expect("20-byte sha1")
 }
 
-/// Push all_refs tips onto `revwalk` and return every pushed tip OID (for PQ seeding).
+/// Collect all_refs tip OIDs in `git log --all` seed order: raw refname bytes, then HEAD.
 ///
-/// Order matches `git log --all`: filtered refs in raw refname byte order, then HEAD.
-fn push_all_tips(repo: &Repository, revwalk: &mut git2::Revwalk<'_>) -> Result<Vec<Oid>, Box<dyn Error>> {
+/// Does not touch a revwalk; callers that need hide/interesting push these tips themselves.
+fn collect_all_tips(repo: &Repository) -> Result<Vec<Oid>, Box<dyn Error>> {
     // Sort key is raw bytes (git `for_each_ref`), not lossy UTF-8, so libgit/gix agree
     // even when a ref name is not valid UTF-8.
     let mut named: Vec<(Vec<u8>, Oid)> = Vec::new();
@@ -38,39 +38,29 @@ fn push_all_tips(repo: &Repository, revwalk: &mut git2::Revwalk<'_>) -> Result<V
     }
     named.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut tips = Vec::new();
-    for (_, id) in named {
-        revwalk.push(id)?;
-        tips.push(id);
-    }
+    let mut tips: Vec<Oid> = named.into_iter().map(|(_, id)| id).collect();
 
     // Unborn HEAD: skip (like `git log --all`). Duplicate of a named ref: skip via caller queued set.
     if let Ok(head) = repo.head() {
         if let Ok(commit) = head.peel_to_commit() {
-            let id = commit.id();
-            revwalk.push(id)?;
-            tips.push(id);
+            tips.push(commit.id());
         }
     }
     Ok(tips)
 }
 
-pub(crate) fn walk_commit_oids(
+fn resolve_revision_tips(
     repo: &Repository,
     revision: Option<&[RevisionTerm]>,
-    max_count: Option<usize>,
-    first_parent: bool,
     all_refs: bool,
-) -> Result<Vec<Oid>, Box<dyn Error>> {
-    let mut revwalk = repo.revwalk()?;
+) -> Result<(Vec<Oid>, Vec<Oid>), Box<dyn Error>> {
     let mut tips: Vec<Oid> = Vec::new();
+    let mut hidden: Vec<Oid> = Vec::new();
 
     if all_refs {
-        tips = push_all_tips(repo, &mut revwalk)?;
+        tips = collect_all_tips(repo)?;
     } else if revision.is_none() {
-        let head = repo.head()?.peel_to_commit()?.id();
-        revwalk.push(head)?;
-        tips.push(head);
+        tips.push(repo.head()?.peel_to_commit()?.id());
     }
 
     if let Some(terms) = revision {
@@ -92,28 +82,53 @@ pub(crate) fn walk_commit_oids(
                     .into()
                 })?;
             if term.negate {
-                revwalk.hide(id)?;
+                hidden.push(id);
             } else {
-                revwalk.push(id)?;
                 tips.push(id);
             }
         }
     }
 
-    if first_parent {
-        revwalk.simplify_first_parent()?;
-    }
+    Ok((tips, hidden))
+}
 
-    // Interesting set: full revwalk, never truncated by max_count.
-    let interesting: HashSet<OidBytes> = revwalk
-        .map(|oid| oid.map(oid_to_bytes))
-        .collect::<Result<HashSet<_>, _>>()?;
+pub(crate) fn walk_commit_oids(
+    repo: &Repository,
+    revision: Option<&[RevisionTerm]>,
+    max_count: Option<usize>,
+    first_parent: bool,
+    all_refs: bool,
+) -> Result<Vec<Oid>, Box<dyn Error>> {
+    let has_hide = revision.is_some_and(|t| t.iter().any(|x| x.negate));
+    let (tips, hidden) = resolve_revision_tips(repo, revision, all_refs)?;
 
     let tip_bytes: Vec<OidBytes> = tips.into_iter().map(oid_to_bytes).collect();
 
+    let interesting = if has_hide {
+        let mut revwalk = repo.revwalk()?;
+        for id in tip_bytes.iter().copied().map(bytes_to_oid) {
+            revwalk.push(id)?;
+        }
+        for id in hidden {
+            revwalk.hide(id)?;
+        }
+        if first_parent {
+            revwalk.simplify_first_parent()?;
+        }
+        // Interesting set: full revwalk, never truncated by max_count.
+        Some(
+            revwalk
+                .map(|oid| oid.map(oid_to_bytes))
+                .collect::<Result<HashSet<_>, _>>()?,
+        )
+    } else {
+        drop(hidden);
+        None
+    };
+
     let ordered = walk_by_commit_date(
         tip_bytes,
-        &interesting,
+        interesting.as_ref(),
         max_count,
         |id| {
             let commit = repo.find_commit(bytes_to_oid(id))?;
@@ -504,10 +519,12 @@ mod tests {
 
 #[cfg(test)]
 mod walk_all_refs_tests {
-    use super::{push_all_tips, walk_commit_oids};
+    use super::{collect_all_tips, walk_commit_oids};
+    use crate::git::revision::RevisionTerm;
     use git2::Repository;
 
     const PARITY: &str = "test/fixtures/parity.git";
+    const V1_COMMIT: &str = "ff09a62b129cc936f13bc67c5e2dba84f397c64b";
 
     #[test]
     fn walk_all_refs_matches_rev_list_all() {
@@ -525,15 +542,50 @@ mod walk_all_refs_tests {
     fn walk_all_refs_peels_annotated_tag_tip() {
         let repo = Repository::open(PARITY).unwrap();
         let oids = walk_commit_oids(&repo, None, None, false, true).unwrap();
-        let v1 = git2::Oid::from_str("ff09a62b129cc936f13bc67c5e2dba84f397c64b").unwrap();
+        let v1 = git2::Oid::from_str(V1_COMMIT).unwrap();
         assert!(oids.contains(&v1));
+    }
+
+    #[test]
+    fn walk_hide_free_max_count_one_peels_annotated_tag() {
+        let repo = Repository::open(PARITY).unwrap();
+        let terms = [RevisionTerm {
+            spec: "v1".into(),
+            negate: false,
+            origin: "v1".into(),
+        }];
+        let oids = walk_commit_oids(&repo, Some(&terms), Some(1), false, false).unwrap();
+        assert_eq!(oids.len(), 1);
+        assert_eq!(oids[0].to_string(), V1_COMMIT);
+    }
+
+    #[test]
+    fn walk_with_hide_keeps_interesting_filter() {
+        let repo = Repository::open(PARITY).unwrap();
+        let terms = [
+            RevisionTerm {
+                spec: "rename".into(),
+                negate: false,
+                origin: "rename".into(),
+            },
+            RevisionTerm {
+                spec: "note".into(),
+                negate: true,
+                origin: "^note".into(),
+            },
+        ];
+        let oids = walk_commit_oids(&repo, Some(&terms), None, false, false).unwrap();
+        assert_eq!(oids.len(), 1);
+        assert_eq!(
+            oids[0].to_string(),
+            "95937d42365c812ebe6893e756cde1d0d86ae10b"
+        );
     }
 
     #[test]
     fn all_tips_seed_order_is_refname_then_head() {
         let repo = Repository::open(PARITY).unwrap();
-        let mut revwalk = repo.revwalk().unwrap();
-        let tips = push_all_tips(&repo, &mut revwalk).unwrap();
+        let tips = collect_all_tips(&repo).unwrap();
 
         let mut expected_named: Vec<(Vec<u8>, git2::Oid)> = Vec::new();
         for reference in repo.references().unwrap() {

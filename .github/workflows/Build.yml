@@ -13,6 +13,11 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      # Tag pushes leave a detached HEAD with no refs/heads/*; unit tests that open
+      # "." (contained, remote file:// clone) need a local branch tip.
+      - name: Attach local branch for tests
+        run: git symbolic-ref -q HEAD >/dev/null || git checkout -B main
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -36,6 +41,9 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
+
+      - name: Attach local branch for tests
+        run: git symbolic-ref -q HEAD >/dev/null || git checkout -B main
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

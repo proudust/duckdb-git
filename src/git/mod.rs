@@ -1,5 +1,6 @@
 pub mod all_refs;
 pub mod backend;
+pub mod date_walk;
 pub mod ident;
 pub mod model;
 pub mod options;

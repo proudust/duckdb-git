@@ -111,3 +111,34 @@ FROM git_log('./test/fixtures/parity.git',
              max_count=5);
 ----
 5
+
+# Date-priority order: all_refs tip matches `git log --all -1`
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git', all_refs=true, max_count=1);
+----
+8a2afdc773a23dcd4aeb85aee134cd884f9463f9
+
+# Single-threaded: parallel table-scan can reorder small max_count batches
+statement ok
+SET threads=1;
+
+# Date-priority order: all_refs max_count=3 matches `git log --all -n 3`
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git', all_refs=true, max_count=3);
+----
+8a2afdc773a23dcd4aeb85aee134cd884f9463f9
+c536dab42a2d4c0468b8a72f83276e751e826f60
+f855169da2255f746299b29dae8121882c92afca
+
+# Date-priority order: default HEAD walk matches `git log -n 5`
+query I
+SELECT commit_id
+FROM git_log('./test/fixtures/parity.git', max_count=5);
+----
+abe0518abd296b9b9a45755e12ec6ebec26c17a7
+48b38a077c6ef03744be652baee901373a8ae06d
+cc8160f1738b5b070eb029313f3c376364ad076f
+95937d42365c812ebe6893e756cde1d0d86ae10b
+5b05f738e9af3deb3ae4c34cd99d1388b81be9ed

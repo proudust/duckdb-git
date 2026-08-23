@@ -1,11 +1,12 @@
 /// Whether a ref name is included by `git log --all` under this extension's
 /// intentional subset: `refs/heads`, `refs/tags`, and `refs/remotes` only.
+#[cfg(test)]
 pub(crate) fn is_log_all_ref(name: &str) -> bool {
     is_log_all_ref_bytes(name.as_bytes())
 }
 
-/// Byte-wise form of [`is_log_all_ref`] so tip seeding can filter and sort like
-/// git `for_each_ref` even when a ref name is not valid UTF-8.
+/// Byte-wise form so tip seeding can filter and sort like git `for_each_ref`
+/// even when a ref name is not valid UTF-8.
 pub(crate) fn is_log_all_ref_bytes(name: &[u8]) -> bool {
     name.starts_with(b"refs/heads/")
         || name.starts_with(b"refs/tags/")

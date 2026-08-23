@@ -235,15 +235,15 @@ fn emit_file_changes_inner(
                 let old_blob = resolve_blob(ring, repo, old_id, LookupKind::Old)?;
                 let new_blob = resolve_blob(ring, repo, new_id, LookupKind::New)?;
 
-                let (blob_hex, file_size) = if new_blob.is_some() {
+                let (blob_hex, file_size) = if let Some(blob) = &new_blob {
                     (
                         Some(oid_hex(new_id.as_bytes())),
-                        Some(new_blob.as_ref().unwrap().size() as i64),
+                        Some(blob.size() as i64),
                     )
-                } else if old_blob.is_some() {
+                } else if let Some(blob) = &old_blob {
                     (
                         Some(oid_hex(old_id.as_bytes())),
-                        Some(old_blob.as_ref().unwrap().size() as i64),
+                        Some(blob.size() as i64),
                     )
                 } else {
                     (None, Some(0))

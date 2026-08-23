@@ -193,7 +193,7 @@ pub fn bind(bind: &BindInfo) -> Result<GitLogParameter, Box<dyn std::error::Erro
         .get_named_parameter(DIFF_MERGES)
         .map(|value| DiffMerges::parse(&value.to_string()))
         .transpose()?
-        .unwrap_or(DiffMerges::Off);
+        .unwrap_or_else(DiffMerges::default);
 
     let first_parent = bind
         .get_named_parameter(FIRST_PARENT)

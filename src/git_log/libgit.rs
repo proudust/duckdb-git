@@ -1,5 +1,6 @@
 use crate::git::backend::libgit::{
     build_contained_index, collect_refs, emit_commit, walk_commit_oids, BlobRing, CachedRepo,
+    EmitOpts,
 };
 use crate::git::ref_index::ContainedIndex;
 use crate::git::sink::CommitSink;
@@ -110,10 +111,12 @@ impl LibGitLogScanner {
                 emit_commit(
                     repo,
                     *oid,
-                    params.ignore_all_space,
-                    skip_file_changes,
-                    params.diff_merges,
-                    params.rename_threshold,
+                    &EmitOpts {
+                        ignore_all_space: params.ignore_all_space,
+                        skip_file_changes,
+                        diff_merges: params.diff_merges,
+                        rename_threshold: params.rename_threshold,
+                    },
                     &mut writer,
                     &mut ring,
                 )?;

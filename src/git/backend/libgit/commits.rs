@@ -138,13 +138,17 @@ pub(crate) fn walk_commit_oids(
     Ok(ordered.into_iter().map(bytes_to_oid).collect())
 }
 
+pub(crate) struct EmitOpts {
+    pub ignore_all_space: bool,
+    pub skip_file_changes: bool,
+    pub diff_merges: DiffMerges,
+    pub rename_threshold: Option<u16>,
+}
+
 pub(crate) fn emit_commit(
     repo: &Repository,
     oid: git2::Oid,
-    ignore_all_space: bool,
-    skip_file_changes: bool,
-    diff_merges: DiffMerges,
-    rename_threshold: Option<u16>,
+    opts: &EmitOpts,
     sink: &mut impl CommitSink,
     ring: &mut BlobRing,
 ) -> Result<(), Box<dyn Error>> {
@@ -166,13 +170,13 @@ pub(crate) fn emit_commit(
         sink.parent(&parent_hex);
     }
 
-    let skip = skip_file_changes || (diff_merges == DiffMerges::Off && parent_count > 1);
+    let skip = opts.skip_file_changes || (opts.diff_merges == DiffMerges::Off && parent_count > 1);
     if !skip {
         emit_file_changes(
             repo,
             &commit,
-            ignore_all_space,
-            rename_threshold,
+            opts.ignore_all_space,
+            opts.rename_threshold,
             sink,
             ring,
         )?;
@@ -210,10 +214,12 @@ mod tests {
         let result = emit_commit(
             repo,
             oid,
-            false,
-            skip_file_changes,
-            diff_merges,
-            None,
+            &EmitOpts {
+                ignore_all_space: false,
+                skip_file_changes,
+                diff_merges,
+                rename_threshold: None,
+            },
             &mut sink,
             ring,
         );
@@ -232,10 +238,12 @@ mod tests {
         emit_commit(
             &repo,
             oid,
-            false,
-            true,
-            DiffMerges::FirstParent,
-            None,
+            &EmitOpts {
+                ignore_all_space: false,
+                skip_file_changes: true,
+                diff_merges: DiffMerges::FirstParent,
+                rename_threshold: None,
+            },
             &mut skipped,
             &mut skip_ring,
         )
@@ -249,10 +257,12 @@ mod tests {
         emit_commit(
             &repo,
             oid,
-            false,
-            false,
-            DiffMerges::FirstParent,
-            None,
+            &EmitOpts {
+                ignore_all_space: false,
+                skip_file_changes: false,
+                diff_merges: DiffMerges::FirstParent,
+                rename_threshold: None,
+            },
             &mut kept,
             &mut keep_ring,
         )
@@ -333,10 +343,12 @@ mod tests {
         emit_commit(
             repo,
             oid,
-            false,
-            false,
-            DiffMerges::Off,
-            None,
+            &EmitOpts {
+                ignore_all_space: false,
+                skip_file_changes: false,
+                diff_merges: DiffMerges::Off,
+                rename_threshold: None,
+            },
             &mut sink,
             &mut BlobRing::new(),
         )?;
@@ -408,7 +420,7 @@ mod tests {
 
         let mut ring = BlobRing::new();
         emit(&repo, oid, false, DiffMerges::Off, &mut ring).unwrap();
-        assert!(ring.len() >= 1);
+        assert!(!ring.is_empty());
         assert_eq!(ring.lookup(old_id), Some(expected.as_slice()));
         assert!(ring.contains_path(b"note.txt"));
         assert!(!ring.contains_path(b"renamed.txt"));

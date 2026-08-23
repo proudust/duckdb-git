@@ -340,11 +340,12 @@ fn run_t1(path: &str, skip_similar: bool) -> Result<T1, Box<dyn std::error::Erro
                 if let Some(s) = prev.get(&d.old_id) {
                     blob_sizes.push(s.len() as u64);
                     let _ = duckdb_git::microbench::same_oid_numstat(s);
-                    if !next.contains_key(&d.old_id) {
+                    next.entry(d.old_id).or_insert_with(|| {
                         let t = Instant::now();
-                        next.insert(d.old_id, s.to_vec());
+                        let v = s.to_vec();
                         copy_tax += t.elapsed();
-                    }
+                        v
+                    });
                 } else {
                     let t = Instant::now();
                     let keep = find_blob(&repo, d.old_id)?;
@@ -352,11 +353,12 @@ fn run_t1(path: &str, skip_similar: bool) -> Result<T1, Box<dyn std::error::Erro
                     let s = keep.content();
                     blob_sizes.push(s.len() as u64);
                     let _ = duckdb_git::microbench::same_oid_numstat(s);
-                    if !next.contains_key(&d.old_id) {
+                    next.entry(d.old_id).or_insert_with(|| {
                         let t = Instant::now();
-                        next.insert(d.old_id, s.to_vec());
+                        let v = s.to_vec();
                         copy_tax += t.elapsed();
-                    }
+                        v
+                    });
                 }
                 continue;
             }
@@ -836,13 +838,15 @@ fn print_hit_acc(label: &str, acc: &HitAcc) {
     print_hit_side("    ", "old", &acc.old);
 }
 
+type CacheProbeResult = (Option<HitAcc>, Vec<(usize, HitAcc)>);
+
 fn run_cache_probe(
     path: &str,
     skip_similar: bool,
     batch: usize,
     caps: &[usize],
     with_k11: bool,
-) -> Result<(Option<HitAcc>, Vec<(usize, HitAcc)>), Box<dyn std::error::Error>> {
+) -> Result<CacheProbeResult, Box<dyn std::error::Error>> {
     let repo = Repository::open(path)?;
     let oids = collect_commit_oids(&repo)?;
     let batch = batch.max(1);

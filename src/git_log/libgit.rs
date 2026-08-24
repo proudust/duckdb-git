@@ -1,6 +1,7 @@
 use crate::git::backend::libgit::{
-    collect_refs, emit_commit, prepare_walk, run_commit_date_walk, start_commit_date_walk,
-    walk_next_oid, BlobRing, CachedRepo, EmitOpts, WalkPrepared,
+    collect_refs, emit_commit, emit_inspected_commit, prepare_walk, run_commit_date_walk,
+    start_commit_date_walk, walk_next_oid, BlobRing, CachedRepo, EmitOpts, InspectedCommit,
+    WalkPrepared,
 };
 use crate::git::date_walk::{CommitDateWalk, OidBytes};
 use crate::git::sink::CommitSink;
@@ -31,7 +32,10 @@ enum ScanEngine {
 
 enum InlineState {
     Pending(WalkPrepared),
-    Active(CommitDateWalk),
+    Active {
+        walk: CommitDateWalk,
+        cache: HashMap<OidBytes, InspectedCommit>,
+    },
     Done,
 }
 
@@ -190,7 +194,7 @@ impl LibGitLogScanner {
         state: &Mutex<InlineState>,
         first_parent: bool,
         batch_size: usize,
-        params: &GitLogParameter,
+        _params: &GitLogParameter,
         output: &mut DataChunkHandle,
         column_indices: &[u64],
     ) -> Result<u32, Box<dyn Error>> {
@@ -212,7 +216,7 @@ impl LibGitLogScanner {
         }
 
         let mut guard = state.lock().unwrap();
-        let walk = match &mut *guard {
+        match &mut *guard {
             InlineState::Done => {
                 #[cfg(feature = "prefetch-stats")]
                 crate::git::diag::record_read(read_t.elapsed());
@@ -223,27 +227,50 @@ impl LibGitLogScanner {
                 let InlineState::Pending(prep) = pending else {
                     unreachable!("Pending branch");
                 };
+                let mut cache = HashMap::new();
                 #[cfg(feature = "prefetch-stats")]
                 let walk_t = Instant::now();
-                let started = start_commit_date_walk(repo, prep)?;
+                let walk = start_commit_date_walk(repo, prep, Some(&mut cache))?;
                 #[cfg(feature = "prefetch-stats")]
                 crate::git::diag::record_walk(walk_t.elapsed());
-                *guard = InlineState::Active(started);
-                let InlineState::Active(walk) = &mut *guard else {
-                    unreachable!("just set Active");
-                };
-                walk
+                *guard = InlineState::Active { walk, cache };
             }
-            InlineState::Active(walk) => walk,
+            InlineState::Active { .. } => {}
+        }
+
+        let InlineState::Active { walk, cache } = &mut *guard else {
+            unreachable!("Active after Pending start or prior Active");
         };
 
-        let mut batch = Vec::with_capacity(batch_size.min(256));
+        let mut writer = VectorInserter::new(output, column_indices);
+        let empty_refs: Vec<String> = Vec::new();
+        let mut count = 0u32;
+        let mut exhausted = false;
         #[cfg(feature = "prefetch-stats")]
         let walk_t = Instant::now();
-        let mut exhausted = false;
-        while batch.len() < batch_size {
-            match walk_next_oid(repo, first_parent, walk)? {
-                Some(oid) => batch.push(oid),
+        #[cfg(feature = "prefetch-stats")]
+        let emit_t = Instant::now();
+        while (count as usize) < batch_size {
+            match walk_next_oid(repo, first_parent, walk, Some(&mut *cache))? {
+                Some(oid_bytes) => {
+                    let oid = bytes_to_oid(oid_bytes);
+                    let meta = cache.remove(&oid_bytes).ok_or_else(|| {
+                        format!(
+                            "inline emit cache miss for {}",
+                            oid
+                        )
+                    })?;
+                    writer.begin_row(count as usize);
+                    emit_inspected_commit(oid, &meta, &mut writer);
+
+                    let refs = self.inner.decorations.get(&oid).unwrap_or(&empty_refs);
+                    writer.begin_decorate(refs.len());
+                    for name in refs {
+                        writer.decorate_name(name);
+                    }
+                    writer.finish_row();
+                    count += 1;
+                }
                 None => {
                     exhausted = true;
                     break;
@@ -251,19 +278,22 @@ impl LibGitLogScanner {
             }
         }
         #[cfg(feature = "prefetch-stats")]
-        crate::git::diag::record_walk(walk_t.elapsed());
+        {
+            crate::git::diag::record_walk(walk_t.elapsed());
+            crate::git::diag::record_emit(emit_t.elapsed());
+        }
         if exhausted {
             *guard = InlineState::Done;
         }
         drop(guard);
 
-        if batch.is_empty() {
+        if count == 0 {
             #[cfg(feature = "prefetch-stats")]
             crate::git::diag::record_read(read_t.elapsed());
             return Ok(0);
         }
 
-        let count = self.emit_batch(repo, &batch, params, output, column_indices)?;
+        writer.finish();
         #[cfg(feature = "prefetch-stats")]
         crate::git::diag::record_read(read_t.elapsed());
         Ok(count)

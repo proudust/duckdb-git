@@ -4,8 +4,8 @@ mod diff;
 mod repo;
 
 pub(crate) use commits::{
-    emit_commit, prepare_walk, run_commit_date_walk, start_commit_date_walk, walk_commit_oids,
-    walk_next_oid, WalkPrepared,
+    emit_commit, emit_inspected_commit, prepare_walk, run_commit_date_walk,
+    start_commit_date_walk, walk_commit_oids, walk_next_oid, InspectedCommit, WalkPrepared,
 };
 pub(crate) use decorate::collect_refs;
 pub(crate) use repo::CachedRepo;

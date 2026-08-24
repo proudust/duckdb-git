@@ -4,7 +4,7 @@ use crate::git::ident::{commit_header, parse_ident};
 use crate::git::options::DiffMerges;
 use crate::git::revision::{unresolved_revision_error, RevisionTerm};
 use crate::git::sink::{oid_hex, CommitSink};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
 fn oid_to_bytes(oid: gix::ObjectId) -> OidBytes {
@@ -129,32 +129,81 @@ pub(crate) fn prepare_walk(
 pub(crate) struct GixWalkCallbacks<'a> {
     repo: &'a gix::Repository,
     first_parent: bool,
+    /// Inline path: keep emit payload from the single inspect at enqueue.
+    emit_cache: Option<&'a mut HashMap<OidBytes, InspectedCommit>>,
+}
+
+/// Metadata captured during walk inspect so emit can skip a second `find_commit`.
+pub(crate) struct InspectedCommit {
+    pub author_name: Vec<u8>,
+    pub author_email: Vec<u8>,
+    pub author_seconds: i64,
+    pub committer_name: Vec<u8>,
+    pub committer_email: Vec<u8>,
+    pub committer_seconds: i64,
+    pub message: Vec<u8>,
+    pub parent_oids: Vec<gix::ObjectId>,
 }
 
 impl DateWalkCallbacks for GixWalkCallbacks<'_> {
-    fn parents(&mut self, id: OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>> {
+    fn inspect(&mut self, id: OidBytes) -> Result<(i64, Vec<OidBytes>), Box<dyn Error>> {
         #[cfg(feature = "prefetch-stats")]
         crate::git::diag::record_walker_find_commit();
         let commit = self.repo.find_commit(bytes_to_oid(id))?;
+        let header = commit_header(commit.data.as_ref());
+        let author = parse_ident(header, b"author")?;
+        let committer = parse_ident(header, b"committer")?;
         let parent_ids: Vec<_> = commit.parent_ids().collect();
         let n = if self.first_parent {
             parent_ids.len().min(1)
         } else {
             parent_ids.len()
         };
-        Ok(parent_ids
-            .into_iter()
-            .take(n)
-            .map(|p| oid_to_bytes(p.detach()))
-            .collect())
+        let mut parent_oids = Vec::with_capacity(n);
+        let mut parent_bytes = Vec::with_capacity(n);
+        for p in parent_ids.into_iter().take(n) {
+            let oid = p.detach();
+            parent_bytes.push(oid_to_bytes(oid));
+            parent_oids.push(oid);
+        }
+        let seconds = committer.seconds;
+        if let Some(cache) = self.emit_cache.as_mut() {
+            cache.insert(
+                id,
+                InspectedCommit {
+                    author_name: author.name.to_vec(),
+                    author_email: author.email.to_vec(),
+                    author_seconds: author.seconds,
+                    committer_name: committer.name.to_vec(),
+                    committer_email: committer.email.to_vec(),
+                    committer_seconds: committer.seconds,
+                    message: commit.message_raw()?.to_vec(),
+                    parent_oids,
+                },
+            );
+        }
+        Ok((seconds, parent_bytes))
     }
+}
 
-    fn committer_seconds(&mut self, id: OidBytes) -> Result<i64, Box<dyn Error>> {
-        #[cfg(feature = "prefetch-stats")]
-        crate::git::diag::record_walker_find_commit();
-        let commit = self.repo.find_commit(bytes_to_oid(id))?;
-        let header = commit_header(commit.data.as_ref());
-        Ok(parse_ident(header, b"committer")?.seconds)
+pub(crate) fn emit_inspected_commit(
+    oid: gix::ObjectId,
+    meta: &InspectedCommit,
+    sink: &mut impl CommitSink,
+) {
+    let hex = oid_hex(oid.as_bytes());
+    sink.commit_id(&hex);
+    sink.author(&meta.author_name, &meta.author_email, meta.author_seconds);
+    sink.committer(
+        &meta.committer_name,
+        &meta.committer_email,
+        meta.committer_seconds,
+    );
+    sink.message(&meta.message);
+    sink.begin_parents(meta.parent_oids.len());
+    for parent in &meta.parent_oids {
+        let parent_hex = oid_hex(parent.as_bytes());
+        sink.parent(&parent_hex);
     }
 }
 
@@ -166,6 +215,7 @@ pub(crate) fn run_commit_date_walk(
     let mut callbacks = GixWalkCallbacks {
         repo,
         first_parent: prep.first_parent,
+        emit_cache: None,
     };
     let mut walk = CommitDateWalk::new(
         prep.tips,
@@ -187,10 +237,12 @@ pub(crate) fn run_commit_date_walk(
 pub(crate) fn start_commit_date_walk(
     repo: &gix::Repository,
     prep: WalkPrepared,
+    emit_cache: Option<&mut HashMap<OidBytes, InspectedCommit>>,
 ) -> Result<CommitDateWalk, Box<dyn Error>> {
     let mut callbacks = GixWalkCallbacks {
         repo,
         first_parent: prep.first_parent,
+        emit_cache,
     };
     CommitDateWalk::new(
         prep.tips,
@@ -204,8 +256,13 @@ pub(crate) fn walk_next_oid(
     repo: &gix::Repository,
     first_parent: bool,
     walk: &mut CommitDateWalk,
+    emit_cache: Option<&mut HashMap<OidBytes, InspectedCommit>>,
 ) -> Result<Option<OidBytes>, Box<dyn Error>> {
-    let mut callbacks = GixWalkCallbacks { repo, first_parent };
+    let mut callbacks = GixWalkCallbacks {
+        repo,
+        first_parent,
+        emit_cache,
+    };
     walk.next(&mut callbacks)
 }
 
@@ -221,6 +278,7 @@ pub(crate) fn walk_commit_oids(
     let mut callbacks = GixWalkCallbacks {
         repo,
         first_parent,
+        emit_cache: None,
     };
     let ordered = CommitDateWalk::new(
         prep.tips,

@@ -5,7 +5,7 @@
 //!
 //! Walk state is separate from [`DateWalkCallbacks`] so a scanner can keep the PQ
 //! across `read()` calls while borrowing a thread-local repository only during
-//! `next()`.
+//! `next()`. Each queued commit is inspected **once** (committer time + parents).
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
@@ -20,6 +20,8 @@ struct HeapEntry {
     /// Monotonic counter assigned at heap push time; smaller = earlier = first out.
     insertion_ctr: u64,
     oid: OidBytes,
+    /// Parents captured during the single inspect at enqueue time.
+    parents: Vec<OidBytes>,
 }
 
 impl PartialEq for HeapEntry {
@@ -51,35 +53,25 @@ fn is_interesting(interesting: Option<&HashSet<OidBytes>>, oid: OidBytes) -> boo
     }
 }
 
-/// Parent / committer-time lookups for [`CommitDateWalk`].
+/// One object read per queued commit: committer seconds + parent OIDs.
 pub trait DateWalkCallbacks {
-    fn parents(&mut self, id: OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>>;
-    fn committer_seconds(&mut self, id: OidBytes) -> Result<i64, Box<dyn Error>>;
+    fn inspect(&mut self, id: OidBytes) -> Result<(i64, Vec<OidBytes>), Box<dyn Error>>;
 }
 
-struct FnWalkCallbacks<P, S> {
-    parents: P,
-    seconds: S,
+struct FnWalkCallbacks<F> {
+    inspect: F,
 }
 
-impl<P, S> DateWalkCallbacks for FnWalkCallbacks<P, S>
+impl<F> DateWalkCallbacks for FnWalkCallbacks<F>
 where
-    P: FnMut(OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>>,
-    S: FnMut(OidBytes) -> Result<i64, Box<dyn Error>>,
+    F: FnMut(OidBytes) -> Result<(i64, Vec<OidBytes>), Box<dyn Error>>,
 {
-    fn parents(&mut self, id: OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>> {
-        (self.parents)(id)
-    }
-
-    fn committer_seconds(&mut self, id: OidBytes) -> Result<i64, Box<dyn Error>> {
-        (self.seconds)(id)
+    fn inspect(&mut self, id: OidBytes) -> Result<(i64, Vec<OidBytes>), Box<dyn Error>> {
+        (self.inspect)(id)
     }
 }
 
 /// Incremental committer-date PQ walk (git log default-like).
-///
-/// Does not borrow the repository: pass [`DateWalkCallbacks`] into [`Self::new`] /
-/// [`Self::next`] so the same walk can resume across DuckDB `read()` calls.
 pub struct CommitDateWalk {
     heap: BinaryHeap<HeapEntry>,
     queued: HashSet<OidBytes>,
@@ -112,26 +104,27 @@ impl CommitDateWalk {
         }
 
         for tip in tips {
-            walk.seed_tip(tip, callbacks)?;
+            walk.enqueue(tip, callbacks)?;
         }
         Ok(walk)
     }
 
-    fn seed_tip(
+    fn enqueue(
         &mut self,
-        tip: OidBytes,
+        oid: OidBytes,
         callbacks: &mut impl DateWalkCallbacks,
     ) -> Result<(), Box<dyn Error>> {
-        if !is_interesting(self.interesting.as_ref(), tip) || !self.queued.insert(tip) {
+        if !is_interesting(self.interesting.as_ref(), oid) || !self.queued.insert(oid) {
             return Ok(());
         }
-        let seconds = callbacks.committer_seconds(tip)?;
+        let (seconds, parents) = callbacks.inspect(oid)?;
         let insertion_ctr = self.next_ctr;
         self.next_ctr += 1;
         self.heap.push(HeapEntry {
             seconds,
             insertion_ctr,
-            oid: tip,
+            oid,
+            parents,
         });
         Ok(())
     }
@@ -145,7 +138,7 @@ impl CommitDateWalk {
             return Ok(None);
         }
 
-        let HeapEntry { oid, .. } = match self.heap.pop() {
+        let HeapEntry { oid, parents, .. } = match self.heap.pop() {
             Some(entry) => entry,
             None => return Ok(None),
         };
@@ -161,18 +154,8 @@ impl CommitDateWalk {
             return Ok(Some(out));
         }
 
-        for parent in callbacks.parents(oid)? {
-            if !is_interesting(self.interesting.as_ref(), parent) || !self.queued.insert(parent) {
-                continue;
-            }
-            let seconds = callbacks.committer_seconds(parent)?;
-            let insertion_ctr = self.next_ctr;
-            self.next_ctr += 1;
-            self.heap.push(HeapEntry {
-                seconds,
-                insertion_ctr,
-                oid: parent,
-            });
+        for parent in parents {
+            self.enqueue(parent, callbacks)?;
         }
 
         Ok(Some(out))
@@ -196,13 +179,11 @@ pub fn walk_by_commit_date(
     tips: impl IntoIterator<Item = OidBytes>,
     interesting: Option<&HashSet<OidBytes>>,
     max_count: Option<usize>,
-    parents: impl FnMut(OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>>,
-    committer_seconds: impl FnMut(OidBytes) -> Result<i64, Box<dyn Error>>,
+    mut inspect: impl FnMut(OidBytes) -> Result<(i64, Vec<OidBytes>), Box<dyn Error>>,
 ) -> Result<Vec<OidBytes>, Box<dyn Error>> {
     let interesting_owned = interesting.cloned();
     let mut callbacks = FnWalkCallbacks {
-        parents,
-        seconds: committer_seconds,
+        inspect: &mut inspect,
     };
     CommitDateWalk::new(tips, interesting_owned, max_count, &mut callbacks)?
         .drain_into_vec(&mut callbacks)
@@ -229,6 +210,18 @@ mod tests {
         id
     }
 
+    fn inspect_maps<'a>(
+        parents: &'a HashMap<OidBytes, Vec<OidBytes>>,
+        times: &'a HashMap<OidBytes, i64>,
+    ) -> impl FnMut(OidBytes) -> Result<(i64, Vec<OidBytes>), Box<dyn Error>> + 'a {
+        move |id| {
+            Ok((
+                *times.get(&id).unwrap(),
+                parents.get(&id).cloned().unwrap_or_default(),
+            ))
+        }
+    }
+
     #[test]
     fn clock_skew_max_count_is_pq_prefix_not_global_date_top() {
         let c = oid(1);
@@ -237,14 +230,9 @@ mod tests {
         let parents: HashMap<_, _> = [(c, vec![p]), (p, vec![])].into();
         let times: HashMap<_, _> = [(c, 100i64), (p, 200)].into();
 
-        let got = walk_by_commit_date(
-            [c],
-            Some(&interesting),
-            Some(1),
-            |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
-            |id| Ok(*times.get(&id).unwrap()),
-        )
-        .unwrap();
+        let got =
+            walk_by_commit_date([c], Some(&interesting), Some(1), inspect_maps(&parents, &times))
+                .unwrap();
         assert_eq!(got, vec![c]);
     }
 
@@ -256,20 +244,15 @@ mod tests {
         let parents: HashMap<_, _> = [(c, vec![p]), (p, vec![])].into();
         let times: HashMap<_, _> = [(c, 100i64), (p, 50)].into();
 
-        let vec_out = walk_by_commit_date(
-            [c],
-            Some(&interesting),
-            None,
-            |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
-            |id| Ok(*times.get(&id).unwrap()),
-        )
-        .unwrap();
+        let vec_out =
+            walk_by_commit_date([c], Some(&interesting), None, inspect_maps(&parents, &times))
+                .unwrap();
 
         let mut callbacks = FnWalkCallbacks {
-            parents: |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
-            seconds: |id| Ok(*times.get(&id).unwrap()),
+            inspect: inspect_maps(&parents, &times),
         };
-        let mut walk = CommitDateWalk::new([c], Some(interesting), None, &mut callbacks).unwrap();
+        let mut walk =
+            CommitDateWalk::new([c], Some(interesting), None, &mut callbacks).unwrap();
         let mut iter_out = Vec::new();
         while let Some(oid) = walk.next(&mut callbacks).unwrap() {
             iter_out.push(oid);
@@ -281,14 +264,7 @@ mod tests {
     fn max_count_zero_returns_empty() {
         let t = oid(1);
         let interesting = HashSet::from([t]);
-        let got = walk_by_commit_date(
-            [t],
-            Some(&interesting),
-            Some(0),
-            |_| Ok(vec![]),
-            |_| Ok(1),
-        )
-        .unwrap();
+        let got = walk_by_commit_date([t], Some(&interesting), Some(0), |_| Ok((1, vec![]))).unwrap();
         assert!(got.is_empty());
     }
 }

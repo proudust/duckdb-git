@@ -3,7 +3,8 @@ use crate::git::backend::gix::{
     start_commit_date_walk, walk_next_oid, CachedRepo, InspectedCommit, WalkPrepared,
 };
 use crate::git::date_walk::{CommitDateWalk, OidBytes};
-use crate::git::sink::CommitSink;
+use crate::git::meta_proj::MetaProjection;
+use crate::git::sink::{oid_hex, CommitSink};
 use crate::git_log::params::GitLogParameter;
 use crate::git_log::prefetch::{
     fixed_max_threads, OidPrefetchBuffer, READ_BATCH_SIZE, RING_CAPACITY,
@@ -23,6 +24,7 @@ enum ScanEngine {
         state: Mutex<InlineState>,
         first_parent: bool,
         batch_size: usize,
+        proj: MetaProjection,
     },
 }
 
@@ -30,7 +32,7 @@ enum InlineState {
     Pending(WalkPrepared),
     Active {
         walk: CommitDateWalk,
-        cache: HashMap<OidBytes, InspectedCommit>,
+        cache: Option<HashMap<OidBytes, InspectedCommit>>,
     },
     Done,
 }
@@ -85,6 +87,7 @@ impl GixLogScanner {
                 state: Mutex::new(InlineState::Pending(prep)),
                 first_parent,
                 batch_size: READ_BATCH_SIZE,
+                proj: schema::meta_projection(column_indices),
             }
         } else {
             let buffer = OidPrefetchBuffer::new(RING_CAPACITY);
@@ -151,7 +154,16 @@ impl GixLogScanner {
                 state,
                 first_parent,
                 batch_size,
-            } => self.read_inline(state, *first_parent, *batch_size, params, output, column_indices),
+                proj,
+            } => self.read_inline(
+                state,
+                *first_parent,
+                *batch_size,
+                *proj,
+                params,
+                output,
+                column_indices,
+            ),
         }
     }
 
@@ -194,6 +206,7 @@ impl GixLogScanner {
         state: &Mutex<InlineState>,
         first_parent: bool,
         batch_size: usize,
+        proj: MetaProjection,
         _params: &GitLogParameter,
         output: &mut DataChunkHandle,
         column_indices: &[u64],
@@ -227,10 +240,11 @@ impl GixLogScanner {
                 let InlineState::Pending(prep) = pending else {
                     unreachable!("Pending branch");
                 };
-                let mut cache = HashMap::new();
+                let mut cache = proj.needs_emit_cache().then(HashMap::new);
                 #[cfg(feature = "prefetch-stats")]
                 let walk_t = Instant::now();
-                let walk = start_commit_date_walk(repo, prep, Some(&mut cache))?;
+                let walk =
+                    start_commit_date_walk(repo, prep, proj, cache.as_mut())?;
                 #[cfg(feature = "prefetch-stats")]
                 crate::git::diag::record_walk(walk_t.elapsed());
                 *guard = InlineState::Active { walk, cache };
@@ -251,14 +265,19 @@ impl GixLogScanner {
         #[cfg(feature = "prefetch-stats")]
         let emit_t = Instant::now();
         while (count as usize) < batch_size {
-            match walk_next_oid(repo, first_parent, walk, Some(&mut *cache))? {
+            match walk_next_oid(repo, first_parent, proj, walk, cache.as_mut())? {
                 Some(oid_bytes) => {
                     let oid = bytes_to_oid(oid_bytes);
-                    let meta = cache.remove(&oid_bytes).ok_or_else(|| {
-                        format!("inline emit cache miss for {}", oid)
-                    })?;
                     writer.begin_row(count as usize);
-                    emit_inspected_commit(oid, &meta, &mut writer);
+                    if let Some(cache) = cache.as_mut() {
+                        let meta = cache.remove(&oid_bytes).ok_or_else(|| {
+                            format!("inline emit cache miss for {oid}")
+                        })?;
+                        emit_inspected_commit(oid, &meta, &mut writer);
+                    } else if proj.commit_id {
+                        let hex = oid_hex(oid.as_bytes());
+                        writer.commit_id(&hex);
+                    }
 
                     let refs = self.inner.decorations.get(&oid).unwrap_or(&empty_refs);
                     writer.begin_decorate(refs.len());

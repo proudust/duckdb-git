@@ -125,6 +125,31 @@ pub fn needs_file_changes(column_indices: &[u64]) -> bool {
     column_indices.contains(&GitLogColumn::FileChanges.index())
 }
 
+pub use crate::git::meta_proj::MetaProjection;
+
+/// Map DuckDB projected column indices to [`MetaProjection`].
+///
+/// `SELECT count(*)` typically projects only `commit_id` (`[0]`), so the inline
+/// path can skip cloning author/message/parents into the emit cache.
+pub fn meta_projection(column_indices: &[u64]) -> MetaProjection {
+    let mut proj = MetaProjection::default();
+    for &idx in column_indices {
+        match GitLogColumn::try_from(idx) {
+            Ok(GitLogColumn::CommitId) => proj.commit_id = true,
+            Ok(GitLogColumn::Author)
+            | Ok(GitLogColumn::AuthorEmail)
+            | Ok(GitLogColumn::AuthorTimestamp) => proj.author = true,
+            Ok(GitLogColumn::Committer)
+            | Ok(GitLogColumn::CommitterEmail)
+            | Ok(GitLogColumn::CommitterTimestamp) => proj.committer = true,
+            Ok(GitLogColumn::Message) => proj.message = true,
+            Ok(GitLogColumn::Parents) => proj.parents = true,
+            Ok(GitLogColumn::Decorate) | Ok(GitLogColumn::FileChanges) | Err(()) => {}
+        }
+    }
+    proj
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +176,27 @@ mod tests {
             assert!(needs(&[column.index()]), "{column:?} should be required");
             assert!(!needs(&unrelated), "{column:?} should not be required");
         }
+    }
+
+    #[test]
+    fn meta_projection_from_count_star_columns() {
+        // DuckDB projects only commit_id for `SELECT count(*) FROM git_log(...)`.
+        let proj = meta_projection(&[GitLogColumn::CommitId.index()]);
+        assert!(proj.commit_id);
+        assert!(!proj.needs_emit_cache());
+    }
+
+    #[test]
+    fn meta_projection_full_metadata() {
+        let cols = [
+            GitLogColumn::CommitId.index(),
+            GitLogColumn::Author.index(),
+            GitLogColumn::Message.index(),
+            GitLogColumn::Parents.index(),
+        ];
+        let proj = meta_projection(&cols);
+        assert!(proj.author && proj.message && proj.parents);
+        assert!(proj.needs_emit_cache());
+        assert!(!proj.committer);
     }
 }

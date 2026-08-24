@@ -2,6 +2,7 @@ use super::blob_ring::BlobRing;
 use super::diff::emit_file_changes;
 use crate::git::date_walk::{oid_bytes_from_slice, CommitDateWalk, DateWalkCallbacks, OidBytes};
 use crate::git::ident::{commit_header, parse_ident};
+use crate::git::meta_proj::MetaProjection;
 use crate::git::options::DiffMerges;
 use crate::git::revision::{unresolved_revision_error, RevisionTerm};
 use crate::git::sink::{oid_hex, CommitSink};
@@ -144,6 +145,8 @@ pub(crate) fn prepare_walk(
 pub(crate) struct LibgitWalkCallbacks<'a> {
     repo: &'a Repository,
     first_parent: bool,
+    /// Which emit fields to retain; walk always needs committer seconds + parents.
+    proj: MetaProjection,
     /// Inline path: keep emit payload from the single inspect at enqueue.
     emit_cache: Option<&'a mut HashMap<OidBytes, InspectedCommit>>,
 }
@@ -166,32 +169,64 @@ impl DateWalkCallbacks for LibgitWalkCallbacks<'_> {
         crate::git::diag::record_walker_find_commit();
         let commit = self.repo.find_commit(bytes_to_oid(id))?;
         let header = commit_header(commit.raw_header_bytes());
-        let author = parse_ident(header, b"author")?;
         let committer = parse_ident(header, b"committer")?;
-        let n = if self.first_parent {
-            commit.parent_count().min(1)
+        let parent_count = commit.parent_count();
+        let walk_n = if self.first_parent {
+            parent_count.min(1)
         } else {
-            commit.parent_count()
+            parent_count
         };
-        let mut parent_oids = Vec::with_capacity(n);
-        let mut parent_bytes = Vec::with_capacity(n);
-        for i in 0..n {
+        // Emit lists every parent; first_parent only limits which edges the walk follows.
+        let emit_n = if self.proj.parents {
+            parent_count
+        } else {
+            0
+        };
+        let mut parent_bytes = Vec::with_capacity(walk_n);
+        let mut parent_oids = Vec::with_capacity(emit_n);
+        for i in 0..walk_n.max(emit_n) {
             let pid = commit.parent_id(i)?;
-            parent_bytes.push(oid_to_bytes(pid));
-            parent_oids.push(pid);
+            if i < walk_n {
+                parent_bytes.push(oid_to_bytes(pid));
+            }
+            if i < emit_n {
+                parent_oids.push(pid);
+            }
         }
         let seconds = committer.seconds;
         if let Some(cache) = self.emit_cache.as_mut() {
+            let (author_name, author_email, author_seconds) = if self.proj.author {
+                let author = parse_ident(header, b"author")?;
+                (
+                    author.name.to_vec(),
+                    author.email.to_vec(),
+                    author.seconds,
+                )
+            } else {
+                (Vec::new(), Vec::new(), 0)
+            };
             cache.insert(
                 id,
                 InspectedCommit {
-                    author_name: author.name.to_vec(),
-                    author_email: author.email.to_vec(),
-                    author_seconds: author.seconds,
-                    committer_name: committer.name.to_vec(),
-                    committer_email: committer.email.to_vec(),
+                    author_name,
+                    author_email,
+                    author_seconds,
+                    committer_name: if self.proj.committer {
+                        committer.name.to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                    committer_email: if self.proj.committer {
+                        committer.email.to_vec()
+                    } else {
+                        Vec::new()
+                    },
                     committer_seconds: committer.seconds,
-                    message: commit.message_raw_bytes().to_vec(),
+                    message: if self.proj.message {
+                        commit.message_raw_bytes().to_vec()
+                    } else {
+                        Vec::new()
+                    },
                     parent_oids,
                 },
             );
@@ -229,6 +264,7 @@ pub(crate) fn run_commit_date_walk(
     let mut callbacks = LibgitWalkCallbacks {
         repo,
         first_parent: prep.first_parent,
+        proj: MetaProjection::default(),
         emit_cache: None,
     };
     let mut walk = CommitDateWalk::new(
@@ -251,11 +287,13 @@ pub(crate) fn run_commit_date_walk(
 pub(crate) fn start_commit_date_walk(
     repo: &Repository,
     prep: WalkPrepared,
+    proj: MetaProjection,
     emit_cache: Option<&mut HashMap<OidBytes, InspectedCommit>>,
 ) -> Result<CommitDateWalk, Box<dyn Error>> {
     let mut callbacks = LibgitWalkCallbacks {
         repo,
         first_parent: prep.first_parent,
+        proj,
         emit_cache,
     };
     CommitDateWalk::new(
@@ -269,12 +307,14 @@ pub(crate) fn start_commit_date_walk(
 pub(crate) fn walk_next_oid(
     repo: &Repository,
     first_parent: bool,
+    proj: MetaProjection,
     walk: &mut CommitDateWalk,
     emit_cache: Option<&mut HashMap<OidBytes, InspectedCommit>>,
 ) -> Result<Option<OidBytes>, Box<dyn Error>> {
     let mut callbacks = LibgitWalkCallbacks {
         repo,
         first_parent,
+        proj,
         emit_cache,
     };
     walk.next(&mut callbacks)
@@ -292,6 +332,7 @@ pub(crate) fn walk_commit_oids(
     let mut callbacks = LibgitWalkCallbacks {
         repo,
         first_parent,
+        proj: MetaProjection::default(),
         emit_cache: None,
     };
     let ordered = CommitDateWalk::new(

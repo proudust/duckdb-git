@@ -212,39 +212,49 @@ impl LibGitLogScanner {
         }
 
         let mut guard = state.lock().unwrap();
-        if matches!(*guard, InlineState::Done) {
-            #[cfg(feature = "prefetch-stats")]
-            crate::git::diag::record_read(read_t.elapsed());
-            return Ok(0);
-        }
-
-        if let InlineState::Pending(prep) = std::mem::replace(&mut *guard, InlineState::Done) {
-            #[cfg(feature = "prefetch-stats")]
-            let walk_t = Instant::now();
-            let walk = start_commit_date_walk(repo, prep)?;
-            #[cfg(feature = "prefetch-stats")]
-            crate::git::diag::record_walk(walk_t.elapsed());
-            *guard = InlineState::Active(walk);
-        }
-
-        let InlineState::Active(walk) = &mut *guard else {
-            return Ok(0);
+        let walk = match &mut *guard {
+            InlineState::Done => {
+                #[cfg(feature = "prefetch-stats")]
+                crate::git::diag::record_read(read_t.elapsed());
+                return Ok(0);
+            }
+            InlineState::Pending(_) => {
+                let pending = std::mem::replace(&mut *guard, InlineState::Done);
+                let InlineState::Pending(prep) = pending else {
+                    unreachable!("Pending branch");
+                };
+                #[cfg(feature = "prefetch-stats")]
+                let walk_t = Instant::now();
+                let started = start_commit_date_walk(repo, prep)?;
+                #[cfg(feature = "prefetch-stats")]
+                crate::git::diag::record_walk(walk_t.elapsed());
+                *guard = InlineState::Active(started);
+                let InlineState::Active(walk) = &mut *guard else {
+                    unreachable!("just set Active");
+                };
+                walk
+            }
+            InlineState::Active(walk) => walk,
         };
 
         let mut batch = Vec::with_capacity(batch_size.min(256));
         #[cfg(feature = "prefetch-stats")]
         let walk_t = Instant::now();
+        let mut exhausted = false;
         while batch.len() < batch_size {
             match walk_next_oid(repo, first_parent, walk)? {
                 Some(oid) => batch.push(oid),
                 None => {
-                    *guard = InlineState::Done;
+                    exhausted = true;
                     break;
                 }
             }
         }
         #[cfg(feature = "prefetch-stats")]
         crate::git::diag::record_walk(walk_t.elapsed());
+        if exhausted {
+            *guard = InlineState::Done;
+        }
         drop(guard);
 
         if batch.is_empty() {

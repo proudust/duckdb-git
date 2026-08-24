@@ -95,7 +95,7 @@ impl GixLogScanner {
                 buffer,
                 decorations,
                 batch_size: READ_BATCH_SIZE,
-                max_threads: fixed_max_threads(false),
+                max_threads: fixed_max_threads(false, schema::needs_file_changes(column_indices)),
                 repo_path: repo_path.to_string(),
             }),
         })

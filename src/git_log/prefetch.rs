@@ -224,7 +224,10 @@ impl Drop for OidPrefetchBuffer {
     }
 }
 
-pub fn fixed_max_threads(libgit: bool) -> u64 {
+pub fn fixed_max_threads(libgit: bool, needs_file_changes: bool) -> u64 {
+    if !needs_file_changes {
+        return 1;
+    }
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
@@ -243,6 +246,12 @@ mod tests {
         let mut b = [0u8; 20];
         b[19] = n;
         b
+    }
+
+    #[test]
+    fn metadata_only_uses_one_thread() {
+        assert_eq!(fixed_max_threads(true, false), 1);
+        assert_eq!(fixed_max_threads(false, false), 1);
     }
 
     #[test]

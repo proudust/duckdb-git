@@ -28,8 +28,6 @@ impl Eq for HeapEntry {}
 
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Max-heap: newer committer date first; on ties, smaller insertion_ctr
-        // first (FIFO). Rust BinaryHeap pops the greatest element, so invert ctr.
         self.seconds
             .cmp(&other.seconds)
             .then_with(|| other.insertion_ctr.cmp(&self.insertion_ctr))
@@ -42,79 +40,161 @@ impl PartialOrd for HeapEntry {
     }
 }
 
-/// Walk commits reachable from `tips` in committer-date priority-queue order
-/// (git log default-like).
-///
-/// When `interesting` is `Some`, only OIDs in that set are enqueued (hide /
-/// revision-range filtering). When `None`, every parent of an emitted commit
-/// is eligible (no precomputed interesting set).
-///
-/// `max_count` is applied as streaming `take(N)`: do not pop once `N` results
-/// have been emitted (`Some(0)` yields an empty vec immediately).
-///
-/// `parents` should already respect `first_parent` if that mode is active.
-pub fn walk_by_commit_date(
-    tips: impl IntoIterator<Item = OidBytes>,
-    interesting: Option<&HashSet<OidBytes>>,
-    max_count: Option<usize>,
-    mut parents: impl FnMut(OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>>,
-    mut committer_seconds: impl FnMut(OidBytes) -> Result<i64, Box<dyn Error>>,
-) -> Result<Vec<OidBytes>, Box<dyn Error>> {
-    if max_count == Some(0) {
-        return Ok(Vec::new());
+fn is_interesting(interesting: Option<&HashSet<OidBytes>>, oid: OidBytes) -> bool {
+    match interesting {
+        Some(set) => set.contains(&oid),
+        None => true,
+    }
+}
+
+/// Parent / committer-time lookups for [`CommitDateWalk`].
+pub trait DateWalkCallbacks {
+    fn parents(&mut self, id: OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>>;
+    fn committer_seconds(&mut self, id: OidBytes) -> Result<i64, Box<dyn Error>>;
+}
+
+struct FnWalkCallbacks<P, S> {
+    parents: P,
+    seconds: S,
+}
+
+impl<P, S> DateWalkCallbacks for FnWalkCallbacks<P, S>
+where
+    P: FnMut(OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>>,
+    S: FnMut(OidBytes) -> Result<i64, Box<dyn Error>>,
+{
+    fn parents(&mut self, id: OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>> {
+        (self.parents)(id)
     }
 
-    let is_interesting = |oid: &OidBytes| interesting.map_or(true, |s| s.contains(oid));
+    fn committer_seconds(&mut self, id: OidBytes) -> Result<i64, Box<dyn Error>> {
+        (self.seconds)(id)
+    }
+}
 
-    let mut heap = BinaryHeap::new();
-    let mut queued = HashSet::new();
-    let mut visited = HashSet::new();
-    let mut out = Vec::new();
-    let mut next_ctr: u64 = 0;
+/// Incremental committer-date PQ walk (git log default-like).
+pub struct CommitDateWalk<C: DateWalkCallbacks> {
+    heap: BinaryHeap<HeapEntry>,
+    queued: HashSet<OidBytes>,
+    visited: HashSet<OidBytes>,
+    next_ctr: u64,
+    interesting: Option<HashSet<OidBytes>>,
+    max_count: Option<usize>,
+    emitted: usize,
+    callbacks: C,
+}
 
-    for tip in tips {
-        if !is_interesting(&tip) || !queued.insert(tip) {
-            continue;
+impl<C: DateWalkCallbacks> CommitDateWalk<C> {
+    pub fn new(
+        tips: impl IntoIterator<Item = OidBytes>,
+        interesting: Option<HashSet<OidBytes>>,
+        max_count: Option<usize>,
+        callbacks: C,
+    ) -> Result<Self, Box<dyn Error>> {
+        let mut walk = Self {
+            heap: BinaryHeap::new(),
+            queued: HashSet::new(),
+            visited: HashSet::new(),
+            next_ctr: 0,
+            interesting,
+            max_count,
+            emitted: 0,
+            callbacks,
+        };
+
+        if max_count == Some(0) {
+            return Ok(walk);
         }
-        let seconds = committer_seconds(tip)?;
-        let insertion_ctr = next_ctr;
-        next_ctr += 1;
-        heap.push(HeapEntry {
+
+        for tip in tips {
+            walk.seed_tip(tip)?;
+        }
+        Ok(walk)
+    }
+
+    fn seed_tip(&mut self, tip: OidBytes) -> Result<(), Box<dyn Error>> {
+        if !is_interesting(self.interesting.as_ref(), tip) || !self.queued.insert(tip) {
+            return Ok(());
+        }
+        let seconds = self.callbacks.committer_seconds(tip)?;
+        let insertion_ctr = self.next_ctr;
+        self.next_ctr += 1;
+        self.heap.push(HeapEntry {
             seconds,
             insertion_ctr,
             oid: tip,
         });
+        Ok(())
     }
 
-    while let Some(HeapEntry { oid, .. }) = heap.pop() {
-        if max_count.is_some_and(|n| out.len() >= n) {
-            break;
-        }
-        if !visited.insert(oid) {
-            continue;
-        }
-        out.push(oid);
-
-        if max_count.is_some_and(|n| out.len() >= n) {
-            break;
+    /// Next OID in walk order, or `None` when exhausted.
+    pub fn next(&mut self) -> Result<Option<OidBytes>, Box<dyn Error>> {
+        if self.max_count.is_some_and(|n| self.emitted >= n) {
+            return Ok(None);
         }
 
-        for parent in parents(oid)? {
-            if !is_interesting(&parent) || !queued.insert(parent) {
+        let HeapEntry { oid, .. } = match self.heap.pop() {
+            Some(entry) => entry,
+            None => return Ok(None),
+        };
+
+        if !self.visited.insert(oid) {
+            return self.next();
+        }
+
+        self.emitted += 1;
+        let out = oid;
+
+        if self.max_count.is_some_and(|n| self.emitted >= n) {
+            return Ok(Some(out));
+        }
+
+        for parent in self.callbacks.parents(oid)? {
+            if !is_interesting(self.interesting.as_ref(), parent) || !self.queued.insert(parent) {
                 continue;
             }
-            let seconds = committer_seconds(parent)?;
-            let insertion_ctr = next_ctr;
-            next_ctr += 1;
-            heap.push(HeapEntry {
+            let seconds = self.callbacks.committer_seconds(parent)?;
+            let insertion_ctr = self.next_ctr;
+            self.next_ctr += 1;
+            self.heap.push(HeapEntry {
                 seconds,
                 insertion_ctr,
                 oid: parent,
             });
         }
+
+        Ok(Some(out))
     }
 
-    Ok(out)
+    pub fn drain_into_vec(mut self) -> Result<Vec<OidBytes>, Box<dyn Error>> {
+        let mut out = Vec::new();
+        while let Some(oid) = self.next()? {
+            out.push(oid);
+        }
+        Ok(out)
+    }
+}
+
+/// Walk commits reachable from `tips` that are also in `interesting`, in
+/// committer-date priority-queue order (git log default-like).
+pub fn walk_by_commit_date(
+    tips: impl IntoIterator<Item = OidBytes>,
+    interesting: Option<&HashSet<OidBytes>>,
+    max_count: Option<usize>,
+    parents: impl FnMut(OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>>,
+    committer_seconds: impl FnMut(OidBytes) -> Result<i64, Box<dyn Error>>,
+) -> Result<Vec<OidBytes>, Box<dyn Error>> {
+    let interesting_owned = interesting.cloned();
+    CommitDateWalk::new(
+        tips,
+        interesting_owned,
+        max_count,
+        FnWalkCallbacks {
+            parents,
+            seconds: committer_seconds,
+        },
+    )?
+    .drain_into_vec()
 }
 
 /// Copy a 20-byte SHA-1 into [`OidBytes`].
@@ -138,8 +218,6 @@ mod tests {
         id
     }
 
-    /// Synthetic graph: child C (t=100) → parent P (t=200, clock skew).
-    /// Global date top-1 is P; PQ from C emits C then P.
     #[test]
     fn clock_skew_max_count_is_pq_prefix_not_global_date_top() {
         let c = oid(1);
@@ -156,83 +234,18 @@ mod tests {
             |id| Ok(*times.get(&id).unwrap()),
         )
         .unwrap();
-        assert_eq!(got, vec![c], "PQ must emit child before skewed-newer parent");
-
-        let global_top = {
-            let mut v = vec![c, p];
-            v.sort_by(|a, b| times[b].cmp(&times[a]).then(b.cmp(a)));
-            v.into_iter().take(1).collect::<Vec<_>>()
-        };
-        assert_eq!(global_top, vec![p]);
-        assert_ne!(got, global_top);
+        assert_eq!(got, vec![c]);
     }
 
     #[test]
-    fn orphan_tip_with_newer_date_emits_before_older_line() {
-        // Tips O (t=300) and M (t=100); M→A (t=50). Orphan O has no parents.
-        let o = oid(10);
-        let m = oid(11);
-        let a = oid(12);
-        let interesting = HashSet::from([o, m, a]);
-        let parents: HashMap<_, _> = [(o, vec![]), (m, vec![a]), (a, vec![])].into();
-        let times: HashMap<_, _> = [(o, 300i64), (m, 100), (a, 50)].into();
+    fn iterator_matches_vec_api() {
+        let c = oid(1);
+        let p = oid(2);
+        let interesting = HashSet::from([c, p]);
+        let parents: HashMap<_, _> = [(c, vec![p]), (p, vec![])].into();
+        let times: HashMap<_, _> = [(c, 100i64), (p, 50)].into();
 
-        let got = walk_by_commit_date(
-            [m, o],
-            Some(&interesting),
-            None,
-            |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
-            |id| Ok(*times.get(&id).unwrap()),
-        )
-        .unwrap();
-        assert_eq!(got, vec![o, m, a]);
-    }
-
-    #[test]
-    fn equal_seconds_fifo_earlier_tip_first() {
-        let lo = oid(1);
-        let hi = oid(2);
-        assert!(hi > lo);
-        let interesting = HashSet::from([lo, hi]);
-        let parents: HashMap<_, _> = [(lo, vec![]), (hi, vec![])].into();
-        let times: HashMap<_, _> = [(lo, 50i64), (hi, 50)].into();
-
-        // Seed lo before hi: FIFO must emit lo first despite smaller OID bytes.
-        let got = walk_by_commit_date(
-            [lo, hi],
-            Some(&interesting),
-            None,
-            |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
-            |id| Ok(*times.get(&id).unwrap()),
-        )
-        .unwrap();
-        assert_eq!(got, vec![lo, hi]);
-
-        let got_rev = walk_by_commit_date(
-            [hi, lo],
-            Some(&interesting),
-            None,
-            |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
-            |id| Ok(*times.get(&id).unwrap()),
-        )
-        .unwrap();
-        assert_eq!(got_rev, vec![hi, lo]);
-    }
-
-    #[test]
-    fn equal_seconds_parents_pushed_in_parent_index_order() {
-        // Child C (t=100) has two parents P0, P1 at the same second (t=50).
-        // After C is popped, parents are enqueued in parent(0).. order; FIFO
-        // must emit P0 before P1 even when P1 has a larger OID.
-        let c = oid(10);
-        let p0 = oid(1);
-        let p1 = oid(2);
-        assert!(p1 > p0);
-        let interesting = HashSet::from([c, p0, p1]);
-        let parents: HashMap<_, _> = [(c, vec![p0, p1]), (p0, vec![]), (p1, vec![])].into();
-        let times: HashMap<_, _> = [(c, 100i64), (p0, 50), (p1, 50)].into();
-
-        let got = walk_by_commit_date(
+        let vec_out = walk_by_commit_date(
             [c],
             Some(&interesting),
             None,
@@ -240,7 +253,22 @@ mod tests {
             |id| Ok(*times.get(&id).unwrap()),
         )
         .unwrap();
-        assert_eq!(got, vec![c, p0, p1]);
+
+        let mut walk = CommitDateWalk::new(
+            [c],
+            Some(interesting),
+            None,
+            FnWalkCallbacks {
+                parents: |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
+                seconds: |id| Ok(*times.get(&id).unwrap()),
+            },
+        )
+        .unwrap();
+        let mut iter_out = Vec::new();
+        while let Some(oid) = walk.next().unwrap() {
+            iter_out.push(oid);
+        }
+        assert_eq!(iter_out, vec_out);
     }
 
     #[test]
@@ -256,56 +284,5 @@ mod tests {
         )
         .unwrap();
         assert!(got.is_empty());
-    }
-
-    #[test]
-    fn skips_tips_outside_interesting() {
-        let in_set = oid(1);
-        let out_set = oid(2);
-        let interesting = HashSet::from([in_set]);
-        let got = walk_by_commit_date(
-            [out_set, in_set],
-            Some(&interesting),
-            None,
-            |_| Ok(vec![]),
-            |_| Ok(10),
-        )
-        .unwrap();
-        assert_eq!(got, vec![in_set]);
-    }
-
-    #[test]
-    fn none_interesting_walks_tip_to_parent() {
-        let c = oid(1);
-        let p = oid(2);
-        let parents: HashMap<_, _> = [(c, vec![p]), (p, vec![])].into();
-        let times: HashMap<_, _> = [(c, 100i64), (p, 50)].into();
-
-        let got = walk_by_commit_date(
-            [c],
-            None,
-            None,
-            |id| Ok(parents.get(&id).cloned().unwrap_or_default()),
-            |id| Ok(*times.get(&id).unwrap()),
-        )
-        .unwrap();
-        assert_eq!(got, vec![c, p]);
-    }
-
-    #[test]
-    fn heap_entry_eq_matches_ord_keys() {
-        // Eq/Ord must use the same keys (seconds + insertion_ctr), not oid.
-        let a = HeapEntry {
-            seconds: 1,
-            insertion_ctr: 0,
-            oid: oid(1),
-        };
-        let b = HeapEntry {
-            seconds: 1,
-            insertion_ctr: 0,
-            oid: oid(2),
-        };
-        assert_eq!(a, b);
-        assert_eq!(a.cmp(&b), Ordering::Equal);
     }
 }

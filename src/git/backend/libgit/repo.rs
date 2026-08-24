@@ -17,10 +17,16 @@ pub(crate) struct CachedRepo {
 
 impl CachedRepo {
     pub(crate) fn open(repo_path: &str) -> Result<Self, Box<dyn Error>> {
+        let mut from_cache = false;
         let repo = CACHED_REPO.with_borrow_mut(|cached| match cached {
-            Some((path, _)) if path == repo_path => Ok(cached.take().unwrap().1),
+            Some((path, _)) if path == repo_path => {
+                from_cache = true;
+                Ok(cached.take().unwrap().1)
+            }
             _ => Repository::open(repo_path),
         })?;
+        #[cfg(feature = "prefetch-stats")]
+        crate::git::diag::record_cached_repo_open(from_cache);
         Ok(CachedRepo {
             repo: Some(repo),
             repo_path: repo_path.to_string(),

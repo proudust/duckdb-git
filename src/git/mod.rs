@@ -1,6 +1,8 @@
 pub mod all_refs;
 pub mod backend;
 pub mod date_walk;
+#[cfg(feature = "prefetch-stats")]
+pub mod diag;
 pub mod ident;
 pub mod model;
 pub mod options;

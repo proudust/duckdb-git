@@ -81,6 +81,18 @@ pub fn snapshot_blob_ring_stats() -> BlobRingStats {
     crate::git::backend::libgit::snapshot_blob_ring_stats()
 }
 
+/// Reset process-wide prefetch diagnostics (`prefetch-stats` feature).
+#[cfg(feature = "prefetch-stats")]
+pub fn reset_prefetch_stats() {
+    crate::git::diag::reset_prefetch_stats();
+}
+
+/// Snapshot prefetch diagnostics accumulated since the last reset.
+#[cfg(feature = "prefetch-stats")]
+pub fn snapshot_prefetch_stats() -> crate::git::diag::PrefetchStats {
+    crate::git::diag::snapshot_prefetch_stats()
+}
+
 /// Forwarder so benches can time the libgit numstat path without depending on
 /// crate-private modules.
 #[cfg(feature = "libgit-backend")]

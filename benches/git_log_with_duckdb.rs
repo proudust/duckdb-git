@@ -4,7 +4,7 @@
 //! Measures execution time and memory allocation across different query scenarios:
 //! - metadata_only: core revwalk + metadata reading
 //! - with_diff: diff computation
-//! - limit_10: LIMIT query performance
+//! - limit_10: LIMIT query performance (early walk stop via prefetch cancel)
 //!
 //! Each scenario is run for `backend='libgit'` and, when compiled with `gix-backend`,
 //! `backend='gix'`.

@@ -1,5 +1,5 @@
 use super::diff::emit_file_changes;
-use crate::git::date_walk::{oid_bytes_from_slice, walk_by_commit_date, OidBytes};
+use crate::git::date_walk::{oid_bytes_from_slice, CommitDateWalk, DateWalkCallbacks, OidBytes};
 use crate::git::ident::{commit_header, parse_ident};
 use crate::git::options::DiffMerges;
 use crate::git::revision::{unresolved_revision_error, RevisionTerm};
@@ -44,16 +44,11 @@ fn collect_all_tips(repo: &gix::Repository) -> Result<Vec<gix::ObjectId>, Box<dy
     Ok(tips)
 }
 
-pub(crate) fn walk_commit_oids(
+fn resolve_revision_tips(
     repo: &gix::Repository,
     revision: Option<&[RevisionTerm]>,
-    max_count: Option<usize>,
-    first_parent: bool,
     all_refs: bool,
-) -> Result<Vec<gix::ObjectId>, Box<dyn Error>> {
-    // Same two-stage order as libgit: all_refs tips first, then revision push/hide.
-    // Only `tips` seed the date PQ; `hidden` is used solely for interesting-set construction.
-    let has_hide = revision.is_some_and(|t| t.iter().any(|x| x.negate));
+) -> Result<(Vec<gix::ObjectId>, Vec<gix::ObjectId>), Box<dyn Error>> {
     let (mut tips, mut hidden) = if all_refs {
         (collect_all_tips(repo)?, Vec::new())
     } else if revision.is_none() {
@@ -65,7 +60,6 @@ pub(crate) fn walk_commit_oids(
 
     if let Some(terms) = revision {
         for term in terms {
-            // Peel annotated tags like `git log <rev>` (`v1` → underlying commit).
             let spec = if term.spec.contains("^{") {
                 term.spec.clone()
             } else {
@@ -85,6 +79,27 @@ pub(crate) fn walk_commit_oids(
         }
     }
 
+    Ok((tips, hidden))
+}
+
+/// Inputs for a date-ordered commit walk (tips + optional hide filter).
+pub(crate) struct WalkPrepared {
+    pub tips: Vec<OidBytes>,
+    pub interesting: Option<HashSet<OidBytes>>,
+    pub first_parent: bool,
+    pub max_count: Option<usize>,
+}
+
+pub(crate) fn prepare_walk(
+    repo: &gix::Repository,
+    revision: Option<&[RevisionTerm]>,
+    max_count: Option<usize>,
+    first_parent: bool,
+    all_refs: bool,
+) -> Result<WalkPrepared, Box<dyn Error>> {
+    let has_hide = revision.is_some_and(|t| t.iter().any(|x| x.negate));
+    let (tips, hidden) = resolve_revision_tips(repo, revision, all_refs)?;
+
     let tip_bytes: Vec<OidBytes> = tips.iter().copied().map(oid_to_bytes).collect();
 
     let interesting = if has_hide {
@@ -93,7 +108,6 @@ pub(crate) fn walk_commit_oids(
             walk = walk.first_parent_only();
         }
         let walk_iter = walk.all()?;
-        // Interesting set: full revwalk, never truncated by max_count.
         Some(
             walk_iter
                 .map(|info| Ok(oid_to_bytes(info?.id)))
@@ -104,30 +118,90 @@ pub(crate) fn walk_commit_oids(
         None
     };
 
-    let ordered = walk_by_commit_date(
-        tip_bytes,
-        interesting.as_ref(),
+    Ok(WalkPrepared {
+        tips: tip_bytes,
+        interesting,
+        first_parent,
         max_count,
-        |id| {
-            let commit = repo.find_commit(bytes_to_oid(id))?;
-            let parent_ids: Vec<_> = commit.parent_ids().collect();
-            let n = if first_parent {
-                parent_ids.len().min(1)
-            } else {
-                parent_ids.len()
-            };
-            Ok(parent_ids
-                .into_iter()
-                .take(n)
-                .map(|p| oid_to_bytes(p.detach()))
-                .collect())
-        },
-        |id| {
-            let commit = repo.find_commit(bytes_to_oid(id))?;
-            let header = commit_header(commit.data.as_ref());
-            Ok(parse_ident(header, b"committer")?.seconds)
-        },
-    )?;
+    })
+}
+
+pub(crate) struct GixWalkCallbacks<'a> {
+    repo: &'a gix::Repository,
+    first_parent: bool,
+}
+
+impl DateWalkCallbacks for GixWalkCallbacks<'_> {
+    fn parents(&mut self, id: OidBytes) -> Result<Vec<OidBytes>, Box<dyn Error>> {
+        #[cfg(feature = "prefetch-stats")]
+        crate::git::diag::record_walker_find_commit();
+        let commit = self.repo.find_commit(bytes_to_oid(id))?;
+        let parent_ids: Vec<_> = commit.parent_ids().collect();
+        let n = if self.first_parent {
+            parent_ids.len().min(1)
+        } else {
+            parent_ids.len()
+        };
+        Ok(parent_ids
+            .into_iter()
+            .take(n)
+            .map(|p| oid_to_bytes(p.detach()))
+            .collect())
+    }
+
+    fn committer_seconds(&mut self, id: OidBytes) -> Result<i64, Box<dyn Error>> {
+        #[cfg(feature = "prefetch-stats")]
+        crate::git::diag::record_walker_find_commit();
+        let commit = self.repo.find_commit(bytes_to_oid(id))?;
+        let header = commit_header(commit.data.as_ref());
+        Ok(parse_ident(header, b"committer")?.seconds)
+    }
+}
+
+pub(crate) fn run_commit_date_walk(
+    repo: &gix::Repository,
+    prep: WalkPrepared,
+    mut on_oid: impl FnMut(OidBytes) -> Result<bool, String>,
+) -> Result<(), String> {
+    let mut callbacks = GixWalkCallbacks {
+        repo,
+        first_parent: prep.first_parent,
+    };
+    let mut walk = CommitDateWalk::new(
+        prep.tips,
+        prep.interesting,
+        prep.max_count,
+        callbacks,
+    )
+    .map_err(|e| e.to_string())?;
+
+    while let Some(oid) = walk.next().map_err(|e| e.to_string())? {
+        if !on_oid(oid)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn walk_commit_oids(
+    repo: &gix::Repository,
+    revision: Option<&[RevisionTerm]>,
+    max_count: Option<usize>,
+    first_parent: bool,
+    all_refs: bool,
+) -> Result<Vec<gix::ObjectId>, Box<dyn Error>> {
+    let prep = prepare_walk(repo, revision, max_count, first_parent, all_refs)?;
+    let mut callbacks = GixWalkCallbacks {
+        repo,
+        first_parent: prep.first_parent,
+    };
+    let ordered = CommitDateWalk::new(
+        prep.tips,
+        prep.interesting,
+        prep.max_count,
+        callbacks,
+    )?
+    .drain_into_vec()?;
 
     Ok(ordered.into_iter().map(bytes_to_oid).collect())
 }
@@ -139,6 +213,8 @@ pub(crate) fn emit_commit(
     diff_merges: DiffMerges,
     sink: &mut impl CommitSink,
 ) -> Result<(), Box<dyn Error>> {
+    #[cfg(feature = "prefetch-stats")]
+    crate::git::diag::record_emit_find_commit();
     let commit = repo.find_commit(oid)?;
     let header = commit_header(commit.data.as_ref());
     let author = parse_ident(header, b"author")?;

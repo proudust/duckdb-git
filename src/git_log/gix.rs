@@ -1,18 +1,22 @@
-use crate::git::backend::gix::{collect_refs, emit_commit, walk_commit_oids, CachedRepo};
+use crate::git::backend::gix::{collect_refs, emit_commit, prepare_walk, run_commit_date_walk, CachedRepo};
+use crate::git::date_walk::OidBytes;
 use crate::git::sink::CommitSink;
 use crate::git_log::params::GitLogParameter;
+use crate::git_log::prefetch::{
+    fixed_max_threads, OidPrefetchBuffer, READ_BATCH_SIZE, RING_CAPACITY,
+};
 use crate::git_log::schema;
 use crate::git_log::vector::VectorInserter;
 use duckdb::core::DataChunkHandle;
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+#[cfg(feature = "prefetch-stats")]
+use std::time::Instant;
 
 struct GixLogScannerInner {
-    commit_oids: Vec<gix::ObjectId>,
+    buffer: OidPrefetchBuffer,
     decorations: HashMap<gix::ObjectId, Vec<String>>,
-    current_index: AtomicUsize,
     batch_size: usize,
     max_threads: u64,
     repo_path: String,
@@ -20,6 +24,10 @@ struct GixLogScannerInner {
 
 pub struct GixLogScanner {
     inner: Arc<GixLogScannerInner>,
+}
+
+fn bytes_to_oid(bytes: OidBytes) -> gix::ObjectId {
+    gix::ObjectId::from(bytes)
 }
 
 impl GixLogScanner {
@@ -35,7 +43,7 @@ impl GixLogScanner {
         let handle = CachedRepo::open(repo_path)?;
         let repo = handle.repo();
 
-        let commit_oids = walk_commit_oids(
+        let prep = prepare_walk(
             repo,
             params.revision.as_deref(),
             params.max_count,
@@ -48,15 +56,46 @@ impl GixLogScanner {
             HashMap::new()
         };
 
-        let (max_threads, batch_size) = compute_parallelism(commit_oids.len());
+        let buffer = OidPrefetchBuffer::new(RING_CAPACITY);
+        let producer = buffer.producer();
+        let repo_path_owned = repo_path.to_string();
+
+        let walker = std::thread::spawn(move || {
+            let result = (|| -> Result<(), String> {
+                let handle = CachedRepo::open(&repo_path_owned).map_err(|e| e.to_string())?;
+                let repo = handle.repo();
+                #[cfg(feature = "prefetch-stats")]
+                {
+                    crate::git::diag::record_walker_identity(
+                        crate::git::diag::thread_id_bits(),
+                        repo as *const _ as usize,
+                    );
+                }
+                #[cfg(feature = "prefetch-stats")]
+                let walk_t = Instant::now();
+                let walk_result = run_commit_date_walk(repo, prep, |oid| {
+                    if !producer.push(oid) {
+                        return Ok(false);
+                    }
+                    Ok(true)
+                });
+                #[cfg(feature = "prefetch-stats")]
+                crate::git::diag::record_walk(walk_t.elapsed());
+                walk_result
+            })();
+            match result {
+                Ok(()) => producer.mark_finished(),
+                Err(e) => producer.set_error(e),
+            }
+        });
+        buffer.attach_walker(walker);
 
         Ok(GixLogScanner {
             inner: Arc::new(GixLogScannerInner {
-                commit_oids,
+                buffer,
                 decorations,
-                current_index: AtomicUsize::new(0),
-                batch_size,
-                max_threads,
+                batch_size: READ_BATCH_SIZE,
+                max_threads: fixed_max_threads(false),
                 repo_path: repo_path.to_string(),
             }),
         })
@@ -72,39 +111,47 @@ impl GixLogScanner {
         output: &mut DataChunkHandle,
         column_indices: &[u64],
     ) -> Result<u32, Box<dyn Error>> {
-        let start_index = self
+        #[cfg(feature = "prefetch-stats")]
+        let read_t = Instant::now();
+        let batch = self
             .inner
-            .current_index
-            .fetch_add(self.inner.batch_size, Ordering::Relaxed);
-
-        if start_index >= self.inner.commit_oids.len() {
+            .buffer
+            .take_batch(self.inner.batch_size)
+            .map_err(|e| -> Box<dyn Error> { e.into() })?;
+        if batch.is_empty() {
+            #[cfg(feature = "prefetch-stats")]
+            crate::git::diag::record_read(read_t.elapsed());
             return Ok(0);
         }
 
-        let end_index = std::cmp::min(
-            start_index + self.inner.batch_size,
-            self.inner.commit_oids.len(),
-        );
-
         let handle = CachedRepo::open(&self.inner.repo_path)?;
         let repo = handle.repo();
+        #[cfg(feature = "prefetch-stats")]
+        {
+            crate::git::diag::record_read_identity(
+                crate::git::diag::thread_id_bits(),
+                repo as *const _ as usize,
+            );
+        }
 
         let mut writer = VectorInserter::new(output, column_indices);
 
         let empty_refs: Vec<String> = Vec::new();
         let skip_file_changes = !schema::needs_file_changes(column_indices);
-        let oids = &self.inner.commit_oids[start_index..end_index];
-        for (batch_idx, oid) in oids.iter().enumerate() {
+        #[cfg(feature = "prefetch-stats")]
+        let emit_t = Instant::now();
+        for (batch_idx, oid_bytes) in batch.iter().enumerate() {
+            let oid = bytes_to_oid(*oid_bytes);
             writer.begin_row(batch_idx);
             emit_commit(
                 repo,
-                *oid,
+                oid,
                 skip_file_changes,
                 params.diff_merges,
                 &mut writer,
             )?;
 
-            let refs = self.inner.decorations.get(oid).unwrap_or(&empty_refs);
+            let refs = self.inner.decorations.get(&oid).unwrap_or(&empty_refs);
             writer.begin_decorate(refs.len());
             for name in refs {
                 writer.decorate_name(name);
@@ -114,15 +161,11 @@ impl GixLogScanner {
         }
 
         writer.finish();
-        Ok(oids.len() as u32)
+        #[cfg(feature = "prefetch-stats")]
+        {
+            crate::git::diag::record_emit(emit_t.elapsed());
+            crate::git::diag::record_read(read_t.elapsed());
+        }
+        Ok(batch.len() as u32)
     }
-}
-
-fn compute_parallelism(commit_count: usize) -> (u64, usize) {
-    let cpu_cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    let max_threads = std::cmp::min(commit_count, cpu_cores) as u64;
-    let batch_size = (commit_count / cpu_cores).clamp(1, 2048);
-    (max_threads, batch_size)
 }

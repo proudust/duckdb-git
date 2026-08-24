@@ -3,6 +3,7 @@ mod gix;
 #[cfg(feature = "libgit-backend")]
 mod libgit;
 mod params;
+mod prefetch;
 pub(crate) mod schema;
 pub(crate) mod vector;
 

@@ -10,7 +10,8 @@ pub(crate) use blob_ring::{
 };
 pub use blob_ring::{BlobRing, BlobRingStats, PendingOlds};
 pub(crate) use commits::{
-    emit_commit, prepare_walk, run_commit_date_walk, walk_commit_oids, EmitOpts, WalkPrepared,
+    emit_commit, prepare_walk, run_commit_date_walk, start_commit_date_walk, walk_commit_oids,
+    walk_next_oid, EmitOpts, WalkPrepared,
 };
 pub(crate) use decorate::collect_refs;
 pub(crate) use repo::CachedRepo;

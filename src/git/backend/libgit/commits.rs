@@ -185,16 +185,42 @@ pub(crate) fn run_commit_date_walk(
         prep.tips,
         prep.interesting,
         prep.max_count,
-        callbacks,
+        &mut callbacks,
     )
     .map_err(|e| e.to_string())?;
 
-    while let Some(oid) = walk.next().map_err(|e| e.to_string())? {
+    while let Some(oid) = walk.next(&mut callbacks).map_err(|e| e.to_string())? {
         if !on_oid(oid)? {
             break;
         }
     }
     Ok(())
+}
+
+/// Start a date walk that can be resumed across calls with a fresh repo borrow.
+pub(crate) fn start_commit_date_walk(
+    repo: &Repository,
+    prep: WalkPrepared,
+) -> Result<CommitDateWalk, Box<dyn Error>> {
+    let mut callbacks = LibgitWalkCallbacks {
+        repo,
+        first_parent: prep.first_parent,
+    };
+    CommitDateWalk::new(
+        prep.tips,
+        prep.interesting,
+        prep.max_count,
+        &mut callbacks,
+    )
+}
+
+pub(crate) fn walk_next_oid(
+    repo: &Repository,
+    first_parent: bool,
+    walk: &mut CommitDateWalk,
+) -> Result<Option<OidBytes>, Box<dyn Error>> {
+    let mut callbacks = LibgitWalkCallbacks { repo, first_parent };
+    walk.next(&mut callbacks)
 }
 
 pub(crate) fn walk_commit_oids(
@@ -205,17 +231,18 @@ pub(crate) fn walk_commit_oids(
     all_refs: bool,
 ) -> Result<Vec<Oid>, Box<dyn Error>> {
     let prep = prepare_walk(repo, revision, max_count, first_parent, all_refs)?;
+    let first_parent = prep.first_parent;
     let mut callbacks = LibgitWalkCallbacks {
         repo,
-        first_parent: prep.first_parent,
+        first_parent,
     };
     let ordered = CommitDateWalk::new(
         prep.tips,
         prep.interesting,
         prep.max_count,
-        callbacks,
+        &mut callbacks,
     )?
-    .drain_into_vec()?;
+    .drain_into_vec(&mut callbacks)?;
 
     Ok(ordered.into_iter().map(bytes_to_oid).collect())
 }

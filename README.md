@@ -49,11 +49,11 @@ select commit_id, message from git_log('/path/to/repo', revision='main', max_cou
 -- git log dev ^main
 select commit_id, message from git_log('.', revision=['dev', '^main']);
 
--- git log --decorate
+-- Ref names pointing at this commit (git log --decorate)
 select commit_id, decorate from git_log('.') where len(decorate) > 0;
 
--- GitHub-style "branches and tags containing this commit" display
-select commit_id, contained_branches, contained_tags from git_log('.', max_count=10);
+-- For "which branches/tags contain this commit", use `decorate` at tips or
+-- `git branch --contains` / `git tag --contains` outside DuckDB.
 
 -- Query a remote repository
 select commit_id, message from git_log('https://github.com/proudust/duckdb-git.git', max_count=5);
@@ -109,8 +109,6 @@ Returns commit history as a table.
 | `message`             | `VARCHAR NOT NULL`       | Commit message                                                                    |
 | `parents`             | `VARCHAR[] NOT NULL`     | Parent commit hashes                                                              |
 | `decorate`            | `VARCHAR[] NOT NULL`     | Branch and tag names pointing at this commit                                      |
-| `contained_branches`  | `VARCHAR[] NOT NULL`     | Branches whose tip is this commit or a descendant of it (`git branch --contains`) |
-| `contained_tags`      | `VARCHAR[] NOT NULL`     | Tags whose tip is this commit or a descendant of it (`git tag --contains`)        |
 | `file_changes`        | `STRUCT(...)[] NOT NULL` | File changes                                                                      |
 
 The `file_changes` struct contains:

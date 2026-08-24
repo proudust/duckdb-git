@@ -1,6 +1,5 @@
 mod blob_ring;
 mod commits;
-mod contained;
 mod decorate;
 mod diff;
 mod repo;
@@ -11,7 +10,6 @@ pub(crate) use blob_ring::{
 };
 pub use blob_ring::{BlobRing, BlobRingStats, PendingOlds};
 pub(crate) use commits::{emit_commit, walk_commit_oids, EmitOpts};
-pub(crate) use contained::build_contained_index;
 pub(crate) use decorate::collect_refs;
 pub(crate) use repo::CachedRepo;
 pub(crate) use xdiff::diff_line_counts;

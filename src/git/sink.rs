@@ -23,10 +23,6 @@ pub trait CommitSink {
     fn parent(&mut self, hex: &[u8]);
     fn begin_decorate(&mut self, count: usize);
     fn decorate_name(&mut self, name: &str);
-    fn begin_contained_branches(&mut self, count: usize);
-    fn contained_branch(&mut self, name: &str);
-    fn begin_contained_tags(&mut self, count: usize);
-    fn contained_tag(&mut self, name: &str);
     /// Reserve space for upcoming [`file_change`](Self::file_change) calls when the
     /// count is known. Default is a no-op; sinks may use this to avoid per-item growth.
     fn begin_file_changes(&mut self, _count: usize) {}
@@ -75,8 +71,6 @@ pub struct CommitData {
     pub message: Vec<u8>,
     pub parents: Vec<String>,
     pub decorate: Vec<String>,
-    pub contained_branches: Vec<String>,
-    pub contained_tags: Vec<String>,
     pub file_changes: Vec<FileChange>,
 }
 
@@ -131,24 +125,6 @@ impl CommitSink for CollectingSink {
 
     fn decorate_name(&mut self, name: &str) {
         self.row.decorate.push(name.to_owned());
-    }
-
-    fn begin_contained_branches(&mut self, count: usize) {
-        self.row.contained_branches.clear();
-        self.row.contained_branches.reserve(count);
-    }
-
-    fn contained_branch(&mut self, name: &str) {
-        self.row.contained_branches.push(name.to_owned());
-    }
-
-    fn begin_contained_tags(&mut self, count: usize) {
-        self.row.contained_tags.clear();
-        self.row.contained_tags.reserve(count);
-    }
-
-    fn contained_tag(&mut self, name: &str) {
-        self.row.contained_tags.push(name.to_owned());
     }
 
     fn begin_file_changes(&mut self, count: usize) {

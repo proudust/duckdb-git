@@ -19,14 +19,6 @@ pub struct VectorInserter<'a> {
     decorate_offset: usize,
     decorate_insert_at: usize,
     decorate_set: bool,
-    contained_branches: Option<ListVector<'a>>,
-    contained_branches_offset: usize,
-    contained_branches_insert_at: usize,
-    contained_branches_set: bool,
-    contained_tags: Option<ListVector<'a>>,
-    contained_tags_offset: usize,
-    contained_tags_insert_at: usize,
-    contained_tags_set: bool,
     file_changes: Option<ListVector<'a>>,
     file_changes_offset: usize,
     file_changes_row_count: usize,
@@ -45,8 +37,6 @@ impl<'a> VectorInserter<'a> {
         let mut message = None;
         let mut parents = None;
         let mut decorate = None;
-        let mut contained_branches = None;
-        let mut contained_tags = None;
         let mut file_changes = None;
 
         for (chunk_pos, &orig_idx) in column_indices.iter().enumerate() {
@@ -67,12 +57,6 @@ impl<'a> VectorInserter<'a> {
                 Ok(GitLogColumn::Message) => message = Some(chunk.flat_vector(chunk_pos)),
                 Ok(GitLogColumn::Parents) => parents = Some(chunk.list_vector(chunk_pos)),
                 Ok(GitLogColumn::Decorate) => decorate = Some(chunk.list_vector(chunk_pos)),
-                Ok(GitLogColumn::ContainedBranches) => {
-                    contained_branches = Some(chunk.list_vector(chunk_pos))
-                }
-                Ok(GitLogColumn::ContainedTags) => {
-                    contained_tags = Some(chunk.list_vector(chunk_pos))
-                }
                 Ok(GitLogColumn::FileChanges) => file_changes = Some(chunk.list_vector(chunk_pos)),
                 Err(()) => {}
             }
@@ -95,14 +79,6 @@ impl<'a> VectorInserter<'a> {
             decorate_offset: 0,
             decorate_insert_at: 0,
             decorate_set: false,
-            contained_branches,
-            contained_branches_offset: 0,
-            contained_branches_insert_at: 0,
-            contained_branches_set: false,
-            contained_tags,
-            contained_tags_offset: 0,
-            contained_tags_insert_at: 0,
-            contained_tags_set: false,
             file_changes,
             file_changes_offset: 0,
             file_changes_row_count: 0,
@@ -117,12 +93,6 @@ impl<'a> VectorInserter<'a> {
         if let Some(decorate_vec) = self.decorate.as_mut() {
             decorate_vec.set_len(self.decorate_offset);
         }
-        if let Some(contained_branches_vec) = self.contained_branches.as_mut() {
-            contained_branches_vec.set_len(self.contained_branches_offset);
-        }
-        if let Some(contained_tags_vec) = self.contained_tags.as_mut() {
-            contained_tags_vec.set_len(self.contained_tags_offset);
-        }
         if let Some(fc_vec) = self.file_changes.as_mut() {
             fc_vec.set_len(self.file_changes_offset);
         }
@@ -134,8 +104,6 @@ impl CommitSink for VectorInserter<'_> {
         self.row_idx = idx;
         self.parents_set = false;
         self.decorate_set = false;
-        self.contained_branches_set = false;
-        self.contained_tags_set = false;
         self.file_changes_row_count = 0;
     }
 
@@ -215,42 +183,6 @@ impl CommitSink for VectorInserter<'_> {
         }
     }
 
-    fn begin_contained_branches(&mut self, count: usize) {
-        if let Some(vec) = self.contained_branches.as_mut() {
-            let _ = vec.child(self.contained_branches_offset + count);
-            vec.set_entry(self.row_idx, self.contained_branches_offset, count);
-            self.contained_branches_insert_at = self.contained_branches_offset;
-            self.contained_branches_offset += count;
-            self.contained_branches_set = true;
-        }
-    }
-
-    fn contained_branch(&mut self, name: &str) {
-        if let Some(vec) = self.contained_branches.as_mut() {
-            let child = vec.child(self.contained_branches_offset);
-            child.insert(self.contained_branches_insert_at, name);
-            self.contained_branches_insert_at += 1;
-        }
-    }
-
-    fn begin_contained_tags(&mut self, count: usize) {
-        if let Some(vec) = self.contained_tags.as_mut() {
-            let _ = vec.child(self.contained_tags_offset + count);
-            vec.set_entry(self.row_idx, self.contained_tags_offset, count);
-            self.contained_tags_insert_at = self.contained_tags_offset;
-            self.contained_tags_offset += count;
-            self.contained_tags_set = true;
-        }
-    }
-
-    fn contained_tag(&mut self, name: &str) {
-        if let Some(vec) = self.contained_tags.as_mut() {
-            let child = vec.child(self.contained_tags_offset);
-            child.insert(self.contained_tags_insert_at, name);
-            self.contained_tags_insert_at += 1;
-        }
-    }
-
     fn begin_file_changes(&mut self, count: usize) {
         if let Some(fc_vec) = self.file_changes.as_mut() {
             let _ = fc_vec.struct_child(self.file_changes_offset + count);
@@ -312,12 +244,6 @@ impl CommitSink for VectorInserter<'_> {
         }
         if self.decorate.is_some() && !self.decorate_set {
             self.begin_decorate(0);
-        }
-        if self.contained_branches.is_some() && !self.contained_branches_set {
-            self.begin_contained_branches(0);
-        }
-        if self.contained_tags.is_some() && !self.contained_tags_set {
-            self.begin_contained_tags(0);
         }
         if let Some(fc_vec) = self.file_changes.as_mut() {
             fc_vec.set_entry(

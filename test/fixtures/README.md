@@ -59,14 +59,14 @@ Orphan lineages (`chmod-text`, `common-tail`) are included only in the `--all` w
 | `refs/tags/left`                                | B          |                                    |
 | `refs/tags/right` / `refs/heads/side`           | C          |                                    |
 | `refs/tags/merged` / `refs/remotes/origin/main` | D          | fixed; tip may advance             |
-| `refs/remotes/origin/HEAD` → `origin/main`      | (symbolic) | excluded from `contained_branches` |
+| `refs/remotes/origin/HEAD` → `origin/main`      | (symbolic) | remote HEAD alias                  |
 | `typechange` / `binary` / `whitespace` / `deleted` | F       | same commit                        |
 | `refs/tags/note`                                | H          |                                    |
 | `refs/tags/rename`                              | I          |                                    |
 | *(untagged)* `gitlink-bump~1`                   | K          | decorate=`[]` coverage             |
 | `refs/tags/gitlink-bump` / `refs/tags/multipath` | L         | same commit                        |
 | `refs/tags/padded-author` / `refs/tags/amended` | O          | same commit; tip                   |
-| `chmod-text` / `chmod-binary`                   | Q          | orphan chmod; not in `contained_tags` of A–O |
+| `chmod-text` / `chmod-binary`                   | Q          | orphan chmod; not reachable from master tip |
 | `common-tail`                                   | R          | orphan; long common suffix; numstat `60/42` on `trim_repro.txt` |
 | `refs/heads/master`                             | O (tip)    |                                    |
 

@@ -342,10 +342,6 @@ mod tests {
         fn parent(&mut self, _hex: &[u8]) {}
         fn begin_decorate(&mut self, _count: usize) {}
         fn decorate_name(&mut self, _name: &str) {}
-        fn begin_contained_branches(&mut self, _count: usize) {}
-        fn contained_branch(&mut self, _name: &str) {}
-        fn begin_contained_tags(&mut self, _count: usize) {}
-        fn contained_tag(&mut self, _name: &str) {}
         fn file_change(&mut self, fc: crate::git::sink::FileChangeRef<'_>) {
             self.paths.push(fc.path.to_vec());
         }

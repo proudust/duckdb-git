@@ -17,9 +17,7 @@ pub enum GitLogColumn {
     Message = 7,
     Parents = 8,
     Decorate = 9,
-    ContainedBranches = 10,
-    ContainedTags = 11,
-    FileChanges = 12,
+    FileChanges = 10,
 }
 
 impl GitLogColumn {
@@ -43,9 +41,7 @@ impl TryFrom<u64> for GitLogColumn {
             7 => Ok(Self::Message),
             8 => Ok(Self::Parents),
             9 => Ok(Self::Decorate),
-            10 => Ok(Self::ContainedBranches),
-            11 => Ok(Self::ContainedTags),
-            12 => Ok(Self::FileChanges),
+            10 => Ok(Self::FileChanges),
             _ => Err(()),
         }
     }
@@ -116,14 +112,6 @@ pub fn bind_columns(bind: &BindInfo) -> Result<(), Box<dyn std::error::Error>> {
         LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
     bind.add_result_column("decorate", decorate_array_type);
 
-    let contained_branches_array_type =
-        LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
-    bind.add_result_column("contained_branches", contained_branches_array_type);
-
-    let contained_tags_array_type =
-        LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Varchar));
-    bind.add_result_column("contained_tags", contained_tags_array_type);
-
     bind.add_result_column("file_changes", file_changes_list_type());
 
     Ok(())
@@ -131,14 +119,6 @@ pub fn bind_columns(bind: &BindInfo) -> Result<(), Box<dyn std::error::Error>> {
 
 pub fn needs_refs(column_indices: &[u64]) -> bool {
     column_indices.contains(&GitLogColumn::Decorate.index())
-}
-
-pub fn needs_contained_branches(column_indices: &[u64]) -> bool {
-    column_indices.contains(&GitLogColumn::ContainedBranches.index())
-}
-
-pub fn needs_contained_tags(column_indices: &[u64]) -> bool {
-    column_indices.contains(&GitLogColumn::ContainedTags.index())
 }
 
 pub fn needs_file_changes(column_indices: &[u64]) -> bool {
@@ -166,8 +146,6 @@ mod tests {
         let unrelated = [GitLogColumn::CommitId.index(), GitLogColumn::Author.index()];
         for (needs, column) in [
             (needs_refs as fn(&[u64]) -> bool, GitLogColumn::Decorate),
-            (needs_contained_branches, GitLogColumn::ContainedBranches),
-            (needs_contained_tags, GitLogColumn::ContainedTags),
             (needs_file_changes, GitLogColumn::FileChanges),
         ] {
             assert!(needs(&[column.index()]), "{column:?} should be required");

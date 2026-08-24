@@ -1,14 +1,12 @@
 use crate::git::backend::libgit::{
-    build_contained_index, collect_refs, emit_commit, walk_commit_oids, BlobRing, CachedRepo,
-    EmitOpts,
+    collect_refs, emit_commit, walk_commit_oids, BlobRing, CachedRepo, EmitOpts,
 };
-use crate::git::ref_index::ContainedIndex;
 use crate::git::sink::CommitSink;
 use crate::git_log::params::GitLogParameter;
 use crate::git_log::schema;
 use crate::git_log::vector::VectorInserter;
 use duckdb::core::DataChunkHandle;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -16,7 +14,6 @@ use std::sync::Arc;
 struct LibGitLogScannerInner {
     commit_oids: Vec<git2::Oid>,
     decorations: HashMap<git2::Oid, Vec<String>>,
-    contained: ContainedIndex<git2::Oid>,
     current_index: AtomicUsize,
     batch_size: usize,
     max_threads: u64,
@@ -48,14 +45,6 @@ impl LibGitLogScanner {
         } else {
             HashMap::new()
         };
-        let need_branches = schema::needs_contained_branches(column_indices);
-        let need_tags = schema::needs_contained_tags(column_indices);
-        let contained = if need_branches || need_tags {
-            let wanted: HashSet<git2::Oid> = commit_oids.iter().copied().collect();
-            build_contained_index(repo, params.decorate, need_branches, need_tags, &wanted)?
-        } else {
-            ContainedIndex::empty()
-        };
 
         let (max_threads, batch_size) = compute_parallelism(commit_oids.len());
 
@@ -63,7 +52,6 @@ impl LibGitLogScanner {
             inner: Arc::new(LibGitLogScannerInner {
                 commit_oids,
                 decorations,
-                contained,
                 current_index: AtomicUsize::new(0),
                 batch_size,
                 max_threads,
@@ -125,18 +113,6 @@ impl LibGitLogScanner {
                 writer.begin_decorate(refs.len());
                 for name in refs {
                     writer.decorate_name(name);
-                }
-
-                let n = self.inner.contained.branches_of(oid).count();
-                writer.begin_contained_branches(n);
-                for name in self.inner.contained.branches_of(oid) {
-                    writer.contained_branch(name);
-                }
-
-                let n = self.inner.contained.tags_of(oid).count();
-                writer.begin_contained_tags(n);
-                for name in self.inner.contained.tags_of(oid) {
-                    writer.contained_tag(name);
                 }
 
                 writer.finish_row();

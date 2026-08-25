@@ -1,0 +1,21 @@
+# name: test/sql/gix/output_git_tag.test
+# description: git_tag table function (gix backend)
+# group: [git]
+
+require duckdb_git
+
+require-env GIX_BACKEND 1
+
+query I
+SELECT count(*) FROM git_tag('./test/fixtures/parity.git', backend='gix');
+----
+17
+
+query IIII
+SELECT name, object_type, is_annotated, commit_id
+FROM git_tag('./test/fixtures/parity.git', backend='gix')
+WHERE name IN ('v1', 'left')
+ORDER BY name;
+----
+left	commit	false	fc021d9befa4cb7437bc815878ed20fd9ea37a2b
+v1	tag	true	ff09a62b129cc936f13bc67c5e2dba84f397c64b

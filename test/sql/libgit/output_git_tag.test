@@ -1,0 +1,26 @@
+# name: test/sql/libgit/output_git_tag.test
+# description: git_tag table function (libgit backend)
+# group: [git]
+
+require duckdb_git
+
+query I
+SELECT count(*) FROM git_tag('./test/fixtures/parity.git');
+----
+17
+
+# annotated tag v1
+query IIIII
+SELECT name, object_id, object_type, commit_id, is_annotated
+FROM git_tag('./test/fixtures/parity.git')
+WHERE name = 'v1';
+----
+v1	d91b0a9c3e25212bfd3a5c983393e9dd6e85b315	tag	ff09a62b129cc936f13bc67c5e2dba84f397c64b	true
+
+# lightweight tag
+query IIII
+SELECT name, object_type, is_annotated, commit_id
+FROM git_tag('./test/fixtures/parity.git')
+WHERE name = 'left';
+----
+left	commit	false	fc021d9befa4cb7437bc815878ed20fd9ea37a2b

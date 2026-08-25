@@ -1,0 +1,42 @@
+# name: test/sql/libgit/param_git_branch.test
+# description: git_branch parameters (libgit backend)
+# group: [git]
+
+require duckdb_git
+
+# contains filter (peel-to-commit)
+query I
+SELECT count(*)
+FROM git_branch('./test/fixtures/parity.git', all_branches=true, contains='v1');
+----
+4
+
+# merged filter: branches merged into merge commit (local only)
+query I
+SELECT name
+FROM git_branch('./test/fixtures/parity.git', merged='merged');
+----
+side
+
+# points_at resolves symbolic refs (origin/HEAD)
+query I
+SELECT count(*)
+FROM git_branch('./test/fixtures/parity.git', all_branches=true, points_at='42e16c94127de3a9363f8a6f14fa5ca85856d8b4');
+----
+2
+
+# points_at by commit OID matches annotated tag peel chain
+query II
+SELECT name, commit_id
+FROM git_tag('./test/fixtures/parity.git', points_at='ff09a62b129cc936f13bc67c5e2dba84f397c64b')
+WHERE name = 'v1';
+----
+v1	ff09a62b129cc936f13bc67c5e2dba84f397c64b
+
+# symref on origin/HEAD
+query I
+SELECT symref_target
+FROM git_branch('./test/fixtures/parity.git', all_branches=true)
+WHERE name = 'remotes/origin/HEAD';
+----
+remotes/origin/main

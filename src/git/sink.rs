@@ -34,9 +34,6 @@ pub trait CommitSink {
     fn finish_row(&mut self);
 }
 
-/// Format a SHA-1 object id (20 bytes) as lowercase hex into a stack buffer.
-///
-/// Panics if `oid.len() != 20`. SHA-256 (32-byte) support would widen this API later.
 pub fn oid_hex(oid: &[u8]) -> [u8; 40] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     assert_eq!(oid.len(), 20, "expected SHA-1 object id (20 bytes)");
@@ -46,6 +43,12 @@ pub fn oid_hex(oid: &[u8]) -> [u8; 40] {
         out[i * 2 + 1] = HEX[(b & 0xf) as usize];
     }
     out
+}
+
+pub fn oid_hex_str(oid: &[u8]) -> String {
+    std::str::from_utf8(&oid_hex(oid))
+        .expect("hex digits are ascii")
+        .to_string()
 }
 
 #[cfg(test)]

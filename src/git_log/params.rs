@@ -8,36 +8,10 @@ use duckdb::{
 
 use crate::git::options::{DecorateFormat, DiffMerges};
 use crate::git::revision::{parse_revision_terms, RevisionTerm};
+use crate::git::vtab_common::extract_varchar_list;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BackendKind {
-    Libgit,
-    #[cfg(feature = "gix-backend")]
-    Gix,
-}
-
-impl BackendKind {
-    pub fn default() -> Self {
-        Self::Libgit
-    }
-
-    pub fn parse(s: &str) -> Result<Self, Box<dyn Error>> {
-        match s.to_lowercase().as_str() {
-            "libgit" => Ok(Self::Libgit),
-            "gix" => {
-                #[cfg(feature = "gix-backend")]
-                {
-                    Ok(Self::Gix)
-                }
-                #[cfg(not(feature = "gix-backend"))]
-                {
-                    Err("'gix' backend not enabled in this build".into())
-                }
-            }
-            other => Err(format!("unknown backend: '{other}'").into()),
-        }
-    }
-}
+pub use crate::git::backend_kind::BackendKind;
+pub(crate) use crate::git::vtab_common::{is_remote_url, validate_remote_url};
 
 const REVISION: &str = "revision";
 const MAX_COUNT: &str = "max_count";
@@ -50,16 +24,7 @@ const ALL_REFS: &str = "all_refs";
 const RENAME_THRESHOLD: &str = "rename_threshold";
 
 fn extract_revision_tokens(value: &Value) -> Result<Vec<String>, Box<dyn Error>> {
-    match value.logical_type_id() {
-        LogicalTypeId::List => Ok(value
-            .to_list()
-            .ok_or("revision list must not be NULL")?
-            .iter()
-            .map(|v| v.to_string())
-            .collect()),
-        LogicalTypeId::Varchar => Ok(vec![value.to_string()]),
-        other => Err(format!("revision must be VARCHAR or LIST(VARCHAR), got {other:?}").into()),
-    }
+    extract_varchar_list(value, "revision")
 }
 
 pub(crate) struct GitLogParameter {
@@ -123,26 +88,6 @@ pub fn named_parameters() -> Vec<(String, LogicalTypeHandle)> {
             LogicalTypeHandle::from(LogicalTypeId::Integer),
         ),
     ]
-}
-
-pub(crate) fn is_remote_url(s: &str) -> bool {
-    s.split_once("://").is_some_and(|(scheme, _)| {
-        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
-    })
-}
-
-/// Rejects HTTP(S) URLs that embed credentials (`https://user:token@host/...`).
-///
-/// Anonymous HTTPS only: userinfo would otherwise land in error strings and in the
-/// bare-clone `origin` URL under the shared OS temp cache.
-pub(crate) fn validate_remote_url(url: &str) -> Result<(), Box<dyn Error>> {
-    if remote_url_has_userinfo(url) {
-        return Err(
-            "remote URLs with embedded credentials (userinfo) are not supported; only anonymous HTTP(S) is allowed"
-                .into(),
-        );
-    }
-    Ok(())
 }
 
 fn remote_url_has_userinfo(url: &str) -> bool {

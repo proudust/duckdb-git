@@ -55,6 +55,15 @@ select commit_id, decorate from git_log('.') where len(decorate) > 0;
 -- GitHub-style "branches and tags containing this commit" display
 select commit_id, contained_branches, contained_tags from git_log('.', max_count=10);
 
+-- git log --all
+select commit_id, message from git_log('.', all_refs=true);
+
+-- git branch -a
+select name, commit_id, is_head from git_branch('.', all_branches=true);
+
+-- git tag -l with metadata
+select name, commit_id, is_annotated, message from git_tag('.') where name like 'v%';
+
 -- Query a remote repository
 select commit_id, message from git_log('https://github.com/proudust/duckdb-git.git', max_count=5);
 
@@ -124,6 +133,41 @@ The `file_changes` struct contains:
 | `file_size` | `BIGINT NULL`      | File size in bytes                                                        |
 | `add_lines` | `INTEGER NULL`     | Lines added; `NULL` for binary (`git log --numstat` `-`)                  |
 | `del_lines` | `INTEGER NULL`     | Lines deleted; `NULL` for binary (`git log --numstat` `-`)                |
+
+### `git_branch(repo_path, ...)`
+
+Lists branches like `git branch` / `git branch -a`.
+
+#### Parameters
+
+| Name          | Type      | Default      | Description |
+| ------------- | --------- | ------------ | ----------- |
+| `repo_path`   | `VARCHAR` | *(required)* | Path or HTTP(S) URL (same as `git_log`) |
+| `remotes`     | `BOOLEAN` | `false`      | List remote-tracking branches (`-r`) |
+| `all_branches`| `BOOLEAN` | `false`      | List local and remote (`-a`; ignores `remotes` when true) |
+| `contains`    | `VARCHAR` or `LIST(VARCHAR)` | `NULL` | Branches whose tip contains the commit (`--contains`) |
+| `no_contains` | same      | `NULL`       | Inverse of `contains` |
+| `merged`      | same      | `NULL`       | Branches merged into the commit (`--merged`) |
+| `no_merged`   | same      | `NULL`       | Inverse of `merged` |
+| `points_at`   | same      | `NULL`       | Object identity match (`--points-at`; multiple values OR) |
+| `decorate`    | `VARCHAR` | `'short'`    | `short` uses `git branch -a` names (`remotes/origin/main`); `full` uses full refnames |
+| `backend`     | `VARCHAR` | `'libgit'`   | `libgit` or `gix` |
+
+Name filtering uses SQL (`WHERE name LIKE ...`). HTTP(S) URLs do not populate `refs/remotes/*` (see `git_log` remote fetch).
+
+#### Output columns
+
+`name`, `refname`, `is_head`, `commit_id`, `subject`, author/committer fields, `upstream`, `upstream_ahead`, `upstream_behind`, `upstream_gone`, `push`, `symref_target`. Rows are ordered by `refname`.
+
+### `git_tag(repo_path, ...)`
+
+Lists tags like `git tag -l`.
+
+Shares `contains` / `merged` / `points_at` / `decorate` / `backend` with `git_branch`. Lightweight tags leave tagger/message columns NULL (unlike `git tag -n` showing commit messages).
+
+#### Output columns
+
+`name`, `refname`, `object_id`, `object_type`, `commit_id`, `is_annotated`, `tagger`, `tagger_email`, `tagger_timestamp`, `message` (body without GPG block), `signature`.
 
 ## Building
 

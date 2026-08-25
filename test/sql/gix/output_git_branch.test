@@ -1,0 +1,43 @@
+# name: test/sql/gix/output_git_branch.test
+# description: git_branch table function (gix backend)
+# group: [git]
+
+require duckdb_git
+
+require-env GIX_BACKEND 1
+
+query I
+SELECT count(*) FROM git_branch('./test/fixtures/parity.git', backend='gix');
+----
+2
+
+query III
+SELECT name, commit_id, is_head
+FROM git_branch('./test/fixtures/parity.git', all_branches=true, backend='gix')
+ORDER BY refname;
+----
+master	abe0518abd296b9b9a45755e12ec6ebec26c17a7	true
+side	28264d80ac316c97deb80c3ee52721ed6451e4b2	false
+remotes/origin/HEAD	42e16c94127de3a9363f8a6f14fa5ca85856d8b4	false
+remotes/origin/main	42e16c94127de3a9363f8a6f14fa5ca85856d8b4	false
+
+query IIII
+SELECT upstream, upstream_ahead, upstream_behind, upstream_gone
+FROM git_branch('./test/fixtures/parity.git', backend='gix')
+WHERE name = 'master';
+----
+remotes/origin/main	6	0	false
+
+query II
+SELECT upstream, upstream_gone
+FROM git_branch('./test/fixtures/parity.git', backend='gix')
+WHERE name = 'side';
+----
+remotes/origin/gone	true
+
+query I
+SELECT push
+FROM git_branch('./test/fixtures/parity.git', backend='gix')
+WHERE name = 'master';
+----
+remotes/origin/master

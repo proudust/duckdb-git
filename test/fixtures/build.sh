@@ -228,7 +228,19 @@ publish_bare "$WORKDIR/work" "$BARE" \
   "refs/remotes/origin/main=$D" \
   "refs/remotes/origin/HEAD=ref: refs/remotes/origin/main"
 
-# ── Minimal missing-blob.git (independent of parity.git) ─────────────
+cat >>"$BARE/config" <<'EOF'
+[remote "origin"]
+	url = file:///dev/null
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "master"]
+	remote = origin
+	merge = refs/heads/main
+[branch "side"]
+	remote = origin
+	merge = refs/heads/gone
+EOF
+
+# ── Publish missing-blob.git (independent of parity.git) ─────────────
 # Empty root + one commit adding data.bin, then delete that blob object.
 # Two commits so file_changes uses the parent-diff path (same as git log --numstat).
 MISSING_SRC="$WORKDIR/missing"

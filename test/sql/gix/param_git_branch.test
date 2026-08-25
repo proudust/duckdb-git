@@ -1,0 +1,39 @@
+# name: test/sql/gix/param_git_branch.test
+# description: git_branch parameters (gix backend)
+# group: [git]
+
+require duckdb_git
+
+require-env GIX_BACKEND 1
+
+query I
+SELECT count(*)
+FROM git_branch('./test/fixtures/parity.git', all_branches=true, contains='v1', backend='gix');
+----
+4
+
+query I
+SELECT symref_target
+FROM git_branch('./test/fixtures/parity.git', all_branches=true, backend='gix')
+WHERE name = 'remotes/origin/HEAD';
+----
+remotes/origin/main
+
+query I
+SELECT name
+FROM git_branch('./test/fixtures/parity.git', merged='merged', backend='gix');
+----
+side
+
+query I
+SELECT count(*)
+FROM git_branch('./test/fixtures/parity.git', all_branches=true, points_at='42e16c94127de3a9363f8a6f14fa5ca85856d8b4', backend='gix');
+----
+2
+
+query II
+SELECT name, commit_id
+FROM git_tag('./test/fixtures/parity.git', points_at='ff09a62b129cc936f13bc67c5e2dba84f397c64b', backend='gix')
+WHERE name = 'v1';
+----
+v1	ff09a62b129cc936f13bc67c5e2dba84f397c64b

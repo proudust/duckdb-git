@@ -159,6 +159,8 @@ Name filtering uses SQL (`WHERE name LIKE ...`). HTTP(S) URLs do not populate `r
 
 `name`, `refname`, `is_head`, `commit_id`, `subject`, author/committer fields, `upstream`, `upstream_ahead`, `upstream_behind`, `upstream_gone`, `push`, `symref_target`. Rows are ordered by `refname`.
 
+`push` matches git `@{push}` / `%(push)` (unresolved → SQL `NULL`). With the default `push.default=simple`, it is set only when the upstream tracking ref equals the tracking ref derived from the local branch name; otherwise `NULL` (e.g. local `master` tracking `origin/main`). Short decorate names use `remotes/...` (same as `upstream`), not `%(push:short)`'s `origin/...`. Remote-tracking branch rows always have `push=NULL`.
+
 ### `git_tag(repo_path, ...)`
 
 Lists tags like `git tag -l`.

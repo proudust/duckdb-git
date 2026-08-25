@@ -238,6 +238,8 @@ cat >>"$BARE/config" <<'EOF'
 [branch "side"]
 	remote = origin
 	merge = refs/heads/gone
+[push]
+	default = simple
 EOF
 
 # ── Publish missing-blob.git (independent of parity.git) ─────────────

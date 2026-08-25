@@ -1,5 +1,4 @@
 use crate::git::ident::{commit_header, parse_ident};
-use crate::git::options::DecorateFormat;
 use crate::git::ref_filter::{
     passes_commit_filters, oid_matches_points_at, RefFilterParams, ResolvedCommitFilters,
     ResolvedPointsAt,
@@ -7,6 +6,7 @@ use crate::git::ref_filter::{
 use crate::git::ref_name::branch_display_name;
 use crate::git::ref_row::BranchRow;
 use crate::git::sink::oid_hex_str;
+use gix::bstr::ByteSlice;
 use gix::refs::Target;
 use gix::Repository;
 use std::error::Error;
@@ -168,17 +168,7 @@ pub(crate) fn list_branches(
                     }
                 }
                 if opts.need_push {
-                    if let Some(Ok(push_ref)) = repo.branch_remote_tracking_ref_name(
-                        full_name.as_ref(),
-                        gix::remote::Direction::Push,
-                    ) {
-                        push = Some(branch_display_name(
-                            std::str::from_utf8(push_ref.as_bstr()).expect("utf8 refname"),
-                            opts.format,
-                        ));
-                    } else {
-                        push = resolve_push_ref(repo, &refname, opts.format);
-                    }
+                    push = resolve_push_ref(repo, &refname, opts.format);
                 }
             }
         }
@@ -287,6 +277,116 @@ fn resolve_revspecs_to_commits(
     Ok(out)
 }
 
+/// Resolve `@{push}` / `%(push)` like git's `branch_get_push_1` (remote.c).
+fn resolve_push_ref(
+    repo: &Repository,
+    refname: &str,
+    format: crate::git::options::DecorateFormat,
+) -> Option<String> {
+    let short = refname.strip_prefix("refs/heads/")?;
+    let full_name = gix::refs::FullName::try_from(refname).ok()?;
+    let config = repo.config_snapshot();
+    let push_remote_key = format!("branch.{short}.pushRemote");
+    let remote_key = format!("branch.{short}.remote");
+
+    let remote_name = config
+        .string(&push_remote_key)
+        .or_else(|| config.string("remote.pushDefault"))
+        .or_else(|| config.string(&remote_key))?;
+
+    let remote = repo.find_remote(remote_name.as_bstr()).ok()?;
+    let remote_name_str = remote
+        .name()?
+        .as_bstr()
+        .to_str()
+        .ok()?;
+
+    let decorate = |tracking: String| branch_display_name(&tracking, format);
+
+    let push_specs = remote.refspecs(gix::remote::Direction::Push);
+    if !push_specs.is_empty() {
+        let dst = apply_refspec_transform(&remote, gix::remote::Direction::Push, refname)?;
+        return tracking_for_push_dest(&remote, remote_name_str, &dst).map(decorate);
+    }
+
+    let mirror_key = format!("remote.{remote_name_str}.mirror");
+    let mirror = config.boolean(&mirror_key).unwrap_or(false);
+    if mirror {
+        return tracking_for_push_dest(&remote, remote_name_str, refname).map(decorate);
+    }
+
+    let push_default = match config.string("push.default") {
+        Some(v) => match gix::config::tree::Push::DEFAULT.try_into_default(v.as_bstr()) {
+            Ok(d) => d,
+            Err(_) => return None,
+        },
+        None => gix::push::Default::Simple,
+    };
+
+    match push_default {
+        gix::push::Default::Nothing => None,
+        gix::push::Default::Current | gix::push::Default::Matching => {
+            tracking_for_push_dest(&remote, remote_name_str, refname).map(decorate)
+        }
+        gix::push::Default::Upstream => repo
+            .branch_remote_tracking_ref_name(full_name.as_ref(), gix::remote::Direction::Fetch)
+            .and_then(|r| r.ok())
+            .map(|tracking| decorate(tracking.to_string())),
+        gix::push::Default::Simple => {
+            let up = repo
+                .branch_remote_tracking_ref_name(full_name.as_ref(), gix::remote::Direction::Fetch)
+                .and_then(|r| r.ok())?
+                .to_string();
+            let cur = tracking_for_push_dest(&remote, remote_name_str, refname)?;
+            if up == cur {
+                Some(decorate(cur))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn apply_refspec_transform(
+    remote: &gix::Remote<'_>,
+    direction: gix::remote::Direction,
+    name: &str,
+) -> Option<String> {
+    let full_name = gix::refs::FullName::try_from(name).ok()?;
+    let specs = remote.refspecs(direction);
+    let object_hash = remote.repo().object_hash();
+    let search = gix::refspec::MatchGroup {
+        specs: specs
+            .iter()
+            .map(gix::refspec::RefSpec::to_ref)
+            .filter(|spec| spec.source().is_some() && spec.destination().is_some())
+            .collect(),
+    };
+    let null_id = object_hash.null();
+    let out = search.match_lhs(
+        Some(gix::refspec::match_group::Item {
+            full_ref_name: full_name.as_bstr(),
+            target: &null_id,
+            object: None,
+        })
+        .into_iter(),
+    );
+    out.mappings
+        .into_iter()
+        .next()
+        .and_then(|m| m.rhs)
+        .and_then(|name| gix::refs::FullName::try_from(name.as_ref()).ok())
+        .map(|n| n.to_string())
+}
+
+fn tracking_for_push_dest(
+    remote: &gix::Remote<'_>,
+    _remote_name: &str,
+    remote_ref: &str,
+) -> Option<String> {
+    apply_refspec_transform(remote, gix::remote::Direction::Fetch, remote_ref)
+}
+
 fn is_ancestor(
     repo: &Repository,
     ancestor: &[u8; 20],
@@ -306,16 +406,241 @@ fn is_ancestor(
     Ok(false)
 }
 
-fn resolve_push_ref(
-    repo: &Repository,
-    refname: &str,
-    format: crate::git::options::DecorateFormat,
-) -> Option<String> {
-    let short = refname.strip_prefix("refs/heads/")?;
-    let remote = repo.branch_remote_name(short, gix::remote::Direction::Push)?;
-    let push_ref = format!("refs/remotes/{}/{}", remote.as_bstr(), short);
-    Some(branch_display_name(
-        std::str::from_utf8(push_ref.as_bytes()).ok()?,
-        format,
-    ))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::options::DecorateFormat;
+    use crate::git::ref_filter::RefFilterParams;
+    use crate::git::ref_list::{BranchListOpts, BranchScope};
+    use gix::refs::transaction::PreviousValue;
+
+    fn init_push_repo(merge_remote_branch: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let mut repo = gix::init(dir.path()).unwrap();
+        let mut config = repo.config_snapshot_mut();
+        config
+            .set_raw_value(gix::config::tree::User::NAME, "Test")
+            .unwrap();
+        config
+            .set_raw_value(gix::config::tree::User::EMAIL, "test@example.com")
+            .unwrap();
+        drop(config);
+
+        let sig = gix::actor::Signature {
+            name: "Test".into(),
+            email: "test@example.com".into(),
+            time: gix::date::Time::new(0, 0),
+        };
+        let tree = repo
+            .write_object(gix::objs::Tree::empty())
+            .unwrap()
+            .detach();
+        let commit = repo
+            .write_object(&gix::objs::Commit {
+                tree,
+                parents: vec![].into(),
+                author: sig.clone(),
+                committer: sig,
+                encoding: None,
+                message: "init".into(),
+                extra_headers: Vec::new(),
+            })
+            .unwrap()
+            .detach();
+
+        repo.reference("refs/heads/master", commit, PreviousValue::Any, "test")
+            .unwrap();
+        repo.reference(
+            format!("refs/remotes/origin/{merge_remote_branch}").as_str(),
+            commit,
+            PreviousValue::Any,
+            "test",
+        )
+        .unwrap();
+        if merge_remote_branch != "master" {
+            repo.reference("refs/remotes/origin/master", commit, PreviousValue::Any, "test")
+                .unwrap();
+        }
+
+        std::fs::write(
+            dir.path().join(".git/config"),
+            format!(
+                "[remote \"origin\"]\n\
+                 url = file:///dev/null\n\
+                 fetch = +refs/heads/*:refs/remotes/origin/*\n\
+                 [branch \"master\"]\n\
+                 remote = origin\n\
+                 merge = refs/heads/{merge_remote_branch}\n\
+                 [push]\n\
+                 default = simple\n"
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn push_of_master(repo: &Repository) -> Option<String> {
+        let filter = RefFilterParams::default();
+        let rows = list_branches(
+            repo,
+            &BranchListOpts {
+                scope: BranchScope::Local,
+                format: DecorateFormat::Short,
+                filter: &filter,
+                need_tip_meta: false,
+                need_upstream: false,
+                need_push: true,
+                need_symref: false,
+                need_ahead_behind: false,
+            },
+        )
+        .unwrap();
+        rows.into_iter()
+            .find(|r| r.name == "master")
+            .and_then(|r| r.push)
+    }
+
+    #[test]
+    fn push_simple_mismatch_is_none() {
+        let dir = init_push_repo("main");
+        let repo = gix::open(dir.path()).unwrap();
+        assert_eq!(push_of_master(&repo), None);
+    }
+
+    #[test]
+    fn push_simple_merge_aligned_is_some() {
+        let dir = init_push_repo("master");
+        let repo = gix::open(dir.path()).unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/origin/master")
+        );
+    }
+
+    #[test]
+    fn push_default_current_uses_local_name() {
+        let dir = init_push_repo("main");
+        let mut repo = gix::open(dir.path()).unwrap();
+        repo.config_snapshot_mut()
+            .set_raw_value(gix::config::tree::Push::DEFAULT, "current")
+            .unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/origin/master")
+        );
+    }
+
+    #[test]
+    fn push_default_upstream_uses_merge_tracking() {
+        let dir = init_push_repo("main");
+        let mut repo = gix::open(dir.path()).unwrap();
+        repo.config_snapshot_mut()
+            .set_raw_value(gix::config::tree::Push::DEFAULT, "upstream")
+            .unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/origin/main")
+        );
+    }
+
+    #[test]
+    fn push_default_upstream_ignores_push_remote() {
+        let dir = init_push_repo("main");
+        let mut repo = gix::open(dir.path()).unwrap();
+        let oid = repo
+            .find_reference("refs/heads/master")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        let mut config = repo.config_snapshot_mut();
+        config
+            .set_raw_value_by("remote", Some("publish".into()), "url", "file:///dev/null")
+            .unwrap();
+        config
+            .set_raw_value_by(
+                "remote",
+                Some("publish".into()),
+                "fetch",
+                "+refs/heads/*:refs/remotes/publish/*",
+            )
+            .unwrap();
+        config
+            .set_raw_value_by("branch", Some("master".into()), "pushRemote", "publish")
+            .unwrap();
+        config
+            .set_raw_value(gix::config::tree::Push::DEFAULT, "upstream")
+            .unwrap();
+        drop(config);
+        repo.reference("refs/remotes/publish/master", oid, PreviousValue::Any, "test")
+            .unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/origin/main")
+        );
+    }
+
+    #[test]
+    fn push_mirror_uses_local_name() {
+        let dir = init_push_repo("master");
+        let mut repo = gix::open(dir.path()).unwrap();
+        repo.config_snapshot_mut()
+            .set_raw_value_by("remote", Some("origin".into()), "mirror", "true")
+            .unwrap();
+        repo.config_snapshot_mut()
+            .set_raw_value(gix::config::tree::Push::DEFAULT, "current")
+            .unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/origin/master")
+        );
+    }
+
+    #[test]
+    fn push_default_bogus_is_none() {
+        let dir = init_push_repo("master");
+        let mut repo = gix::open(dir.path()).unwrap();
+        repo.config_snapshot_mut()
+            .set_raw_value(gix::config::tree::Push::DEFAULT, "bogus")
+            .unwrap();
+        assert_eq!(push_of_master(&repo), None);
+    }
+
+    #[test]
+    fn push_triangular_push_remote() {
+        let dir = init_push_repo("master");
+        let mut repo = gix::open(dir.path()).unwrap();
+        let oid = repo
+            .find_reference("refs/heads/master")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        let mut config = repo.config_snapshot_mut();
+        config
+            .set_raw_value_by("remote", Some("publish".into()), "url", "file:///dev/null")
+            .unwrap();
+        config
+            .set_raw_value_by(
+                "remote",
+                Some("publish".into()),
+                "fetch",
+                "+refs/heads/*:refs/remotes/publish/*",
+            )
+            .unwrap();
+        config
+            .set_raw_value_by("branch", Some("master".into()), "pushRemote", "publish")
+            .unwrap();
+        drop(config);
+        repo.reference("refs/remotes/publish/master", oid, PreviousValue::Any, "test")
+            .unwrap();
+        assert_eq!(push_of_master(&repo), None);
+        repo.config_snapshot_mut()
+            .set_raw_value(gix::config::tree::Push::DEFAULT, "current")
+            .unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/publish/master")
+        );
+    }
 }

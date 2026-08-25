@@ -242,16 +242,98 @@ fn ref_peel_chain(repo: &Repository, obj: &git2::Object<'_>) -> Result<Vec<[u8; 
     Ok(chain)
 }
 
-fn resolve_push_ref(repo: &Repository, refname: &str, format: crate::git::options::DecorateFormat) -> Option<String> {
+/// Resolve `@{push}` / `%(push)` like git's `branch_get_push_1` (remote.c).
+/// Returns the remote-tracking ref name; unresolved → `None` (SQL NULL).
+fn resolve_push_ref(
+    repo: &Repository,
+    refname: &str,
+    format: crate::git::options::DecorateFormat,
+) -> Option<String> {
     let short = refname.strip_prefix("refs/heads/")?;
     let config = repo.config().ok()?;
-    let push_remote = config
+
+    // push remote: branch.<name>.pushRemote → remote.pushDefault → branch.<name>.remote
+    let remote_name = config
         .get_string(&format!("branch.{short}.pushRemote"))
         .ok()
-        .or_else(|| config.get_string("remote.pushDefault").ok());
-    let remote = push_remote.or_else(|| config.get_string(&format!("branch.{short}.remote")).ok())?;
-    let push_ref = format!("refs/remotes/{remote}/{short}");
-    Some(branch_display_name(&push_ref, format))
+        .or_else(|| config.get_string("remote.pushDefault").ok())
+        .or_else(|| config.get_string(&format!("branch.{short}.remote")).ok())?;
+
+    let remote = repo.find_remote(&remote_name).ok()?;
+
+    let decorate = |tracking: String| branch_display_name(&tracking, format);
+
+    // Explicit push refspecs: map local → remote dest, then through fetch to tracking.
+    let has_push_specs = remote
+        .push_refspecs()
+        .ok()
+        .is_some_and(|specs| !specs.is_empty());
+    if has_push_specs {
+        let dst = apply_refspec_transform(&remote, git2::Direction::Push, refname)?;
+        return tracking_for_push_dest(&remote, &remote_name, &dst).map(decorate);
+    }
+
+    if config
+        .get_bool(&format!("remote.{remote_name}.mirror"))
+        .unwrap_or(false)
+    {
+        return tracking_for_push_dest(&remote, &remote_name, refname).map(decorate);
+    }
+
+    // unset push.default ≡ simple
+    let push_default = config
+        .get_string("push.default")
+        .unwrap_or_else(|_| "simple".to_string());
+    match push_default.as_str() {
+        "nothing" => None,
+        "current" | "matching" => {
+            tracking_for_push_dest(&remote, &remote_name, refname).map(decorate)
+        }
+        "upstream" | "tracking" => {
+            let up = repo.branch_upstream_name(refname).ok()?;
+            Some(decorate(up.as_str().ok()?.to_string()))
+        }
+        "simple" => {
+            let up = repo.branch_upstream_name(refname).ok()?;
+            let up = up.as_str().ok()?.to_string();
+            let cur = tracking_for_push_dest(&remote, &remote_name, refname)?;
+            if up == cur {
+                Some(decorate(cur))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Apply the first matching refspec of `direction` (src → dst transform).
+fn apply_refspec_transform(
+    remote: &git2::Remote<'_>,
+    direction: git2::Direction,
+    name: &str,
+) -> Option<String> {
+    for spec in remote.refspecs() {
+        if spec.direction() != direction {
+            continue;
+        }
+        if !spec.src_matches(name) {
+            continue;
+        }
+        let buf = spec.transform(name).ok()?;
+        return Some(buf.as_str().ok()?.to_string());
+    }
+    None
+}
+
+/// Map a remote-side ref through fetch refspecs to a local remote-tracking name.
+/// Returns `None` when no fetch refspec matches (git leaves `%(push)` empty).
+fn tracking_for_push_dest(
+    remote: &git2::Remote<'_>,
+    _remote_name: &str,
+    remote_ref: &str,
+) -> Option<String> {
+    apply_refspec_transform(remote, git2::Direction::Fetch, remote_ref)
 }
 
 #[cfg(test)]
@@ -335,5 +417,245 @@ mod tests {
         let side = rows.iter().find(|r| r.name == "side").unwrap();
         assert_eq!(side.upstream.as_deref(), Some("remotes/origin/gone"));
         assert_eq!(side.upstream_gone, Some(true));
+        // simple: upstream tracking ≠ local-name tracking → unresolved
+        assert_eq!(side.push, None);
+
+        let master = rows.iter().find(|r| r.name == "master").unwrap();
+        assert_eq!(master.upstream.as_deref(), Some("remotes/origin/main"));
+        assert_eq!(master.push, None);
+    }
+
+    #[test]
+    fn remote_tracking_rows_have_null_push() {
+        let repo = Repository::open(PARITY).unwrap();
+        let filter = RefFilterParams::default();
+        let rows = list_branches(
+            &repo,
+            &BranchListOpts {
+                scope: BranchScope::Remote,
+                format: DecorateFormat::Short,
+                filter: &filter,
+                need_tip_meta: false,
+                need_upstream: false,
+                need_push: true,
+                need_symref: false,
+                need_ahead_behind: false,
+            },
+        )
+        .unwrap();
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|r| r.push.is_none()));
+    }
+
+    /// Temp repo: one commit on `master`, remote `origin` with default fetch.
+    fn init_push_repo(merge_remote_branch: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let oid = repo
+            .commit(Some("refs/heads/master"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        let commit = repo.find_commit(oid).unwrap();
+        // Ensure HEAD is master (Repository::init may use a different default).
+        repo.set_head("refs/heads/master").unwrap();
+
+        repo.remote("origin", "file:///dev/null").unwrap();
+        // Create remote-tracking refs used as upstream targets.
+        repo.reference(
+            &format!("refs/remotes/origin/{merge_remote_branch}"),
+            oid,
+            true,
+            "test",
+        )
+        .unwrap();
+        if merge_remote_branch != "master" {
+            repo.reference("refs/remotes/origin/master", oid, true, "test")
+                .unwrap();
+        }
+        // Keep commit alive for the reference calls above.
+        let _ = commit;
+
+        let mut cfg = repo.config().unwrap();
+        cfg.set_str("branch.master.remote", "origin").unwrap();
+        cfg.set_str(
+            "branch.master.merge",
+            &format!("refs/heads/{merge_remote_branch}"),
+        )
+        .unwrap();
+        cfg.set_str("push.default", "simple").unwrap();
+        dir
+    }
+
+    fn push_of_master(repo: &Repository) -> Option<String> {
+        let filter = RefFilterParams::default();
+        let rows = list_branches(
+            repo,
+            &BranchListOpts {
+                scope: BranchScope::Local,
+                format: DecorateFormat::Short,
+                filter: &filter,
+                need_tip_meta: false,
+                need_upstream: false,
+                need_push: true,
+                need_symref: false,
+                need_ahead_behind: false,
+            },
+        )
+        .unwrap();
+        rows.into_iter()
+            .find(|r| r.name == "master")
+            .and_then(|r| r.push)
+    }
+
+    #[test]
+    fn push_simple_mismatch_is_none() {
+        let dir = init_push_repo("main");
+        let repo = Repository::open(dir.path()).unwrap();
+        assert_eq!(push_of_master(&repo), None);
+    }
+
+    #[test]
+    fn push_simple_merge_aligned_is_some() {
+        let dir = init_push_repo("master");
+        let repo = Repository::open(dir.path()).unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/origin/master")
+        );
+    }
+
+    #[test]
+    fn push_default_current_uses_local_name() {
+        let dir = init_push_repo("main");
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("push.default", "current")
+            .unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/origin/master")
+        );
+    }
+
+    #[test]
+    fn push_default_upstream_uses_merge_tracking() {
+        let dir = init_push_repo("main");
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("push.default", "upstream")
+            .unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/origin/main")
+        );
+    }
+
+    #[test]
+    fn push_default_upstream_ignores_push_remote() {
+        let dir = init_push_repo("main");
+        let repo = Repository::open(dir.path()).unwrap();
+        let oid = repo.refname_to_id("refs/heads/master").unwrap();
+        repo.remote("publish", "file:///dev/null").unwrap();
+        repo.reference("refs/remotes/publish/master", oid, true, "test")
+            .unwrap();
+        let mut cfg = repo.config().unwrap();
+        cfg.set_str("branch.master.pushRemote", "publish").unwrap();
+        cfg.set_str("push.default", "upstream").unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/origin/main")
+        );
+    }
+
+    #[test]
+    fn push_mirror_uses_local_name() {
+        let dir = init_push_repo("master");
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_bool("remote.origin.mirror", true)
+            .unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("push.default", "current")
+            .unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/origin/master")
+        );
+    }
+
+    #[test]
+    fn push_default_tracking_synonym() {
+        let dir = init_push_repo("master");
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("push.default", "tracking")
+            .unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/origin/master")
+        );
+    }
+
+    #[test]
+    fn push_default_nothing_is_none() {
+        let dir = init_push_repo("master");
+        let repo = Repository::open(dir.path()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("push.default", "nothing")
+            .unwrap();
+        assert_eq!(push_of_master(&repo), None);
+    }
+
+    #[test]
+    fn push_triangular_push_remote() {
+        let dir = init_push_repo("master");
+        let repo = Repository::open(dir.path()).unwrap();
+        let oid = repo.refname_to_id("refs/heads/master").unwrap();
+        repo.remote("publish", "file:///dev/null").unwrap();
+        repo.reference("refs/remotes/publish/master", oid, true, "test")
+            .unwrap();
+        let mut cfg = repo.config().unwrap();
+        cfg.set_str("branch.master.pushRemote", "publish").unwrap();
+        // simple compares upstream (origin) vs push tracking (publish) → None
+        assert_eq!(push_of_master(&repo), None);
+        cfg.set_str("push.default", "current").unwrap();
+        assert_eq!(
+            push_of_master(&repo).as_deref(),
+            Some("remotes/publish/master")
+        );
+    }
+
+    #[test]
+    fn push_full_decorate_uses_refs_remotes() {
+        let dir = init_push_repo("master");
+        let repo = Repository::open(dir.path()).unwrap();
+        let filter = RefFilterParams::default();
+        let rows = list_branches(
+            &repo,
+            &BranchListOpts {
+                scope: BranchScope::Local,
+                format: DecorateFormat::Full,
+                filter: &filter,
+                need_tip_meta: false,
+                need_upstream: false,
+                need_push: true,
+                need_symref: false,
+                need_ahead_behind: false,
+            },
+        )
+        .unwrap();
+        let master = rows.iter().find(|r| r.refname == "refs/heads/master").unwrap();
+        assert_eq!(
+            master.push.as_deref(),
+            Some("refs/remotes/origin/master")
+        );
     }
 }

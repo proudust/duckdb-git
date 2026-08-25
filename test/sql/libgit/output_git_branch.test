@@ -48,9 +48,25 @@ WHERE name = 'side';
 ----
 remotes/origin/gone	true
 
+# push is @{push} / %(push); under push.default=simple (default) master→main is unresolved
 query I
 SELECT push
 FROM git_branch('./test/fixtures/parity.git')
 WHERE name = 'master';
 ----
-remotes/origin/master
+NULL
+
+query I
+SELECT push
+FROM git_branch('./test/fixtures/parity.git')
+WHERE name = 'side';
+----
+NULL
+
+# Remote-tracking rows never resolve push
+query I
+SELECT DISTINCT push IS NULL
+FROM git_branch('./test/fixtures/parity.git', all_branches=true)
+WHERE name LIKE 'remotes/%';
+----
+true

@@ -11,3 +11,5 @@
 [branch "side"]
 	remote = origin
 	merge = refs/heads/gone
+[push]
+	default = simple

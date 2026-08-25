@@ -82,7 +82,9 @@ impl LibGitLogScanner {
         let needs_fc = schema::needs_file_changes(column_indices);
         let max_threads = fixed_max_threads(true, needs_fc);
 
-        let engine = if max_threads == 1 {
+        // Inline skips emit_commit / file_changes; only use it for metadata-only scans.
+        // When file_changes is projected, keep Prefetch even if max_threads == 1 (e.g. 1 core).
+        let engine = if !needs_fc {
             let first_parent = prep.first_parent;
             ScanEngine::Inline {
                 state: Mutex::new(InlineState::Pending(prep)),
@@ -244,11 +246,17 @@ impl LibGitLogScanner {
                 let mut cache = proj.needs_emit_cache().then(HashMap::new);
                 #[cfg(feature = "prefetch-stats")]
                 let walk_t = Instant::now();
-                let walk =
-                    start_commit_date_walk(repo, prep, proj, cache.as_mut())?;
-                #[cfg(feature = "prefetch-stats")]
-                crate::git::diag::record_walk(walk_t.elapsed());
-                *guard = InlineState::Active { walk, cache };
+                match start_commit_date_walk(repo, prep.clone(), proj, cache.as_mut()) {
+                    Ok(walk) => {
+                        #[cfg(feature = "prefetch-stats")]
+                        crate::git::diag::record_walk(walk_t.elapsed());
+                        *guard = InlineState::Active { walk, cache };
+                    }
+                    Err(e) => {
+                        *guard = InlineState::Pending(prep);
+                        return Err(e);
+                    }
+                }
             }
             InlineState::Active { .. } => {}
         }

@@ -2,7 +2,8 @@
 //! Use the `BENCH_REPO` environment variable to configure the target repository.
 //!
 //! Measures execution time and memory allocation across different query scenarios:
-//! - metadata_only: core revwalk + metadata reading
+//! - metadata_only: core revwalk + metadata reading (`count(*)` → commit_id-only projection)
+//! - metadata_wide: wide metadata projection (author/message/parents; emit-cache path)
 //! - with_diff: diff computation
 //! - limit_10: LIMIT query performance (early walk stop via prefetch cancel)
 //!
@@ -102,6 +103,30 @@ fn metadata_only(bencher: divan::Bencher, config: ThreadedConfig) {
     bencher.bench_local(|| {
         let mut stmt = db.prepare(&sql).unwrap();
         stmt.query_row([&path], |row| row.get::<_, i64>(0)).unwrap()
+    });
+}
+
+/// Forces author / message / parents projection so `MetaProjection::needs_emit_cache()` is true
+/// (unlike `metadata_only`'s `count(*)`, which typically projects only `commit_id`).
+/// Note: a subquery `count(*)` over a wide SELECT is insufficient — DuckDB prunes unused columns.
+#[divan::bench(args = THREADED_CONFIGS, sample_count = 10)]
+fn metadata_wide(bencher: divan::Bencher, config: ThreadedConfig) {
+    let path = repo_path();
+    let db = setup_duckdb(config.threads);
+    let sql = git_log_sql(
+        "count(message), count(author), count(len(parents))",
+        config.backend,
+    );
+    bencher.bench_local(|| {
+        let mut stmt = db.prepare(&sql).unwrap();
+        stmt.query_row([&path], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .unwrap()
     });
 }
 

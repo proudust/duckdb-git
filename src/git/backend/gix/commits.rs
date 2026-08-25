@@ -84,6 +84,7 @@ fn resolve_revision_tips(
 }
 
 /// Inputs for a date-ordered commit walk (tips + optional hide filter).
+#[derive(Clone)]
 pub(crate) struct WalkPrepared {
     pub tips: Vec<OidBytes>,
     pub interesting: Option<HashSet<OidBytes>>,

@@ -86,6 +86,8 @@ impl GixLogScanner {
         // Inline skips emit_commit / file_changes; only use it for metadata-only scans.
         // When file_changes is projected, keep Prefetch even if max_threads == 1 (e.g. 1 core).
         let engine = if !needs_fc {
+            #[cfg(feature = "prefetch-stats")]
+            crate::git::diag::reset_prefetch_stats();
             let first_parent = prep.first_parent;
             ScanEngine::Inline {
                 state: Mutex::new(InlineState::Pending(prep)),
@@ -278,15 +280,17 @@ impl GixLogScanner {
         let empty_refs: Vec<String> = Vec::new();
         let mut count = 0u32;
         let mut exhausted = false;
-        #[cfg(feature = "prefetch-stats")]
-        let walk_t = Instant::now();
-        #[cfg(feature = "prefetch-stats")]
-        let emit_t = Instant::now();
         while (count as usize) < batch_size {
+            #[cfg(feature = "prefetch-stats")]
+            let walk_step_t = Instant::now();
             match walk_next_oid(repo, first_parent, proj, walk, cache.as_mut())? {
                 Some(oid_bytes) => {
+                    #[cfg(feature = "prefetch-stats")]
+                    crate::git::diag::record_walk(walk_step_t.elapsed());
                     let oid = bytes_to_oid(oid_bytes);
                     writer.begin_row(count as usize);
+                    #[cfg(feature = "prefetch-stats")]
+                    let emit_step_t = Instant::now();
                     if let Some(cache) = cache.as_mut() {
                         let meta = cache.remove(&oid_bytes).ok_or_else(|| {
                             format!("inline emit cache miss for {oid}")
@@ -303,18 +307,17 @@ impl GixLogScanner {
                         writer.decorate_name(name);
                     }
                     writer.finish_row();
+                    #[cfg(feature = "prefetch-stats")]
+                    crate::git::diag::record_emit(emit_step_t.elapsed());
                     count += 1;
                 }
                 None => {
+                    #[cfg(feature = "prefetch-stats")]
+                    crate::git::diag::record_walk(walk_step_t.elapsed());
                     exhausted = true;
                     break;
                 }
             }
-        }
-        #[cfg(feature = "prefetch-stats")]
-        {
-            crate::git::diag::record_walk(walk_t.elapsed());
-            crate::git::diag::record_emit(emit_t.elapsed());
         }
         if exhausted {
             *guard = InlineState::Done;
@@ -324,12 +327,20 @@ impl GixLogScanner {
         if count == 0 {
             #[cfg(feature = "prefetch-stats")]
             crate::git::diag::record_read(read_t.elapsed());
+            #[cfg(feature = "prefetch-stats")]
+            if exhausted {
+                crate::git::diag::dump_prefetch_stats_if_env();
+            }
             return Ok(0);
         }
 
         writer.finish();
         #[cfg(feature = "prefetch-stats")]
         crate::git::diag::record_read(read_t.elapsed());
+        #[cfg(feature = "prefetch-stats")]
+        if exhausted {
+            crate::git::diag::dump_prefetch_stats_if_env();
+        }
         Ok(count)
     }
 

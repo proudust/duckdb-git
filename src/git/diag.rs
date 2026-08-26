@@ -1,7 +1,8 @@
-//! Temporary diagnostics for git_log prefetch regressions (`prefetch-stats` feature).
+//! Opt-in diagnostics for git_log scan engines (`prefetch-stats` feature).
 //!
-//! Enable with `--features prefetch-stats` and optionally `GIT_LOG_PREFETCH_STATS=1`
-//! to eprint a snapshot when a scan finishes (buffer drop).
+//! Covers both Inline (metadata-only) and Prefetch (with_diff) paths. Enable with
+//! `--features prefetch-stats` and optionally `GIT_LOG_PREFETCH_STATS=1` to eprint
+//! a snapshot when a scan finishes (Inline exhaustion or Prefetch buffer drop).
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -48,8 +49,14 @@ impl PrefetchStats {
         let same_repo = self.walker_repo_ptr != 0
             && self.first_emit_repo_ptr != 0
             && self.walker_repo_ptr == self.first_emit_repo_ptr;
+        let engine_note = if self.push_count == 0 && self.take_batch_count == 0 {
+            "\tengine=Inline (ring metrics N/A)\n"
+        } else {
+            ""
+        };
         format!(
             "prefetch-stats\n\
+             {engine_note}\
              \tpush_count={}\n\
              \tfull_blocks={} full_wait_ms={:.3}\n\
              \ttake_batch_count={} empty_blocks={} empty_wait_ms={:.3}\n\
@@ -190,7 +197,7 @@ pub fn record_empty_wait(d: Duration) {
 }
 
 pub fn record_walk(d: Duration) {
-    WALK_NS.store(d.as_nanos() as u64, Ordering::Relaxed);
+    WALK_NS.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
 }
 
 pub fn record_emit(d: Duration) {

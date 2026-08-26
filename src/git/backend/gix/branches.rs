@@ -412,19 +412,19 @@ mod tests {
     use crate::git::options::DecorateFormat;
     use crate::git::ref_filter::RefFilterParams;
     use crate::git::ref_list::{BranchListOpts, BranchScope};
-    use gix::refs::transaction::PreviousValue;
+    use std::path::Path;
+
+    /// Write a loose ref file directly so tests never need a committer identity
+    /// (gix `reference()` writes a reflog and requires `user.name`/`user.email`).
+    fn write_loose_ref(repo_dir: &Path, refname: &str, oid: gix::ObjectId) {
+        let path = repo_dir.join(".git").join(refname);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("{oid}\n")).unwrap();
+    }
 
     fn init_push_repo(merge_remote_branch: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let mut repo = gix::init(dir.path()).unwrap();
-        let mut config = repo.config_snapshot_mut();
-        config
-            .set_raw_value(gix::config::tree::User::NAME, "Test")
-            .unwrap();
-        config
-            .set_raw_value(gix::config::tree::User::EMAIL, "test@example.com")
-            .unwrap();
-        drop(config);
+        let repo = gix::init(dir.path()).unwrap();
 
         let sig = gix::actor::Signature {
             name: "Test".into(),
@@ -448,18 +448,14 @@ mod tests {
             .unwrap()
             .detach();
 
-        repo.reference("refs/heads/master", commit, PreviousValue::Any, "test")
-            .unwrap();
-        repo.reference(
-            format!("refs/remotes/origin/{merge_remote_branch}").as_str(),
+        write_loose_ref(dir.path(), "refs/heads/master", commit);
+        write_loose_ref(
+            dir.path(),
+            &format!("refs/remotes/origin/{merge_remote_branch}"),
             commit,
-            PreviousValue::Any,
-            "test",
-        )
-        .unwrap();
+        );
         if merge_remote_branch != "master" {
-            repo.reference("refs/remotes/origin/master", commit, PreviousValue::Any, "test")
-                .unwrap();
+            write_loose_ref(dir.path(), "refs/remotes/origin/master", commit);
         }
 
         std::fs::write(
@@ -572,8 +568,7 @@ mod tests {
             .set_raw_value(gix::config::tree::Push::DEFAULT, "upstream")
             .unwrap();
         drop(config);
-        repo.reference("refs/remotes/publish/master", oid, PreviousValue::Any, "test")
-            .unwrap();
+        write_loose_ref(dir.path(), "refs/remotes/publish/master", oid);
         assert_eq!(
             push_of_master(&repo).as_deref(),
             Some("remotes/origin/main")
@@ -632,8 +627,7 @@ mod tests {
             .set_raw_value_by("branch", Some("master".into()), "pushRemote", "publish")
             .unwrap();
         drop(config);
-        repo.reference("refs/remotes/publish/master", oid, PreviousValue::Any, "test")
-            .unwrap();
+        write_loose_ref(dir.path(), "refs/remotes/publish/master", oid);
         assert_eq!(push_of_master(&repo), None);
         repo.config_snapshot_mut()
             .set_raw_value(gix::config::tree::Push::DEFAULT, "current")

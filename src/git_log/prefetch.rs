@@ -13,7 +13,10 @@ use std::time::Instant;
 pub const RING_CAPACITY: usize = 2048;
 
 /// Max OIDs per `read()` batch when the ring has enough ready.
-pub const READ_BATCH_SIZE: usize = 2048;
+///
+/// Kept smaller than [`RING_CAPACITY`] so multiple DuckDB workers can share the
+/// ring on `with_diff` scans; large batches let one thread drain and starve peers.
+pub const READ_BATCH_SIZE: usize = 128;
 
 /// Soft cap on DuckDB worker threads for libgit scans (BlobRing RSS).
 pub const MAX_LIBGIT_THREADS: usize = 4;

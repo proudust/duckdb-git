@@ -58,8 +58,7 @@ impl RepoVolume {
         } else {
             file_changes.div_ceil(commits).max(1)
         };
-        // Match libgit scanner: batch_size = (commits / cores).clamp(1, 2048)
-        // with threads=1 → up to 2048.
+        // VectorInserter replay batch size (microbench only; git_log uses READ_BATCH_SIZE=128).
         let batch_rows = commits.clamp(1, 2048);
         Self {
             commits,

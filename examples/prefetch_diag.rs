@@ -1,4 +1,4 @@
-//! Focused prefetch diagnostics for metadata-only (`count(*)`) scans.
+//! git_log scan diagnostics: Inline metadata (`count(*)`) and Prefetch with_diff.
 //!
 //! ```text
 //! GIT_LOG_PREFETCH_STATS=1 cargo run --example prefetch_diag --release \
@@ -9,7 +9,7 @@
 //!
 //! Env:
 //! - `GIT_LOG_DIAG_REPO` — repo path if argv[1] omitted
-//! - `GIT_LOG_PREFETCH_STATS=1` — also eprint on buffer drop
+//! - `GIT_LOG_PREFETCH_STATS=1` — eprint on Inline scan completion or Prefetch buffer drop
 
 use duckdb::Connection;
 use duckdb_git::microbench::{reset_prefetch_stats, snapshot_prefetch_stats};
@@ -38,7 +38,7 @@ fn run_count(db: &Connection, path: &str, backend: &str) -> (i64, std::time::Dur
     let mut stmt = db.prepare(&sql).unwrap();
     let n: i64 = stmt.query_row([path], |row| row.get(0)).unwrap();
     let wall = t0.elapsed();
-    // Drop statement so InitData / prefetch buffer publish final stats.
+    // Inline dumps at scan exhaustion; Prefetch dumps when its buffer drops (often here).
     drop(stmt);
     (n, wall)
 }
@@ -49,12 +49,15 @@ fn print_run(label: &str, path: &str, backend: &str, threads: usize) {
     let stats = snapshot_prefetch_stats();
     println!("=== {label} backend={backend} threads={threads} count={n} wall_ms={:.3} ===", wall.as_secs_f64() * 1000.0);
     println!("{}", stats.format_report());
+    assert_eq!(
+        stats.push_count, 0,
+        "count(*) uses Inline engine (ring push_count should be 0, got {})",
+        stats.push_count
+    );
     println!(
-        "\tderived: empty_wait/wall={:.2} emit/wall={:.2} walk/wall={:.2} full_wait/walk={:.2}",
-        (stats.empty_wait_ns as f64) / (wall.as_nanos() as f64).max(1.0),
-        (stats.emit_ns as f64) / (wall.as_nanos() as f64).max(1.0),
+        "\tderived: walk/wall={:.2} emit/wall={:.2}",
         (stats.walk_ns as f64) / (wall.as_nanos() as f64).max(1.0),
-        (stats.full_wait_ns as f64) / (stats.walk_ns as f64).max(1.0),
+        (stats.emit_ns as f64) / (wall.as_nanos() as f64).max(1.0),
     );
 }
 
@@ -136,17 +139,13 @@ fn print_with_diff(label: &str, path: &str, backend: &str, threads: usize) {
         stats.push_count > 0,
         "expected Prefetch ring pushes, got push_count=0 (Inline?)"
     );
-    assert_eq!(
-        stats.emit_find_commit, 0,
-        "Prefetch with_diff must not call emit find_commit (got {})",
-        stats.emit_find_commit
-    );
     assert!(
         stats.walker_find_commit > 0,
-        "walker should still find_commit during inspect"
+        "walker should find_commit during inspect (got {})",
+        stats.walker_find_commit
     );
     println!(
-        "\tok: emit_find_commit=0 walker_find_commit={} push_count={}",
+        "\tok: walker_find_commit={} push_count={}",
         stats.walker_find_commit, stats.push_count
     );
 }
@@ -164,7 +163,7 @@ fn main() {
     // Optional control for gix inverse scaling.
     print_run("git_log count(*)", &path, "gix", 4);
 
-    // Prefetch payload path: emit_find_commit must be zero.
+    // Prefetch ring path (file_changes projected).
     print_with_diff("git_log with_diff", &path, "libgit", 1);
     print_with_diff("git_log with_diff", &path, "libgit", 4);
     print_with_diff("git_log with_diff", &path, "gix", 1);

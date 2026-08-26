@@ -280,42 +280,60 @@ mod tests {
     }
 
     #[test]
-    fn early_drop_limits_walk_on_small_ring() {
+    fn drop_cancels_walk_before_repo_exhausted() {
         use crate::git::backend::libgit::{
             prepare_walk, run_prefetch_commit_walk, CachedRepo, PrefetchItem,
         };
         use crate::git::meta_proj::MetaProjection;
         use crate::git::options::DiffMerges;
+        use std::sync::mpsc;
 
         const PARITY: &str = "test/fixtures/parity.git";
+        /// All refs in parity.git (see fixture `build.sh` `--all` count).
+        const PARITY_ALL_REFS_COMMITS: usize = 14;
+
         let handle = CachedRepo::open(PARITY).unwrap();
         let prep = prepare_walk(handle.repo(), None, None, false, true).unwrap();
 
+        let (ring_full_tx, ring_full_rx) = mpsc::sync_channel(0);
         let buf: PrefetchBuffer<PrefetchItem> = PrefetchBuffer::new(4);
         let producer = buf.producer();
         let path = PARITY.to_string();
         let walker = std::thread::spawn(move || {
             let handle = CachedRepo::open(&path).unwrap();
+            let mut local_pushes = 0usize;
             let _ = run_prefetch_commit_walk(
                 handle.repo(),
                 prep,
                 MetaProjection::default(),
                 true,
                 DiffMerges::Off,
-                |item| Ok(producer.push(item)),
+                |item| {
+                    if !producer.push(item) {
+                        return Ok(false);
+                    }
+                    local_pushes += 1;
+                    if local_pushes == 4 {
+                        let _ = ring_full_tx.send(());
+                    }
+                    Ok(true)
+                },
             );
             producer.mark_finished();
         });
         buf.attach_walker(walker);
 
+        ring_full_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("walker should fill the ring before we drop the buffer");
         let batch = buf.take_batch(2).unwrap();
-        assert!(!batch.is_empty());
+        assert_eq!(batch.len(), 2);
         let pushed = buf.pushed_count();
         drop(buf);
 
         assert!(
-            pushed <= 4,
-            "ring capacity should bound walker ahead of consumer"
+            pushed < PARITY_ALL_REFS_COMMITS,
+            "buffer drop should cancel walk before all {PARITY_ALL_REFS_COMMITS} commits (pushed={pushed})"
         );
     }
 }

@@ -73,13 +73,28 @@ pub(super) fn emit_file_changes(
     commit: &gix::Commit,
     sink: &mut impl CommitSink,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let current_tree = commit.tree()?;
-
-    let parent_tree = if commit.parent_ids().count() == 0 {
-        repo.empty_tree()
+    let tree_id = commit.tree_id()?.detach();
+    let parent_tree_id = if commit.parent_ids().count() == 0 {
+        None
     } else {
         let parent_id = commit.parent_ids().next().unwrap().detach();
-        repo.find_commit(parent_id)?.tree()?
+        Some(repo.find_commit(parent_id)?.tree_id()?.detach())
+    };
+    emit_file_changes_trees(repo, tree_id, parent_tree_id, sink)
+}
+
+/// Diff by tree OIDs so emit can skip `find_commit`. `parent_tree_id == None` means root
+/// (`empty_tree`); never pass merge-skipped commits here.
+pub(crate) fn emit_file_changes_trees(
+    repo: &gix::Repository,
+    tree_id: gix::ObjectId,
+    parent_tree_id: Option<gix::ObjectId>,
+    sink: &mut impl CommitSink,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let current_tree = repo.find_tree(tree_id)?;
+    let parent_tree = match parent_tree_id {
+        Some(id) => repo.find_tree(id)?,
+        None => repo.empty_tree(),
     };
 
     let mut resource_cache = repo.diff_resource_cache_for_tree_diff()?;

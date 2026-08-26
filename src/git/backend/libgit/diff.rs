@@ -115,25 +115,60 @@ pub(super) fn emit_file_changes(
     sink: &mut impl CommitSink,
     ring: &mut BlobRing,
 ) -> Result<(), git2::Error> {
-    let pending =
-        emit_file_changes_inner(repo, commit, ignore_all_space, rename_threshold, sink, ring)?;
+    let tree_id = commit.tree_id();
+    let parent_tree_id = if commit.parent_count() == 0 {
+        None
+    } else {
+        Some(commit.parent(0)?.tree_id())
+    };
+    emit_file_changes_trees(
+        repo,
+        tree_id,
+        parent_tree_id,
+        ignore_all_space,
+        rename_threshold,
+        sink,
+        ring,
+    )
+}
+
+/// Diff by tree OIDs so emit can skip `find_commit`. `parent_tree_id == None` means root
+/// (libgit2 `diff_tree_to_tree(None, …)`); never pass merge-skipped commits here.
+pub(crate) fn emit_file_changes_trees(
+    repo: &Repository,
+    tree_id: git2::Oid,
+    parent_tree_id: Option<git2::Oid>,
+    ignore_all_space: bool,
+    rename_threshold: Option<u16>,
+    sink: &mut impl CommitSink,
+    ring: &mut BlobRing,
+) -> Result<(), git2::Error> {
+    let pending = emit_file_changes_inner(
+        repo,
+        tree_id,
+        parent_tree_id,
+        ignore_all_space,
+        rename_threshold,
+        sink,
+        ring,
+    )?;
     ring.finish_commit(pending);
     Ok(())
 }
 
 fn emit_file_changes_inner(
     repo: &Repository,
-    commit: &git2::Commit,
+    tree_id: git2::Oid,
+    parent_tree_id: Option<git2::Oid>,
     ignore_all_space: bool,
     rename_threshold: Option<u16>,
     sink: &mut impl CommitSink,
     ring: &BlobRing,
 ) -> Result<PendingOlds, git2::Error> {
-    let current_tree = commit.tree()?;
-    let parent_tree = if commit.parent_count() == 0 {
-        None
-    } else {
-        Some(commit.parent(0)?.tree()?)
+    let current_tree = repo.find_tree(tree_id)?;
+    let parent_tree = match parent_tree_id {
+        Some(id) => Some(repo.find_tree(id)?),
+        None => None,
     };
 
     let mut diff_options = git2::DiffOptions::new();

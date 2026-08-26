@@ -109,6 +109,48 @@ fn find_commit_same_vs_split(path: &str) {
     );
 }
 
+fn run_with_diff(db: &Connection, path: &str, backend: &str) -> (i64, std::time::Duration) {
+    reset_prefetch_stats();
+    // Force file_changes projection (subquery+count(*) can drop it → Inline path).
+    let sql = format!(
+        "SELECT count(*) FROM git_log(?, backend='{backend}') WHERE len(file_changes) >= 0"
+    );
+    let t0 = Instant::now();
+    let mut stmt = db.prepare(&sql).unwrap();
+    let n: i64 = stmt.query_row([path], |row| row.get(0)).unwrap();
+    let wall = t0.elapsed();
+    drop(stmt);
+    (n, wall)
+}
+
+fn print_with_diff(label: &str, path: &str, backend: &str, threads: usize) {
+    let db = setup(threads);
+    let (n, wall) = run_with_diff(&db, path, backend);
+    let stats = snapshot_prefetch_stats();
+    println!(
+        "=== {label} backend={backend} threads={threads} count={n} wall_ms={:.3} ===",
+        wall.as_secs_f64() * 1000.0
+    );
+    println!("{}", stats.format_report());
+    assert!(
+        stats.push_count > 0,
+        "expected Prefetch ring pushes, got push_count=0 (Inline?)"
+    );
+    assert_eq!(
+        stats.emit_find_commit, 0,
+        "Prefetch with_diff must not call emit find_commit (got {})",
+        stats.emit_find_commit
+    );
+    assert!(
+        stats.walker_find_commit > 0,
+        "walker should still find_commit during inspect"
+    );
+    println!(
+        "\tok: emit_find_commit=0 walker_find_commit={} push_count={}",
+        stats.walker_find_commit, stats.push_count
+    );
+}
+
 fn main() {
     let path = repo_path();
     println!("repo={path}");
@@ -121,4 +163,10 @@ fn main() {
     print_run("git_log count(*)", &path, "gix", 1);
     // Optional control for gix inverse scaling.
     print_run("git_log count(*)", &path, "gix", 4);
+
+    // Prefetch payload path: emit_find_commit must be zero.
+    print_with_diff("git_log with_diff", &path, "libgit", 1);
+    print_with_diff("git_log with_diff", &path, "libgit", 4);
+    print_with_diff("git_log with_diff", &path, "gix", 1);
+    print_with_diff("git_log with_diff", &path, "gix", 4);
 }

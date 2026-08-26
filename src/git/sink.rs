@@ -45,7 +45,7 @@ pub fn oid_hex(oid: &[u8]) -> [u8; 40] {
 }
 
 #[cfg(test)]
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct FileChange {
     pub path: String,

@@ -182,3 +182,11 @@ FROM git_log('./test/fixtures/missing-blob.git',
              max_count=1);
 ----
 unable to read 3c59ec2b524832760260ac21a036a64e900d96c2
+
+# Prefetch path: all_refs × file_changes keeps --all row count (yield order / max_count)
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git', all_refs=true)
+WHERE len(file_changes) >= 0;
+----
+14

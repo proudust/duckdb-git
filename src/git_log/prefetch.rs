@@ -1,6 +1,5 @@
-//! Bounded OID ring between a single walker thread and parallel emit workers.
+//! Bounded prefetch ring between a single walker thread and parallel emit workers.
 
-use crate::git::date_walk::OidBytes;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -9,10 +8,10 @@ use std::time::Duration;
 #[cfg(feature = "prefetch-stats")]
 use std::time::Instant;
 
-/// Ring depth for prefetch (also caps in-flight OID window with batch reads).
+/// Ring depth for prefetch (also caps in-flight window with batch reads).
 pub const RING_CAPACITY: usize = 2048;
 
-/// Max OIDs per `read()` batch when the ring has enough ready.
+/// Max items per `read()` batch when the ring has enough ready.
 ///
 /// Kept smaller than [`RING_CAPACITY`] so multiple DuckDB workers can share the
 /// ring on `with_diff` scans; large batches let one thread drain and starve peers.
@@ -21,8 +20,8 @@ pub const READ_BATCH_SIZE: usize = 128;
 /// Soft cap on DuckDB worker threads for libgit scans (BlobRing RSS).
 pub const MAX_LIBGIT_THREADS: usize = 4;
 
-struct Inner {
-    queue: Mutex<VecDeque<OidBytes>>,
+struct Inner<T> {
+    queue: Mutex<VecDeque<T>>,
     not_empty: Condvar,
     not_full: Condvar,
     capacity: usize,
@@ -33,8 +32,8 @@ struct Inner {
     walker_join: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl Inner {
-    fn push(&self, oid: OidBytes) -> bool {
+impl<T> Inner<T> {
+    fn push(&self, item: T) -> bool {
         if self.cancelled.load(Ordering::Acquire) {
             return false;
         }
@@ -47,7 +46,7 @@ impl Inner {
                 return false;
             }
             if queue.len() < self.capacity {
-                queue.push_back(oid);
+                queue.push_back(item);
                 self.pushed.fetch_add(1, Ordering::Relaxed);
                 #[cfg(feature = "prefetch-stats")]
                 crate::git::diag::record_push();
@@ -98,14 +97,14 @@ impl Inner {
     }
 }
 
-/// Walker-side handle: push OIDs into the ring. Does not join the walker on drop.
-pub struct OidPrefetchProducer {
-    inner: Arc<Inner>,
+/// Walker-side handle: push items into the ring. Does not join the walker on drop.
+pub struct PrefetchProducer<T> {
+    inner: Arc<Inner<T>>,
 }
 
-impl OidPrefetchProducer {
-    pub fn push(&self, oid: OidBytes) -> bool {
-        self.inner.push(oid)
+impl<T> PrefetchProducer<T> {
+    pub fn push(&self, item: T) -> bool {
+        self.inner.push(item)
     }
 
     pub fn set_error(&self, message: String) {
@@ -118,11 +117,11 @@ impl OidPrefetchProducer {
 }
 
 /// Consumer-side owner: take batches and join the walker on drop.
-pub struct OidPrefetchBuffer {
-    inner: Arc<Inner>,
+pub struct PrefetchBuffer<T> {
+    inner: Arc<Inner<T>>,
 }
 
-impl OidPrefetchBuffer {
+impl<T> PrefetchBuffer<T> {
     pub fn new(capacity: usize) -> Self {
         #[cfg(feature = "prefetch-stats")]
         crate::git::diag::reset_prefetch_stats();
@@ -145,8 +144,8 @@ impl OidPrefetchBuffer {
         *self.inner.walker_join.lock().unwrap() = Some(handle);
     }
 
-    pub fn producer(&self) -> OidPrefetchProducer {
-        OidPrefetchProducer {
+    pub fn producer(&self) -> PrefetchProducer<T> {
+        PrefetchProducer {
             inner: Arc::clone(&self.inner),
         }
     }
@@ -155,8 +154,8 @@ impl OidPrefetchBuffer {
         self.inner.pushed.load(Ordering::Relaxed)
     }
 
-    /// Take up to `max_count` contiguous OIDs already in the ring.
-    pub fn take_batch(&self, max_count: usize) -> Result<Vec<OidBytes>, String> {
+    /// Take up to `max_count` contiguous items already in the ring.
+    pub fn take_batch(&self, max_count: usize) -> Result<Vec<T>, String> {
         #[cfg(feature = "prefetch-stats")]
         let t_batch = Instant::now();
         let inner = &self.inner;
@@ -219,7 +218,7 @@ impl OidPrefetchBuffer {
     }
 }
 
-impl Drop for OidPrefetchBuffer {
+impl<T> Drop for PrefetchBuffer<T> {
     fn drop(&mut self) {
         self.inner.cancel_and_join();
         #[cfg(feature = "prefetch-stats")]
@@ -244,6 +243,7 @@ pub fn fixed_max_threads(libgit: bool, needs_file_changes: bool) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::date_walk::OidBytes;
 
     fn oid(n: u8) -> OidBytes {
         let mut b = [0u8; 20];
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn take_batch_waits_until_push() {
-        let buf = OidPrefetchBuffer::new(4);
+        let buf = PrefetchBuffer::new(4);
         let producer = buf.producer();
         let t = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
@@ -274,25 +274,36 @@ mod tests {
 
     #[test]
     fn cancel_stops_push() {
-        let buf = OidPrefetchBuffer::new(2);
+        let buf: PrefetchBuffer<OidBytes> = PrefetchBuffer::new(2);
         buf.inner.cancelled.store(true, Ordering::Release);
         assert!(!buf.producer().push(oid(1)));
     }
 
     #[test]
     fn early_drop_limits_walk_on_small_ring() {
-        use crate::git::backend::libgit::{prepare_walk, run_commit_date_walk, CachedRepo};
+        use crate::git::backend::libgit::{
+            prepare_walk, run_prefetch_commit_walk, CachedRepo, PrefetchItem,
+        };
+        use crate::git::meta_proj::MetaProjection;
+        use crate::git::options::DiffMerges;
 
         const PARITY: &str = "test/fixtures/parity.git";
         let handle = CachedRepo::open(PARITY).unwrap();
         let prep = prepare_walk(handle.repo(), None, None, false, true).unwrap();
 
-        let buf = OidPrefetchBuffer::new(4);
+        let buf: PrefetchBuffer<PrefetchItem> = PrefetchBuffer::new(4);
         let producer = buf.producer();
         let path = PARITY.to_string();
         let walker = std::thread::spawn(move || {
             let handle = CachedRepo::open(&path).unwrap();
-            let _ = run_commit_date_walk(handle.repo(), prep, |oid| Ok(producer.push(oid)));
+            let _ = run_prefetch_commit_walk(
+                handle.repo(),
+                prep,
+                MetaProjection::default(),
+                true,
+                DiffMerges::Off,
+                |item| Ok(producer.push(item)),
+            );
             producer.mark_finished();
         });
         buf.attach_walker(walker);

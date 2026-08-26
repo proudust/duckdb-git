@@ -1,5 +1,5 @@
 use super::blob_ring::BlobRing;
-use super::diff::emit_file_changes;
+use super::diff::{emit_file_changes, emit_file_changes_trees};
 use crate::git::date_walk::{oid_bytes_from_slice, CommitDateWalk, DateWalkCallbacks, OidBytes};
 use crate::git::ident::{commit_header, parse_ident};
 use crate::git::meta_proj::MetaProjection;
@@ -164,6 +164,126 @@ pub(crate) struct InspectedCommit {
     pub parent_oids: Vec<Oid>,
 }
 
+/// Prefetch ring payload: inspect stash moved to the ring at yield time.
+pub(crate) struct PrefetchItem {
+    pub oid: OidBytes,
+    pub meta: InspectedCommit,
+    pub tree_id: OidBytes,
+    /// Root only for trees API: `None`. Merge-skipped commits also leave this
+/// unset but must not call `emit_file_changes_trees`.
+    pub parent_tree_id: Option<OidBytes>,
+    /// Real parent count (projection-independent) for `DiffMerges::Off` merge skip.
+    pub parent_count: u32,
+}
+
+struct PrefetchWalkCallbacks<'a> {
+    repo: &'a Repository,
+    first_parent: bool,
+    proj: MetaProjection,
+    needs_file_changes: bool,
+    diff_merges: DiffMerges,
+    stash: &'a mut HashMap<OidBytes, PrefetchItem>,
+}
+
+fn build_inspected_meta(
+    commit: &git2::Commit<'_>,
+    header: &[u8],
+    committer: crate::git::ident::ParsedIdent<'_>,
+    proj: MetaProjection,
+    parent_oids: Vec<Oid>,
+) -> Result<InspectedCommit, Box<dyn Error>> {
+    let (author_name, author_email, author_seconds) = if proj.author {
+        let author = parse_ident(header, b"author")?;
+        (
+            author.name.to_vec(),
+            author.email.to_vec(),
+            author.seconds,
+        )
+    } else {
+        (Vec::new(), Vec::new(), 0)
+    };
+    Ok(InspectedCommit {
+        author_name,
+        author_email,
+        author_seconds,
+        committer_name: if proj.committer {
+            committer.name.to_vec()
+        } else {
+            Vec::new()
+        },
+        committer_email: if proj.committer {
+            committer.email.to_vec()
+        } else {
+            Vec::new()
+        },
+        committer_seconds: committer.seconds,
+        message: if proj.message {
+            commit.message_raw_bytes().to_vec()
+        } else {
+            Vec::new()
+        },
+        parent_oids,
+    })
+}
+
+impl DateWalkCallbacks for PrefetchWalkCallbacks<'_> {
+    fn inspect(&mut self, id: OidBytes) -> Result<(i64, Vec<OidBytes>), Box<dyn Error>> {
+        #[cfg(feature = "prefetch-stats")]
+        crate::git::diag::record_walker_find_commit();
+        let commit = self.repo.find_commit(bytes_to_oid(id))?;
+        let header = commit_header(commit.raw_header_bytes());
+        let committer = parse_ident(header, b"committer")?;
+        let seconds = committer.seconds;
+        let parent_count = commit.parent_count();
+        let walk_n = if self.first_parent {
+            parent_count.min(1)
+        } else {
+            parent_count
+        };
+        let emit_n = if self.proj.parents {
+            parent_count
+        } else {
+            0
+        };
+        let mut parent_bytes = Vec::with_capacity(walk_n);
+        let mut parent_oids = Vec::with_capacity(emit_n);
+        for i in 0..walk_n.max(emit_n) {
+            let pid = commit.parent_id(i)?;
+            if i < walk_n {
+                parent_bytes.push(oid_to_bytes(pid));
+            }
+            if i < emit_n {
+                parent_oids.push(pid);
+            }
+        }
+
+        let merge_skip =
+            self.needs_file_changes && self.diff_merges == DiffMerges::Off && parent_count > 1;
+        let need_parent_tree = self.needs_file_changes && parent_count >= 1 && !merge_skip;
+        let parent_tree_id = if need_parent_tree {
+            let pid = commit.parent_id(0)?;
+            // tree_id() only — do not inflate the tree object.
+            let tid = self.repo.find_commit(pid)?.tree_id();
+            Some(oid_to_bytes(tid))
+        } else {
+            None
+        };
+
+        let meta = build_inspected_meta(&commit, header, committer, self.proj, parent_oids)?;
+        self.stash.insert(
+            id,
+            PrefetchItem {
+                oid: id,
+                meta,
+                tree_id: oid_to_bytes(commit.tree_id()),
+                parent_tree_id,
+                parent_count: parent_count as u32,
+            },
+        );
+        Ok((seconds, parent_bytes))
+    }
+}
+
 impl DateWalkCallbacks for LibgitWalkCallbacks<'_> {
     fn inspect(&mut self, id: OidBytes) -> Result<(i64, Vec<OidBytes>), Box<dyn Error>> {
         #[cfg(feature = "prefetch-stats")]
@@ -257,6 +377,76 @@ pub(crate) fn emit_inspected_commit(
     }
 }
 
+/// Walk in date order; stash PrefetchItem at inspect; push at yield (same order as OID walk).
+pub(crate) fn run_prefetch_commit_walk(
+    repo: &Repository,
+    prep: WalkPrepared,
+    proj: MetaProjection,
+    needs_file_changes: bool,
+    diff_merges: DiffMerges,
+    mut on_item: impl FnMut(PrefetchItem) -> Result<bool, String>,
+) -> Result<(), String> {
+    let mut stash = HashMap::new();
+    let mut callbacks = PrefetchWalkCallbacks {
+        repo,
+        first_parent: prep.first_parent,
+        proj,
+        needs_file_changes,
+        diff_merges,
+        stash: &mut stash,
+    };
+    let mut walk = CommitDateWalk::new(
+        prep.tips,
+        prep.interesting,
+        prep.max_count,
+        &mut callbacks,
+    )
+    .map_err(|e| e.to_string())?;
+
+    while let Some(oid) = walk.next(&mut callbacks).map_err(|e| e.to_string())? {
+        let item = callbacks
+            .stash
+            .remove(&oid)
+            .ok_or_else(|| format!("prefetch stash miss for {}", bytes_to_oid(oid)))?;
+        if !on_item(item)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn emit_prefetch_item(
+    repo: &Repository,
+    item: &PrefetchItem,
+    opts: &EmitOpts,
+    sink: &mut impl CommitSink,
+    ring: &mut BlobRing,
+) -> Result<(), Box<dyn Error>> {
+    let oid = bytes_to_oid(item.oid);
+    emit_inspected_commit(oid, &item.meta, sink);
+    let skip = opts.skip_file_changes
+        || (opts.diff_merges == DiffMerges::Off && item.parent_count > 1);
+    if !skip {
+        let tree_id = bytes_to_oid(item.tree_id);
+        let parent_tree_id = item.parent_tree_id.map(bytes_to_oid);
+        debug_assert!(
+            item.parent_count == 0 || parent_tree_id.is_some() || opts.diff_merges == DiffMerges::Off,
+            "non-root diffing commit must carry parent_tree_id"
+        );
+        emit_file_changes_trees(
+            repo,
+            tree_id,
+            parent_tree_id,
+            opts.ignore_all_space,
+            opts.rename_threshold,
+            sink,
+            ring,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)] // retained for OID-only walk helpers / diagnostics
 pub(crate) fn run_commit_date_walk(
     repo: &Repository,
     prep: WalkPrepared,
@@ -500,6 +690,46 @@ mod tests {
         emit(&repo, oid, false, DiffMerges::Off, &mut ring).unwrap();
         assert!(ring.finish_count() >= 1);
         assert_eq!(ring.len(), 0);
+    }
+
+    #[test]
+    fn emit_file_changes_trees_matches_commit_path_for_root() {
+        use super::super::diff::{emit_file_changes, emit_file_changes_trees};
+        use crate::git::sink::CollectingSink;
+
+        let repo = Repository::open(PARITY).unwrap();
+        let oid = peel_commit(&repo, "v1");
+        let commit = repo.find_commit(oid).unwrap();
+        assert_eq!(commit.parent_count(), 0);
+
+        let mut via_trees = CollectingSink::default();
+        let mut ring_trees = BlobRing::new();
+        via_trees.begin_row(0);
+        emit_file_changes_trees(
+            &repo,
+            commit.tree_id(),
+            None,
+            false,
+            None,
+            &mut via_trees,
+            &mut ring_trees,
+        )
+        .unwrap();
+
+        let mut via_commit = CollectingSink::default();
+        let mut ring_commit = BlobRing::new();
+        via_commit.begin_row(0);
+        emit_file_changes(
+            &repo,
+            &commit,
+            false,
+            None,
+            &mut via_commit,
+            &mut ring_commit,
+        )
+        .unwrap();
+
+        assert_eq!(via_trees.row.file_changes, via_commit.row.file_changes);
     }
 
     /// Invalid UTF-8 filename; both root and parent diffs must keep raw bytes.

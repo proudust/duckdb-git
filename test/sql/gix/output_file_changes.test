@@ -87,6 +87,19 @@ SELECT COUNT(*) FROM (
 ----
 0
 
+# Root commit: all blobs are Added; numstat is line count / 0 (same as git log --numstat)
+query IIII
+SELECT change.path, change.status, change.add_lines, change.del_lines
+FROM (SELECT unnest(file_changes) AS change
+      FROM git_log('./test/fixtures/parity.git',
+                   revision='v1',
+                   max_count=1, backend='gix'))
+ORDER BY change.path;
+----
+base.txt	A	1	0
+space.txt	A	3	0
+tracked.txt	A	1	0
+
 # Ordinary blob: file_size is byte length; numstat is numeric (note.txt is 5 lines / 30 bytes)
 query III
 SELECT change.file_size, change.add_lines, change.del_lines
@@ -160,3 +173,11 @@ FROM git_log('./test/fixtures/missing-blob.git',
              max_count=1, backend='gix');
 ----
 unable to read 3c59ec2b524832760260ac21a036a64e900d96c2
+
+# Prefetch path: all_refs × file_changes keeps --all row count (yield order / max_count)
+query I
+SELECT count(*)
+FROM git_log('./test/fixtures/parity.git', all_refs=true, backend='gix')
+WHERE len(file_changes) >= 0;
+----
+14

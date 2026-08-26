@@ -1,13 +1,14 @@
 use crate::git::backend::gix::{
-    collect_refs, emit_commit, emit_inspected_commit, prepare_walk, run_commit_date_walk,
-    start_commit_date_walk, walk_next_oid, CachedRepo, InspectedCommit, WalkPrepared,
+    collect_refs, emit_inspected_commit, emit_prefetch_item, prepare_walk,
+    run_prefetch_commit_walk, start_commit_date_walk, walk_next_oid, CachedRepo, InspectedCommit,
+    PrefetchItem, WalkPrepared,
 };
 use crate::git::date_walk::{CommitDateWalk, OidBytes};
 use crate::git::meta_proj::MetaProjection;
 use crate::git::sink::{oid_hex, CommitSink};
 use crate::git_log::params::GitLogParameter;
 use crate::git_log::prefetch::{
-    fixed_max_threads, OidPrefetchBuffer, READ_BATCH_SIZE, RING_CAPACITY,
+    fixed_max_threads, PrefetchBuffer, READ_BATCH_SIZE, RING_CAPACITY,
 };
 use crate::git_log::schema;
 use crate::git_log::vector::VectorInserter;
@@ -19,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 enum ScanEngine {
-    Prefetch { buffer: OidPrefetchBuffer },
+    Prefetch { buffer: PrefetchBuffer<PrefetchItem> },
     Inline {
         state: Mutex<InlineState>,
         first_parent: bool,
@@ -80,6 +81,7 @@ impl GixLogScanner {
 
         let needs_fc = schema::needs_file_changes(column_indices);
         let max_threads = fixed_max_threads(false, needs_fc);
+        let proj = schema::meta_projection(column_indices);
 
         // Inline skips emit_commit / file_changes; only use it for metadata-only scans.
         // When file_changes is projected, keep Prefetch even if max_threads == 1 (e.g. 1 core).
@@ -89,12 +91,13 @@ impl GixLogScanner {
                 state: Mutex::new(InlineState::Pending(prep)),
                 first_parent,
                 batch_size: READ_BATCH_SIZE,
-                proj: schema::meta_projection(column_indices),
+                proj,
             }
         } else {
-            let buffer = OidPrefetchBuffer::new(RING_CAPACITY);
+            let buffer = PrefetchBuffer::new(RING_CAPACITY);
             let producer = buffer.producer();
             let repo_path_owned = repo_path.to_string();
+            let diff_merges = params.diff_merges;
 
             let walker = std::thread::spawn(move || {
                 let result = (|| -> Result<(), String> {
@@ -109,12 +112,19 @@ impl GixLogScanner {
                     }
                     #[cfg(feature = "prefetch-stats")]
                     let walk_t = Instant::now();
-                    let walk_result = run_commit_date_walk(repo, prep, |oid| {
-                        if !producer.push(oid) {
-                            return Ok(false);
-                        }
-                        Ok(true)
-                    });
+                    let walk_result = run_prefetch_commit_walk(
+                        repo,
+                        prep,
+                        proj,
+                        true,
+                        diff_merges,
+                        |item| {
+                            if !producer.push(item) {
+                                return Ok(false);
+                            }
+                            Ok(true)
+                        },
+                    );
                     #[cfg(feature = "prefetch-stats")]
                     crate::git::diag::record_walk(walk_t.elapsed());
                     walk_result
@@ -171,7 +181,7 @@ impl GixLogScanner {
 
     fn read_prefetch(
         &self,
-        buffer: &OidPrefetchBuffer,
+        buffer: &PrefetchBuffer<PrefetchItem>,
         params: &GitLogParameter,
         output: &mut DataChunkHandle,
         column_indices: &[u64],
@@ -326,7 +336,7 @@ impl GixLogScanner {
     fn emit_batch(
         &self,
         repo: &gix::Repository,
-        batch: &[OidBytes],
+        batch: &[PrefetchItem],
         params: &GitLogParameter,
         output: &mut DataChunkHandle,
         column_indices: &[u64],
@@ -336,12 +346,12 @@ impl GixLogScanner {
         let skip_file_changes = !schema::needs_file_changes(column_indices);
         #[cfg(feature = "prefetch-stats")]
         let emit_t = Instant::now();
-        for (batch_idx, oid_bytes) in batch.iter().enumerate() {
-            let oid = bytes_to_oid(*oid_bytes);
+        for (batch_idx, item) in batch.iter().enumerate() {
+            let oid = bytes_to_oid(item.oid);
             writer.begin_row(batch_idx);
-            emit_commit(
+            emit_prefetch_item(
                 repo,
-                oid,
+                item,
                 skip_file_changes,
                 params.diff_merges,
                 &mut writer,

@@ -83,8 +83,9 @@ impl GixLogScanner {
         let max_threads = fixed_max_threads(false, needs_fc);
         let proj = schema::meta_projection(column_indices);
 
-        // Inline skips emit_commit / file_changes; only use it for metadata-only scans.
-        // When file_changes is projected, keep Prefetch even if max_threads == 1 (e.g. 1 core).
+        // Inline is for metadata-only scans (no file_changes). Prefer one thread +
+        // shared walk state so DuckDB LIMIT/cancel stops without a ring.
+        // With file_changes projected, always Prefetch (even if max_threads == 1).
         let engine = if !needs_fc {
             #[cfg(feature = "git-log-stats")]
             crate::git::diag::reset_git_log_stats();

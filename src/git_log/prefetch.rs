@@ -1,4 +1,10 @@
 //! Bounded prefetch ring between a single walker thread and parallel emit workers.
+//!
+//! The ring carries `PrefetchItem` (OID + inspect metadata + tree ids), not OID-only.
+//! Dropping the consumer cancels the walker so SQL `LIMIT` can stop early, but stop
+//! granularity is coarse: DuckDB may consume up to [`READ_BATCH_SIZE`] rows per
+//! `read()`, and the walker can fill up to [`RING_CAPACITY`] before blocking.
+//! Use `max_count` for an exact walk cap.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

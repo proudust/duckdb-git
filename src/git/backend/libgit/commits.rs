@@ -169,8 +169,8 @@ pub(crate) struct PrefetchItem {
     pub oid: OidBytes,
     pub meta: InspectedCommit,
     pub tree_id: OidBytes,
-    /// Root only for trees API: `None`. Merge-skipped commits also leave this
-/// unset but must not call `emit_file_changes_trees`.
+    /// Root commits use `None` (no parent tree). Merge-skipped commits also leave this
+    /// unset; emit must skip diff for those. Non-root diffing commits must set this.
     pub parent_tree_id: Option<OidBytes>,
     /// Real parent count (projection-independent) for `DiffMerges::Off` merge skip.
     pub parent_count: u32,
@@ -263,6 +263,8 @@ impl DateWalkCallbacks for PrefetchWalkCallbacks<'_> {
         let parent_tree_id = if need_parent_tree {
             let pid = commit.parent_id(0)?;
             // tree_id() only — do not inflate the tree object.
+            #[cfg(feature = "git-log-stats")]
+            crate::git::diag::record_walker_find_commit();
             let tid = self.repo.find_commit(pid)?.tree_id();
             Some(oid_to_bytes(tid))
         } else {
@@ -430,7 +432,7 @@ pub(crate) fn emit_prefetch_item(
         let tree_id = bytes_to_oid(item.tree_id);
         let parent_tree_id = item.parent_tree_id.map(bytes_to_oid);
         debug_assert!(
-            item.parent_count == 0 || parent_tree_id.is_some() || opts.diff_merges == DiffMerges::Off,
+            item.parent_count == 0 || parent_tree_id.is_some(),
             "non-root diffing commit must carry parent_tree_id"
         );
         emit_file_changes_trees(
@@ -442,34 +444,6 @@ pub(crate) fn emit_prefetch_item(
             sink,
             ring,
         )?;
-    }
-    Ok(())
-}
-
-#[allow(dead_code)] // retained for OID-only walk helpers / diagnostics
-pub(crate) fn run_commit_date_walk(
-    repo: &Repository,
-    prep: WalkPrepared,
-    mut on_oid: impl FnMut(OidBytes) -> Result<bool, String>,
-) -> Result<(), String> {
-    let mut callbacks = LibgitWalkCallbacks {
-        repo,
-        first_parent: prep.first_parent,
-        proj: MetaProjection::default(),
-        emit_cache: None,
-    };
-    let mut walk = CommitDateWalk::new(
-        prep.tips,
-        prep.interesting,
-        prep.max_count,
-        &mut callbacks,
-    )
-    .map_err(|e| e.to_string())?;
-
-    while let Some(oid) = walk.next(&mut callbacks).map_err(|e| e.to_string())? {
-        if !on_oid(oid)? {
-            break;
-        }
     }
     Ok(())
 }

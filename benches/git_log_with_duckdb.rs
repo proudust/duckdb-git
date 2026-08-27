@@ -5,7 +5,9 @@
 //! - metadata_only: core revwalk + metadata reading (`count(*)` → commit_id-only projection)
 //! - metadata_wide: wide metadata projection (author/message/parents; emit-cache path)
 //! - with_diff: diff computation
-//! - limit_10: `SELECT *` LIMIT (with_diff / Prefetch path; early stop via buffer cancel)
+//! - limit_10: `SELECT *` LIMIT (with_diff / Prefetch; cancel on buffer drop after DuckDB stops `read`)
+//!   Note: first `read` still emits up to READ_BATCH_SIZE (128) rows; walker may fill up to RING_CAPACITY.
+//!   Prefer `max_count=` for precise walk stop.
 //!
 //! Each scenario is run for `backend='libgit'` and, when compiled with `gix-backend`,
 //! `backend='gix'`.

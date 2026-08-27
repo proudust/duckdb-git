@@ -3,6 +3,9 @@
 //! Covers both Inline (metadata-only) and Prefetch (with_diff) paths. Enable with
 //! `--features git-log-stats` and optionally `GIT_LOG_STATS=1` to eprint
 //! a snapshot when a scan finishes (Inline exhaustion or Prefetch buffer drop).
+//!
+//! Counters are process-wide atomics: concurrent `git_log` scans will interleave.
+//! Prefer one query at a time when interpreting a dump.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -64,6 +67,7 @@ impl GitLogStats {
              \twalker_tid={} first_read_tid={} same_thread={} unique_read_threads={}\n\
              \twalker_repo={:#x} emit_repo={:#x} same_repo={}\n\
              \tfind_commit walker={} emit={}\n\
+             \t  (walker find_commit includes parent tree lookups when diffing)\n\
              \tcached_repo hits={} misses={}",
             self.push_count,
             self.full_blocks,

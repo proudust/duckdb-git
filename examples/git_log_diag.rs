@@ -1,4 +1,5 @@
-//! git_log scan diagnostics: Inline metadata (`count(*)`) and Prefetch with_diff.
+//! git_log scan diagnostics: Inline metadata (`count(*)`), Prefetch with_diff,
+//! and SQL `LIMIT` vs `max_count` stop granularity.
 //!
 //! ```text
 //! GIT_LOG_STATS=1 cargo run --example git_log_diag --release \
@@ -10,6 +11,9 @@
 //! Env:
 //! - `GIT_LOG_DIAG_REPO` — repo path if argv[1] omitted
 //! - `GIT_LOG_STATS=1` — eprint on Inline scan completion or Prefetch buffer drop
+//! - `GIT_LOG_DIAG_ASSERT_LIMIT=1` — assert SQL LIMIT overshoots max_count (needs a repo with >>10 commits)
+//!
+//! Note: `git-log-stats` counters are process-wide; run one query at a time.
 
 use duckdb::Connection;
 use duckdb_git::microbench::{reset_git_log_stats, snapshot_git_log_stats};
@@ -155,6 +159,92 @@ fn print_with_diff(label: &str, path: &str, backend: &str, threads: usize) {
     );
 }
 
+fn run_limit_star(
+    db: &Connection,
+    path: &str,
+    backend: &str,
+) -> (usize, std::time::Duration) {
+    reset_git_log_stats();
+    let sql = format!("SELECT * FROM git_log(?, backend='{backend}') LIMIT 10");
+    let t0 = Instant::now();
+    let mut stmt = db.prepare(&sql).unwrap();
+    let mut rows = stmt.query([path]).unwrap();
+    let mut n = 0usize;
+    while rows.next().unwrap().is_some() {
+        n += 1;
+    }
+    let wall = t0.elapsed();
+    drop(rows);
+    drop(stmt);
+    (n, wall)
+}
+
+fn run_max_count(
+    db: &Connection,
+    path: &str,
+    backend: &str,
+) -> (i64, std::time::Duration) {
+    reset_git_log_stats();
+    let sql = format!(
+        "SELECT count(*) FROM git_log(?, backend='{backend}', max_count=10) WHERE len(file_changes) >= 0"
+    );
+    let t0 = Instant::now();
+    let mut stmt = db.prepare(&sql).unwrap();
+    let n: i64 = stmt.query_row([path], |row| row.get(0)).unwrap();
+    let wall = t0.elapsed();
+    drop(stmt);
+    (n, wall)
+}
+
+fn print_limit_compare(path: &str, backend: &str) {
+    // Small repos (<10 commits) return fewer rows; overshoot vs max_count needs a large repo (BENCH_REPO).
+    const CAP: usize = 10;
+    let db = setup(1);
+
+    let (n_lim, wall_lim) = run_limit_star(&db, path, backend);
+    let lim = snapshot_git_log_stats();
+    println!(
+        "=== SQL LIMIT {CAP} SELECT * backend={backend} rows={n_lim} wall_ms={:.3} ===",
+        wall_lim.as_secs_f64() * 1000.0
+    );
+    println!(
+        "\tpush_count={} walker_find={} emit_find={} take_batch_count={}",
+        lim.push_count, lim.walker_find_commit, lim.emit_find_commit, lim.take_batch_count
+    );
+    assert!(n_lim <= CAP, "SQL LIMIT must not return more than {CAP} rows");
+
+    let (n_mc, wall_mc) = run_max_count(&db, path, backend);
+    let mc = snapshot_git_log_stats();
+    println!(
+        "=== max_count={CAP} with_diff backend={backend} count={n_mc} wall_ms={:.3} ===",
+        wall_mc.as_secs_f64() * 1000.0
+    );
+    println!(
+        "\tpush_count={} walker_find={} emit_find={} take_batch_count={}",
+        mc.push_count, mc.walker_find_commit, mc.emit_find_commit, mc.take_batch_count
+    );
+    assert!(n_mc as usize <= CAP, "max_count must not exceed {CAP}");
+    assert_eq!(
+        n_mc as usize, n_lim,
+        "LIMIT and max_count should return the same row count for this repo"
+    );
+    assert!(
+        mc.push_count as usize <= CAP,
+        "max_count should not prefetch more than the cap (got {})",
+        mc.push_count
+    );
+
+    if std::env::var("GIT_LOG_DIAG_ASSERT_LIMIT").as_deref() == Ok("1") {
+        assert!(
+            lim.push_count > mc.push_count,
+            "expected SQL LIMIT to overshoot ring prefetch (lim={} mc={}); \
+             use a large repo via BENCH_REPO",
+            lim.push_count,
+            mc.push_count
+        );
+    }
+}
+
 fn main() {
     let path = repo_path();
     println!("repo={path}");
@@ -173,4 +263,8 @@ fn main() {
     print_with_diff("git_log with_diff", &path, "libgit", 4);
     print_with_diff("git_log with_diff", &path, "gix", 1);
     print_with_diff("git_log with_diff", &path, "gix", 4);
+
+    // SQL LIMIT vs max_count stop granularity (Prefetch).
+    print_limit_compare(&path, "libgit");
+    print_limit_compare(&path, "gix");
 }

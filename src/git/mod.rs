@@ -1,7 +1,7 @@
 pub mod all_refs;
 pub mod backend;
 pub mod date_walk;
-#[cfg(feature = "prefetch-stats")]
+#[cfg(feature = "git-log-stats")]
 pub mod diag;
 pub mod ident;
 pub mod meta_proj;

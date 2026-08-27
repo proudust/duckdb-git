@@ -1,18 +1,18 @@
 //! git_log scan diagnostics: Inline metadata (`count(*)`) and Prefetch with_diff.
 //!
 //! ```text
-//! GIT_LOG_PREFETCH_STATS=1 cargo run --example prefetch_diag --release \
+//! GIT_LOG_STATS=1 cargo run --example git_log_diag --release \
 //!   --no-default-features \
-//!   --features bundled,libgit-backend,gix-backend,prefetch-stats \
+//!   --features bundled,libgit-backend,gix-backend,git-log-stats \
 //!   -- /path/to/repo
 //! ```
 //!
 //! Env:
 //! - `GIT_LOG_DIAG_REPO` — repo path if argv[1] omitted
-//! - `GIT_LOG_PREFETCH_STATS=1` — eprint on Inline scan completion or Prefetch buffer drop
+//! - `GIT_LOG_STATS=1` — eprint on Inline scan completion or Prefetch buffer drop
 
 use duckdb::Connection;
-use duckdb_git::microbench::{reset_prefetch_stats, snapshot_prefetch_stats};
+use duckdb_git::microbench::{reset_git_log_stats, snapshot_git_log_stats};
 use std::time::Instant;
 
 fn repo_path() -> String {
@@ -32,7 +32,7 @@ fn setup(threads: usize) -> Connection {
 }
 
 fn run_count(db: &Connection, path: &str, backend: &str) -> (i64, std::time::Duration) {
-    reset_prefetch_stats();
+    reset_git_log_stats();
     let sql = format!("SELECT count(*) FROM git_log(?, backend='{backend}')");
     let t0 = Instant::now();
     let mut stmt = db.prepare(&sql).unwrap();
@@ -46,7 +46,7 @@ fn run_count(db: &Connection, path: &str, backend: &str) -> (i64, std::time::Dur
 fn print_run(label: &str, path: &str, backend: &str, threads: usize) {
     let db = setup(threads);
     let (n, wall) = run_count(&db, path, backend);
-    let stats = snapshot_prefetch_stats();
+    let stats = snapshot_git_log_stats();
     println!("=== {label} backend={backend} threads={threads} count={n} wall_ms={:.3} ===", wall.as_secs_f64() * 1000.0);
     println!("{}", stats.format_report());
     assert_eq!(
@@ -113,7 +113,7 @@ fn find_commit_same_vs_split(path: &str) {
 }
 
 fn run_with_diff(db: &Connection, path: &str, backend: &str) -> (i64, std::time::Duration) {
-    reset_prefetch_stats();
+    reset_git_log_stats();
     // Force file_changes projection (subquery+count(*) can drop it → Inline path).
     let sql = format!(
         "SELECT count(*) FROM git_log(?, backend='{backend}') WHERE len(file_changes) >= 0"
@@ -129,7 +129,7 @@ fn run_with_diff(db: &Connection, path: &str, backend: &str) -> (i64, std::time:
 fn print_with_diff(label: &str, path: &str, backend: &str, threads: usize) {
     let db = setup(threads);
     let (n, wall) = run_with_diff(&db, path, backend);
-    let stats = snapshot_prefetch_stats();
+    let stats = snapshot_git_log_stats();
     println!(
         "=== {label} backend={backend} threads={threads} count={n} wall_ms={:.3} ===",
         wall.as_secs_f64() * 1000.0

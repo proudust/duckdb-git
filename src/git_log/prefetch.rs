@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-#[cfg(feature = "prefetch-stats")]
+#[cfg(feature = "git-log-stats")]
 use std::time::Instant;
 
 /// Ring depth for prefetch (also caps in-flight window with batch reads).
@@ -47,15 +47,15 @@ impl<T> Inner<T> {
             if queue.len() < self.capacity {
                 queue.push_back(item);
                 self.pushed.fetch_add(1, Ordering::Relaxed);
-                #[cfg(feature = "prefetch-stats")]
+                #[cfg(feature = "git-log-stats")]
                 crate::git::diag::record_push();
                 self.not_empty.notify_one();
                 return true;
             }
-            #[cfg(feature = "prefetch-stats")]
+            #[cfg(feature = "git-log-stats")]
             let t0 = Instant::now();
             queue = self.not_full.wait(queue).unwrap();
-            #[cfg(feature = "prefetch-stats")]
+            #[cfg(feature = "git-log-stats")]
             crate::git::diag::record_full_wait(t0.elapsed());
         }
     }
@@ -114,8 +114,8 @@ pub struct PrefetchBuffer<T> {
 
 impl<T> PrefetchBuffer<T> {
     pub fn new(capacity: usize) -> Self {
-        #[cfg(feature = "prefetch-stats")]
-        crate::git::diag::reset_prefetch_stats();
+        #[cfg(feature = "git-log-stats")]
+        crate::git::diag::reset_git_log_stats();
         Self {
             inner: Arc::new(Inner {
                 queue: Mutex::new(VecDeque::with_capacity(capacity.min(256))),
@@ -147,24 +147,24 @@ impl<T> PrefetchBuffer<T> {
 
     /// Take up to `max_count` contiguous items already in the ring.
     pub fn take_batch(&self, max_count: usize) -> Result<Vec<T>, String> {
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         let t_batch = Instant::now();
         let inner = &self.inner;
         let mut queue = inner.queue.lock().unwrap();
         loop {
             if let Some(err) = inner.error.lock().unwrap().clone() {
-                #[cfg(feature = "prefetch-stats")]
+                #[cfg(feature = "git-log-stats")]
                 crate::git::diag::record_take_batch(t_batch.elapsed());
                 return Err(err);
             }
             if inner.cancelled.load(Ordering::Acquire) {
                 if queue.is_empty() {
                     if let Some(err) = inner.error.lock().unwrap().clone() {
-                        #[cfg(feature = "prefetch-stats")]
+                        #[cfg(feature = "git-log-stats")]
                         crate::git::diag::record_take_batch(t_batch.elapsed());
                         return Err(err);
                     }
-                    #[cfg(feature = "prefetch-stats")]
+                    #[cfg(feature = "git-log-stats")]
                     crate::git::diag::record_take_batch(t_batch.elapsed());
                     return Ok(Vec::new());
                 }
@@ -173,21 +173,21 @@ impl<T> PrefetchBuffer<T> {
                 let n = max_count.min(queue.len());
                 let batch: Vec<_> = queue.drain(..n).collect();
                 inner.not_full.notify_all();
-                #[cfg(feature = "prefetch-stats")]
+                #[cfg(feature = "git-log-stats")]
                 crate::git::diag::record_take_batch(t_batch.elapsed());
                 return Ok(batch);
             }
             if inner.finished.load(Ordering::Acquire) {
-                #[cfg(feature = "prefetch-stats")]
+                #[cfg(feature = "git-log-stats")]
                 crate::git::diag::record_take_batch(t_batch.elapsed());
                 return Ok(Vec::new());
             }
             // cancelled+empty is handled above under the same queue lock; flag
             // publishers also take queue before notify, so no separate branch here.
-            #[cfg(feature = "prefetch-stats")]
+            #[cfg(feature = "git-log-stats")]
             let t0 = Instant::now();
             queue = inner.not_empty.wait(queue).unwrap();
-            #[cfg(feature = "prefetch-stats")]
+            #[cfg(feature = "git-log-stats")]
             crate::git::diag::record_empty_wait(t0.elapsed());
         }
     }
@@ -196,8 +196,8 @@ impl<T> PrefetchBuffer<T> {
 impl<T> Drop for PrefetchBuffer<T> {
     fn drop(&mut self) {
         self.inner.cancel_and_join();
-        #[cfg(feature = "prefetch-stats")]
-        crate::git::diag::dump_prefetch_stats_if_env();
+        #[cfg(feature = "git-log-stats")]
+        crate::git::diag::dump_git_log_stats_if_env();
     }
 }
 

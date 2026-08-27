@@ -213,7 +213,7 @@ fn build_inspected_meta(
 
 impl DateWalkCallbacks for PrefetchWalkCallbacks<'_> {
     fn inspect(&mut self, id: OidBytes) -> Result<(i64, Vec<OidBytes>), Box<dyn Error>> {
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         crate::git::diag::record_walker_find_commit();
         let commit = self.repo.find_commit(bytes_to_oid(id))?;
         let header = commit_header(commit.data.as_ref());
@@ -274,7 +274,7 @@ impl DateWalkCallbacks for PrefetchWalkCallbacks<'_> {
 
 impl DateWalkCallbacks for GixWalkCallbacks<'_> {
     fn inspect(&mut self, id: OidBytes) -> Result<(i64, Vec<OidBytes>), Box<dyn Error>> {
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         crate::git::diag::record_walker_find_commit();
         let commit = self.repo.find_commit(bytes_to_oid(id))?;
         let header = commit_header(commit.data.as_ref());
@@ -522,7 +522,7 @@ pub(crate) fn emit_commit(
     diff_merges: DiffMerges,
     sink: &mut impl CommitSink,
 ) -> Result<(), Box<dyn Error>> {
-    #[cfg(feature = "prefetch-stats")]
+    #[cfg(feature = "git-log-stats")]
     crate::git::diag::record_emit_find_commit();
     let commit = repo.find_commit(oid)?;
     let header = commit_header(commit.data.as_ref());

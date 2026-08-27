@@ -17,7 +17,7 @@ use git2::Oid;
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
-#[cfg(feature = "prefetch-stats")]
+#[cfg(feature = "git-log-stats")]
 use std::time::Instant;
 
 enum ScanEngine {
@@ -86,8 +86,8 @@ impl LibGitLogScanner {
         // Inline skips emit_commit / file_changes; only use it for metadata-only scans.
         // When file_changes is projected, keep Prefetch even if max_threads == 1 (e.g. 1 core).
         let engine = if !needs_fc {
-            #[cfg(feature = "prefetch-stats")]
-            crate::git::diag::reset_prefetch_stats();
+            #[cfg(feature = "git-log-stats")]
+            crate::git::diag::reset_git_log_stats();
             let first_parent = prep.first_parent;
             ScanEngine::Inline {
                 state: Mutex::new(InlineState::Pending(prep)),
@@ -105,14 +105,14 @@ impl LibGitLogScanner {
                 let result = (|| -> Result<(), String> {
                     let handle = CachedRepo::open(&repo_path_owned).map_err(|e| e.to_string())?;
                     let repo = handle.repo();
-                    #[cfg(feature = "prefetch-stats")]
+                    #[cfg(feature = "git-log-stats")]
                     {
                         crate::git::diag::record_walker_identity(
                             crate::git::diag::thread_id_bits(),
                             repo as *const _ as usize,
                         );
                     }
-                    #[cfg(feature = "prefetch-stats")]
+                    #[cfg(feature = "git-log-stats")]
                     let walk_t = Instant::now();
                     let walk_result = run_prefetch_commit_walk(
                         repo,
@@ -127,7 +127,7 @@ impl LibGitLogScanner {
                             Ok(true)
                         },
                     );
-                    #[cfg(feature = "prefetch-stats")]
+                    #[cfg(feature = "git-log-stats")]
                     crate::git::diag::record_walk(walk_t.elapsed());
                     walk_result
                 })();
@@ -188,20 +188,20 @@ impl LibGitLogScanner {
         output: &mut DataChunkHandle,
         column_indices: &[u64],
     ) -> Result<u32, Box<dyn Error>> {
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         let read_t = Instant::now();
         let batch = buffer
             .take_batch(READ_BATCH_SIZE)
             .map_err(|e| -> Box<dyn Error> { e.into() })?;
         if batch.is_empty() {
-            #[cfg(feature = "prefetch-stats")]
+            #[cfg(feature = "git-log-stats")]
             crate::git::diag::record_read(read_t.elapsed());
             return Ok(0);
         }
 
         let handle = CachedRepo::open(&self.inner.repo_path)?;
         let repo = handle.repo();
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         {
             crate::git::diag::record_read_identity(
                 crate::git::diag::thread_id_bits(),
@@ -210,7 +210,7 @@ impl LibGitLogScanner {
         }
 
         let count = self.emit_batch(repo, &batch, params, output, column_indices)?;
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         crate::git::diag::record_read(read_t.elapsed());
         Ok(count)
     }
@@ -225,12 +225,12 @@ impl LibGitLogScanner {
         output: &mut DataChunkHandle,
         column_indices: &[u64],
     ) -> Result<u32, Box<dyn Error>> {
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         let read_t = Instant::now();
 
         let handle = CachedRepo::open(&self.inner.repo_path)?;
         let repo = handle.repo();
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         {
             crate::git::diag::record_walker_identity(
                 crate::git::diag::thread_id_bits(),
@@ -245,7 +245,7 @@ impl LibGitLogScanner {
         let mut guard = state.lock().unwrap();
         match &mut *guard {
             InlineState::Done => {
-                #[cfg(feature = "prefetch-stats")]
+                #[cfg(feature = "git-log-stats")]
                 crate::git::diag::record_read(read_t.elapsed());
                 return Ok(0);
             }
@@ -255,11 +255,11 @@ impl LibGitLogScanner {
                     unreachable!("Pending branch");
                 };
                 let mut cache = proj.needs_emit_cache().then(HashMap::new);
-                #[cfg(feature = "prefetch-stats")]
+                #[cfg(feature = "git-log-stats")]
                 let walk_t = Instant::now();
                 match start_commit_date_walk(repo, prep.clone(), proj, cache.as_mut()) {
                     Ok(walk) => {
-                        #[cfg(feature = "prefetch-stats")]
+                        #[cfg(feature = "git-log-stats")]
                         crate::git::diag::record_walk(walk_t.elapsed());
                         *guard = InlineState::Active { walk, cache };
                     }
@@ -281,15 +281,15 @@ impl LibGitLogScanner {
         let mut count = 0u32;
         let mut exhausted = false;
         while (count as usize) < batch_size {
-            #[cfg(feature = "prefetch-stats")]
+            #[cfg(feature = "git-log-stats")]
             let walk_step_t = Instant::now();
             match walk_next_oid(repo, first_parent, proj, walk, cache.as_mut())? {
                 Some(oid_bytes) => {
-                    #[cfg(feature = "prefetch-stats")]
+                    #[cfg(feature = "git-log-stats")]
                     crate::git::diag::record_walk(walk_step_t.elapsed());
                     let oid = bytes_to_oid(oid_bytes);
                     writer.begin_row(count as usize);
-                    #[cfg(feature = "prefetch-stats")]
+                    #[cfg(feature = "git-log-stats")]
                     let emit_step_t = Instant::now();
                     if let Some(cache) = cache.as_mut() {
                         let meta = cache.remove(&oid_bytes).ok_or_else(|| {
@@ -307,12 +307,12 @@ impl LibGitLogScanner {
                         writer.decorate_name(name);
                     }
                     writer.finish_row();
-                    #[cfg(feature = "prefetch-stats")]
+                    #[cfg(feature = "git-log-stats")]
                     crate::git::diag::record_emit(emit_step_t.elapsed());
                     count += 1;
                 }
                 None => {
-                    #[cfg(feature = "prefetch-stats")]
+                    #[cfg(feature = "git-log-stats")]
                     crate::git::diag::record_walk(walk_step_t.elapsed());
                     exhausted = true;
                     break;
@@ -325,21 +325,21 @@ impl LibGitLogScanner {
         drop(guard);
 
         if count == 0 {
-            #[cfg(feature = "prefetch-stats")]
+            #[cfg(feature = "git-log-stats")]
             crate::git::diag::record_read(read_t.elapsed());
-            #[cfg(feature = "prefetch-stats")]
+            #[cfg(feature = "git-log-stats")]
             if exhausted {
-                crate::git::diag::dump_prefetch_stats_if_env();
+                crate::git::diag::dump_git_log_stats_if_env();
             }
             return Ok(0);
         }
 
         writer.finish();
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         crate::git::diag::record_read(read_t.elapsed());
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         if exhausted {
-            crate::git::diag::dump_prefetch_stats_if_env();
+            crate::git::diag::dump_git_log_stats_if_env();
         }
         Ok(count)
     }
@@ -356,7 +356,7 @@ impl LibGitLogScanner {
         let empty_refs: Vec<String> = Vec::new();
         let skip_file_changes = !schema::needs_file_changes(column_indices);
         let mut ring = BlobRing::new();
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         let emit_t = Instant::now();
         let result = (|| {
             for (batch_idx, item) in batch.iter().enumerate() {
@@ -387,7 +387,7 @@ impl LibGitLogScanner {
             writer.finish();
             Ok(batch.len() as u32)
         })();
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         crate::git::diag::record_emit(emit_t.elapsed());
         crate::git::backend::libgit::flush_blob_ring_stats();
         result

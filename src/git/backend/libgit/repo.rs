@@ -25,7 +25,7 @@ impl CachedRepo {
             }
             _ => Repository::open(repo_path),
         })?;
-        #[cfg(feature = "prefetch-stats")]
+        #[cfg(feature = "git-log-stats")]
         crate::git::diag::record_cached_repo_open(from_cache);
         Ok(CachedRepo {
             repo: Some(repo),

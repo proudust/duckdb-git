@@ -1,7 +1,7 @@
-//! Opt-in diagnostics for git_log scan engines (`prefetch-stats` feature).
+//! Opt-in diagnostics for git_log scan engines (`git-log-stats` feature).
 //!
 //! Covers both Inline (metadata-only) and Prefetch (with_diff) paths. Enable with
-//! `--features prefetch-stats` and optionally `GIT_LOG_PREFETCH_STATS=1` to eprint
+//! `--features git-log-stats` and optionally `GIT_LOG_STATS=1` to eprint
 //! a snapshot when a scan finishes (Inline exhaustion or Prefetch buffer drop).
 
 use std::collections::HashSet;
@@ -12,14 +12,14 @@ use std::time::Duration;
 fn env_dump_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var_os("GIT_LOG_PREFETCH_STATS")
+        std::env::var_os("GIT_LOG_STATS")
             .map(|v| v == "1")
             .unwrap_or(false)
     })
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct PrefetchStats {
+pub struct GitLogStats {
     pub push_count: u64,
     pub full_blocks: u64,
     pub full_wait_ns: u64,
@@ -41,7 +41,7 @@ pub struct PrefetchStats {
     pub cached_repo_misses: u64,
 }
 
-impl PrefetchStats {
+impl GitLogStats {
     pub fn format_report(&self) -> String {
         let same_thread = self.walker_tid != 0
             && self.first_read_tid != 0
@@ -55,7 +55,7 @@ impl PrefetchStats {
             ""
         };
         format!(
-            "prefetch-stats\n\
+            "git-log-stats\n\
              {engine_note}\
              \tpush_count={}\n\
              \tfull_blocks={} full_wait_ms={:.3}\n\
@@ -116,7 +116,7 @@ static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 
 static READ_TIDS: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
 
-pub fn reset_prefetch_stats() {
+pub fn reset_git_log_stats() {
     PUSH_COUNT.store(0, Ordering::Relaxed);
     FULL_BLOCKS.store(0, Ordering::Relaxed);
     FULL_WAIT_NS.store(0, Ordering::Relaxed);
@@ -139,8 +139,8 @@ pub fn reset_prefetch_stats() {
     *READ_TIDS.lock().unwrap() = Some(HashSet::new());
 }
 
-pub fn snapshot_prefetch_stats() -> PrefetchStats {
-    PrefetchStats {
+pub fn snapshot_git_log_stats() -> GitLogStats {
+    GitLogStats {
         push_count: PUSH_COUNT.load(Ordering::Relaxed),
         full_blocks: FULL_BLOCKS.load(Ordering::Relaxed),
         full_wait_ns: FULL_WAIT_NS.load(Ordering::Relaxed),
@@ -163,9 +163,9 @@ pub fn snapshot_prefetch_stats() -> PrefetchStats {
     }
 }
 
-pub fn dump_prefetch_stats_if_env() {
+pub fn dump_git_log_stats_if_env() {
     if env_dump_enabled() {
-        eprintln!("{}", snapshot_prefetch_stats().format_report());
+        eprintln!("{}", snapshot_git_log_stats().format_report());
     }
 }
 

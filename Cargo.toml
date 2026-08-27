@@ -29,8 +29,8 @@ libgit-backend = ["dep:git2"]
 gix-backend = ["dep:gix", "gix/max-performance-safe", "gix/basic"]
 # Record BlobRing hit/insert counters (off by default; type/reset/snapshot stay).
 blob-ring-stats = []
-# Prefetch ring / walker vs emit diagnostics (off by default).
-prefetch-stats = []
+# git_log scan diagnostics for Inline + Prefetch (off by default).
+git-log-stats = []
 
 [dependencies]
 duckdb = { version = "~1.10505.0", features = ["vtab"] }
@@ -69,6 +69,6 @@ harness = false
 required-features = ["libgit-backend", "blob-ring-stats"]
 
 [[example]]
-name = "prefetch_diag"
-path = "examples/prefetch_diag.rs"
-required-features = ["bundled", "libgit-backend", "gix-backend", "prefetch-stats"]
+name = "git_log_diag"
+path = "examples/git_log_diag.rs"
+required-features = ["bundled", "libgit-backend", "gix-backend", "git-log-stats"]

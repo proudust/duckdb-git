@@ -139,13 +139,18 @@ fn print_with_diff(label: &str, path: &str, backend: &str, threads: usize) {
         stats.push_count > 0,
         "expected Prefetch ring pushes, got push_count=0 (Inline?)"
     );
+    assert_eq!(
+        stats.emit_find_commit, 0,
+        "Prefetch with_diff must not call emit find_commit (got {})",
+        stats.emit_find_commit
+    );
     assert!(
         stats.walker_find_commit > 0,
         "walker should find_commit during inspect (got {})",
         stats.walker_find_commit
     );
     println!(
-        "\tok: walker_find_commit={} push_count={}",
+        "\tok: emit_find_commit=0 walker_find_commit={} push_count={}",
         stats.walker_find_commit, stats.push_count
     );
 }

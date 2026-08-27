@@ -50,9 +50,9 @@ impl GitLogStats {
             && self.first_emit_repo_ptr != 0
             && self.walker_repo_ptr == self.first_emit_repo_ptr;
         let engine_note = if self.push_count == 0 && self.take_batch_count == 0 {
-            "\tengine=Inline (ring metrics N/A)\n"
+            "\tengine=Inline (ring metrics N/A; walk/emit nested in read)\n"
         } else {
-            ""
+            "\tengine=Prefetch (walk concurrent; read includes take_batch wait + emit)\n"
         };
         format!(
             "git-log-stats\n\

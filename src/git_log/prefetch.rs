@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
 #[cfg(feature = "prefetch-stats")]
 use std::time::Instant;
 
@@ -54,27 +53,15 @@ impl<T> Inner<T> {
                 return true;
             }
             #[cfg(feature = "prefetch-stats")]
-            {
-                let t0 = Instant::now();
-                queue = self
-                    .not_full
-                    .wait_timeout(queue, Duration::from_millis(5))
-                    .unwrap()
-                    .0;
-                crate::git::diag::record_full_wait(t0.elapsed());
-            }
-            #[cfg(not(feature = "prefetch-stats"))]
-            {
-                queue = self
-                    .not_full
-                    .wait_timeout(queue, Duration::from_millis(5))
-                    .unwrap()
-                    .0;
-            }
+            let t0 = Instant::now();
+            queue = self.not_full.wait(queue).unwrap();
+            #[cfg(feature = "prefetch-stats")]
+            crate::git::diag::record_full_wait(t0.elapsed());
         }
     }
 
     fn set_error(&self, message: String) {
+        let _guard = self.queue.lock().unwrap();
         *self.error.lock().unwrap() = Some(message);
         self.cancelled.store(true, Ordering::Release);
         self.not_empty.notify_all();
@@ -82,15 +69,19 @@ impl<T> Inner<T> {
     }
 
     fn mark_finished(&self) {
+        let _guard = self.queue.lock().unwrap();
         self.finished.store(true, Ordering::Release);
         self.not_empty.notify_all();
         self.not_full.notify_all();
     }
 
     fn cancel_and_join(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        self.not_empty.notify_all();
-        self.not_full.notify_all();
+        {
+            let _guard = self.queue.lock().unwrap();
+            self.cancelled.store(true, Ordering::Release);
+            self.not_empty.notify_all();
+            self.not_full.notify_all();
+        }
         if let Some(handle) = self.walker_join.lock().unwrap().take() {
             let _ = handle.join();
         }
@@ -191,29 +182,13 @@ impl<T> PrefetchBuffer<T> {
                 crate::git::diag::record_take_batch(t_batch.elapsed());
                 return Ok(Vec::new());
             }
-            if inner.cancelled.load(Ordering::Acquire) {
-                #[cfg(feature = "prefetch-stats")]
-                crate::git::diag::record_take_batch(t_batch.elapsed());
-                return Ok(Vec::new());
-            }
+            // cancelled+empty is handled above under the same queue lock; flag
+            // publishers also take queue before notify, so no separate branch here.
             #[cfg(feature = "prefetch-stats")]
-            {
-                let t0 = Instant::now();
-                queue = inner
-                    .not_empty
-                    .wait_timeout(queue, Duration::from_millis(5))
-                    .unwrap()
-                    .0;
-                crate::git::diag::record_empty_wait(t0.elapsed());
-            }
-            #[cfg(not(feature = "prefetch-stats"))]
-            {
-                queue = inner
-                    .not_empty
-                    .wait_timeout(queue, Duration::from_millis(5))
-                    .unwrap()
-                    .0;
-            }
+            let t0 = Instant::now();
+            queue = inner.not_empty.wait(queue).unwrap();
+            #[cfg(feature = "prefetch-stats")]
+            crate::git::diag::record_empty_wait(t0.elapsed());
         }
     }
 }
@@ -244,6 +219,7 @@ pub fn fixed_max_threads(libgit: bool, needs_file_changes: bool) -> u64 {
 mod tests {
     use super::*;
     use crate::git::date_walk::OidBytes;
+    use std::time::Duration;
 
     fn oid(n: u8) -> OidBytes {
         let mut b = [0u8; 20];
@@ -273,10 +249,64 @@ mod tests {
     }
 
     #[test]
+    fn take_batch_wakes_on_mark_finished_empty_ring() {
+        use std::sync::mpsc;
+
+        let buf: PrefetchBuffer<OidBytes> = PrefetchBuffer::new(4);
+        let producer = buf.producer();
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        let consumer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let batch = buf.take_batch(10).unwrap();
+            assert!(batch.is_empty());
+            let _ = done_tx.send(());
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("consumer should enter take_batch");
+        // Give consumer time to reach not_empty.wait on an empty ring.
+        std::thread::sleep(Duration::from_millis(50));
+        producer.mark_finished();
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("mark_finished must wake empty-ring take_batch");
+        consumer.join().unwrap();
+    }
+
+    #[test]
     fn cancel_stops_push() {
         let buf: PrefetchBuffer<OidBytes> = PrefetchBuffer::new(2);
         buf.inner.cancelled.store(true, Ordering::Release);
         assert!(!buf.producer().push(oid(1)));
+    }
+
+    #[test]
+    fn drop_joins_blocked_walker_within_timeout() {
+        use std::sync::mpsc;
+
+        let buf = PrefetchBuffer::new(2);
+        let producer = buf.producer();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+        let walker = std::thread::spawn(move || {
+            assert!(producer.push(oid(1)));
+            assert!(producer.push(oid(2)));
+            ready_tx.send(()).unwrap();
+            assert!(!producer.push(oid(3)));
+        });
+        buf.attach_walker(walker);
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("walker should block on full ring");
+
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        std::thread::spawn(move || {
+            drop(buf);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("drop should join blocked walker within 5s");
     }
 
     #[test]

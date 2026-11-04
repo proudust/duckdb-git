@@ -31,7 +31,7 @@ gix-backend = ["dep:gix", "gix/max-performance-safe", "gix/basic"]
 blob-ring-stats = []
 
 [dependencies]
-duckdb = { version = "~1.10505.0", features = ["vtab"] }
+duckdb = { version = "~1.10506.0", features = ["vtab"] }
 # Fork of git2-rs that vendors libgit2 with a 96 MB pack cache (git-like).
 # https://github.com/proudust/git2-rs/tree/duckdb-git/pack-cache
 git2 = { git = "https://github.com/proudust/git2-rs", branch = "duckdb-git/pack-cache", default-features = false, features = [

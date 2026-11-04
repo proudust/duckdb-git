@@ -11,6 +11,11 @@ USE_UNSTABLE_C_API=1
 # Target DuckDB version
 TARGET_DUCKDB_VERSION=v1.5.6
 
+# Pin the sqllogictest runner to the targeted DuckDB. Left unset, `make configure`
+# installs the latest release from PyPI, which refuses to load an extension built
+# for an older DuckDB once a newer one ships.
+DUCKDB_TEST_VERSION?=$(TARGET_DUCKDB_VERSION:v%=%)
+
 all: configure debug
 
 # Include makefiles from DuckDB

@@ -26,7 +26,7 @@ loadable-extension = ["duckdb/loadable-extension"]
 bundled = ["duckdb/bundled"]                       # For benchmark
 libgit-backend = ["dep:git2"]
 # Additive: can be combined with libgit-backend (default) for runtime backend selection.
-gix-backend = ["dep:gix", "gix/max-performance-safe", "gix/basic"]
+gix-backend = ["dep:gix", "gix/max-performance", "gix/basic"]
 # Record BlobRing hit/insert counters (off by default; type/reset/snapshot stay).
 blob-ring-stats = []
 
@@ -39,7 +39,7 @@ git2 = { git = "https://github.com/proudust/git2-rs", branch = "duckdb-git/pack-
     "vendored-libgit2",
     "vendored-openssl",
 ], optional = true }
-gix = { version = "0.86", default-features = false, optional = true, features = [
+gix = { version = "0.90", default-features = false, optional = true, features = [
     "blocking-network-client",
     "blocking-http-transport-reqwest-rust-tls",
     "sha1",

@@ -634,6 +634,7 @@ mod gix_remote {
                     *req.timeout_mut() = Some(GIX_REQUEST_TIMEOUT);
                     Ok(())
                 })),
+                ..Default::default()
             }))),
             ..Default::default()
         })

@@ -84,12 +84,13 @@ pub(super) fn emit_file_changes(
 
     let mut resource_cache = repo.diff_resource_cache_for_tree_diff()?;
     // Captured outside the callback so we can surface git's phrasing without
-    // gix wrapping it as "The user-provided callback failed: …".
+    // gix wrapping it as "The user-provided callback failed: …"; the callback
+    // breaks the walk instead of returning the error.
     let mut missing_blob: Option<String> = None;
 
     let walk = parent_tree.changes()?.for_each_to_obtain_tree(
         &current_tree,
-        |change| -> Result<ControlFlow<()>, Box<dyn std::error::Error + Send + Sync>> {
+        |change| -> gix::Result<ControlFlow<()>> {
             use gix::object::tree::diff::Change;
 
             // Directories are reported as their own Addition/Deletion/Modification
@@ -148,7 +149,7 @@ pub(super) fn emit_file_changes(
             } else if let Some(oid) = same_oid_for_numstat(&change) {
                 if let Err(e) = ensure_blobs_readable(repo, &[oid]) {
                     missing_blob = Some(e.to_string());
-                    return Err(e);
+                    return Ok(ControlFlow::Break(()));
                 }
                 let obj = repo.find_object(oid)?;
                 same_oid_numstat(obj.data.as_ref())
@@ -156,7 +157,7 @@ pub(super) fn emit_file_changes(
                 let oids = blob_oids_for_numstat(&change);
                 if let Err(e) = ensure_blobs_readable(repo, &oids) {
                     missing_blob = Some(e.to_string());
-                    return Err(e);
+                    return Ok(ControlFlow::Break(()));
                 }
                 let mut platform = change.diff(&mut resource_cache)?;
                 match platform.line_counts()? {
